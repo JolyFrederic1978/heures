@@ -200,7 +200,8 @@ async function sync() {
     let changed = false;
     for (let i = 0; i < 3; i++) {
       const cur = await OneDrive.get(P.data());
-      if (cur) changed = mergeRemote(JSON.parse(cur.data)) || changed;
+      if (cur && !state.lastSync) { adoptRemote(JSON.parse(cur.data)); changed = true; }
+      else if (cur) changed = mergeRemote(JSON.parse(cur.data)) || changed;
       changed = mergeRemoteClients() || changed;
       changed = seedClients() || changed;      // après la fusion : pas de doublon entre appareils
       const payload = JSON.stringify({ version: 3, entries: state.entries, clients: state.clients, bills: state.bills,
@@ -216,7 +217,7 @@ async function sync() {
     setSync('ok');
     if (changed && !$('#dlg').open) render();
   } catch (e) {
-    if (e instanceof OneDrive.NeedLogin) setSync('login', 'Session expirée : reconnecte-toi dans Réglages.');
+    if (e instanceof OneDrive.NeedLogin) { setSync('login', 'Session expirée : reconnecte-toi.'); render(); }
     else setSync('err', e.message);
   } finally {
     syncing = false;
@@ -229,6 +230,10 @@ const TITLES = { today: "Aujourd'hui", list: 'Interventions', billing: 'Facturer
 const VIEWS = () => ({ today: viewToday, list: viewList, billing: viewBilling, archive: viewArchive, settings: viewSettings });
 function render() {
   clearInterval(tick);
+  // Accès : connexion Microsoft obligatoire, puis code PIN s'il est défini.
+  const gate = !OneDrive.signedIn() ? 'login' : locked ? 'pin' : null;
+  document.body.classList.toggle('locked', !!gate);
+  if (gate) { if ($('#dlg').open) $('#dlg').close(); $('#viewTitle').textContent = 'Heures'; return gate === 'login' ? viewLogin() : viewPin(); }
   $('#viewTitle').textContent = TITLES[tab];
   $$('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   VIEWS()[tab]();
@@ -739,6 +744,13 @@ function viewSettings() {
       </details>
     </div>
 
+    <div class="card"><h2>Code PIN</h2>
+      <p class="small muted">${state.settings.pin ? 'Un code PIN est demandé à l\'ouverture de l\'app et après 5 minutes en arrière-plan, sur tous tes appareils.'
+        : 'Aucun code PIN : l\'app s\'ouvre dès que tu es connecté à Microsoft 365.'}</p>
+      <div class="row"><button class="btn" id="pinSet">${state.settings.pin ? 'Changer le code PIN' : 'Définir un code PIN'}</button>
+        ${state.settings.pin ? '<button class="btn danger" id="pinDel">Supprimer le code PIN</button>' : ''}</div>
+    </div>
+
     <div class="card"><h2>Reprise des données</h2>
       <div class="row">
         <button class="btn" id="importAT">Importer ArchiveTemplate.xlsx</button>
@@ -775,7 +787,12 @@ function viewSettings() {
   ['#odClient', '#odTenant', '#odFolder'].forEach(sel => $(sel).onchange = saveOd);
   if ($('#odIn')) $('#odIn').onclick = () => OneDrive.login().catch(e => alert(e.message));
   if ($('#odSync')) $('#odSync').onclick = () => { state.published = {}; sync(); };
-  if ($('#odOut')) $('#odOut').onclick = () => { if (confirm('Se déconnecter de OneDrive ?')) { OneDrive.logout(); sync(); render(); } };
+  if ($('#odOut')) $('#odOut').onclick = () => { if (confirm('Se déconnecter ?\nLa copie locale de cet appareil est effacée ; tes données restent dans OneDrive.')) signOut(); };
+  $('#pinSet').onclick = () => editPin();
+  if ($('#pinDel')) $('#pinDel').onclick = async () => {
+    if (!confirm('Supprimer le code PIN (sur tous tes appareils) ?')) return;
+    delete state.settings.pin; state.settingsAt = Date.now(); await persist(); toast('Code PIN supprimé');
+  };
 
   $('#backup').onclick = () => download(new Blob([JSON.stringify({ entries: state.entries, clients: state.clients, bills: state.bills }, null, 1)],
     { type: 'application/json' }), `heures-sauvegarde-${today()}.json`);
@@ -891,6 +908,103 @@ function importRows(rows, source, askBilled) {
   dlg.showModal();
 }
 
+// ---------- accès : connexion Microsoft obligatoire + code PIN facultatif ----------
+// Le PIN est stocké haché (PBKDF2) dans les réglages synchronisés : même code sur tous les appareils.
+// C'est un verrou d'écran ; la vraie protection des données reste la connexion Microsoft (OneDrive).
+let locked = false, hiddenAt = 0;
+const PIN_RELOCK_MS = 5 * 60000, PIN_MAX_FAILS = 5;
+
+async function pinHash(pin, salt) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: new TextEncoder().encode(salt), iterations: 150000 }, key, 256);
+  return btoa(String.fromCharCode(...new Uint8Array(bits)));
+}
+
+// Déconnexion : on oublie le jeton et la copie locale (les données restent dans OneDrive).
+async function signOut() {
+  OneDrive.logout();
+  const od = state.onedrive;
+  state = DB.defaults(); state.onedrive = od;
+  await DB.save(state);
+  locked = false; tab = 'today';
+  setSync('login', 'Connecte-toi à Microsoft 365.');
+  render();
+}
+
+// Première synchro d'un appareil : OneDrive fait foi (les changements faits avant connexion ne l'écrasent pas).
+// Seules les interventions créées localement et absentes de OneDrive sont conservées.
+function adoptRemote(remote) {
+  const rE = remote.entries || [], rC = remote.clients || [];
+  const ids = new Set(rE.map(e => e.id));
+  const localOnly = state.entries.filter(e => !e.deleted && !ids.has(e.id));
+  const need = new Set(localOnly.map(e => e.clientId));
+  state.entries = [...rE, ...localOnly];
+  state.clients = [...rC, ...state.clients.filter(c => !c.deleted && need.has(c.id) && !rC.some(r => r.id === c.id))];
+  state.bills = remote.bills || [];
+  state.timer = remote.timer ?? null; state.timerAt = remote.timerAt || 0;
+  if (remote.settings) { state.settings = remote.settings; state.settingsAt = remote.settingsAt || 0; }
+  normalizeSettings();
+}
+
+function viewLogin() {
+  $('#view').innerHTML = `
+    <div class="card" style="text-align:center;margin-top:24px">
+      <img src="icons/icon-192.png" alt="" width="72" height="72" style="border-radius:16px">
+      <h2 style="font-size:18px;margin:12px 0 4px">One Level UP · Heures</h2>
+      <p class="muted">Connecte-toi avec ton compte Microsoft 365 pour accéder à tes interventions.</p>
+      <button class="btn primary big" id="loginBtn" ${OneDrive.configured() ? '' : 'disabled'}>Se connecter avec Microsoft 365</button>
+      ${OneDrive.configured() ? '' : '<p class="small"><span class="pill warn">ID d\'application manquant dans la configuration.</span></p>'}
+    </div>`;
+  $('#loginBtn').onclick = () => OneDrive.login().catch(e => alert(e.message));
+}
+
+function viewPin() {
+  const fails = state.pinFails || 0;
+  $('#view').innerHTML = `
+    <div class="card" style="text-align:center;margin-top:24px">
+      <h2 style="font-size:18px">🔒 Code PIN</h2>
+      <p class="small muted">${esc(OneDrive.user())}</p>
+      <form id="pinForm"><input type="password" id="pinIn" inputmode="numeric" autocomplete="off" maxlength="8"
+        style="text-align:center;font-size:24px;letter-spacing:.4em;max-width:220px" autofocus>
+      ${fails ? `<p class="small" style="color:var(--danger)">Code incorrect (${fails}/${PIN_MAX_FAILS})</p>` : ''}
+      <button class="btn primary big" style="margin-top:12px">Déverrouiller</button></form>
+      <p class="small" style="margin-top:14px"><button class="link" id="pinForgot">Code oublié ? Se déconnecter</button></p>
+      <p class="small muted">Après une reconnexion Microsoft, tu peux changer le code dans Réglages.</p>
+    </div>`;
+  $('#pinIn').focus();
+  $('#pinForm').onsubmit = async ev => {
+    ev.preventDefault();
+    const p = state.settings.pin;
+    if (p && await pinHash($('#pinIn').value, p.salt) === p.hash) {
+      locked = false; state.pinFails = 0; await DB.save(state); render(); sync(); return;
+    }
+    state.pinFails = fails + 1; await DB.save(state);
+    if (state.pinFails >= PIN_MAX_FAILS) { alert('Trop d\'essais : déconnexion.'); return signOut(); }
+    render();
+  };
+  $('#pinForgot').onclick = () => { if (confirm('Se déconnecter ? Tu devras te reconnecter avec ton compte Microsoft.')) signOut(); };
+}
+
+function editPin() {
+  const dlg = $('#dlg'), f = $('#dlgForm');
+  f.innerHTML = `<h2>${state.settings.pin ? 'Changer' : 'Définir'} le code PIN</h2>
+    <p class="small muted">4 à 8 chiffres. Le même code sera demandé sur tous tes appareils.</p>
+    <label>Nouveau code</label><input type="password" id="p1" inputmode="numeric" maxlength="8" autocomplete="new-password">
+    <label>Confirmer</label><input type="password" id="p2" inputmode="numeric" maxlength="8" autocomplete="new-password">
+    <div class="actions"><button class="btn" value="cancel">Annuler</button><button class="btn primary" id="pSave">Enregistrer</button></div>`;
+  $('#pSave').onclick = async ev => {
+    ev.preventDefault();
+    const a = $('#p1').value, b = $('#p2').value;
+    if (!/^\d{4,8}$/.test(a)) return alert('Le code doit contenir 4 à 8 chiffres.');
+    if (a !== b) return alert('Les deux codes ne correspondent pas.');
+    const salt = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+    state.settings.pin = { salt, hash: await pinHash(a, salt) };
+    state.settingsAt = Date.now(); state.pinFails = 0;
+    dlg.close(); await persist(); toast('Code PIN enregistré');
+  };
+  dlg.showModal();
+}
+
 // ---------- démarrage ----------
 // Dans les dialogues, seul le bouton principal est "submit" : Entrée enregistre, jamais supprimer/annuler.
 new MutationObserver(() => $$('#dlgForm button').forEach(b => {
@@ -904,18 +1018,25 @@ $$('.tabs button').forEach(b => b.onclick = () => { tab = b.dataset.tab; render(
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; if (tab === 'settings') render(); });
 window.addEventListener('online', sync);
 window.addEventListener('offline', () => setSync('offline', 'Hors ligne : synchro au retour du réseau.'));
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') sync(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+  if (state?.settings.pin && OneDrive.signedIn() && hiddenAt && Date.now() - hiddenAt > PIN_RELOCK_MS) { locked = true; render(); }
+  if (!locked) sync();
+});
 
 (async () => {
   state = await DB.load();
   normalizeSettings();
   OneDrive.configure(() => state.onedrive);
-  // Sans OneDrive connecté, on ajoute la liste tout de suite ; sinon pendant la synchro (après fusion des données).
-  if (mergeRemoteClients() | (!OneDrive.signedIn() && seedClients())) await DB.save(state);
-  try { if (await OneDrive.handleRedirect()) { tab = 'settings'; toast('Connecté à OneDrive'); } }
-  catch (e) { alert('Connexion OneDrive : ' + e.message); }
+  if (mergeRemoteClients()) await DB.save(state);
+  let justLoggedIn = false;
+  try { if ((justLoggedIn = await OneDrive.handleRedirect())) toast('Connecté'); }
+  catch (e) { alert('Connexion Microsoft : ' + e.message); }
+  // PIN demandé à l'ouverture, sauf juste après une connexion Microsoft (permet de changer un code oublié).
+  locked = !!state.settings.pin && OneDrive.signedIn() && !justLoggedIn;
+  if (justLoggedIn) { state.pinFails = 0; await DB.save(state); }
   render();
-  sync();
+  if (!locked) sync();
   navigator.storage?.persist?.();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
     navigator.serviceWorker.register('sw.js');
