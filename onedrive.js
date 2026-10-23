@@ -72,12 +72,14 @@ const OneDrive = (() => {
 
   // Renvoie { data, etag } (data en texte ou ArrayBuffer) ou null si le fichier n'existe pas.
   async function get(path, as = 'text') {
-    const r = await graph(itemPath(path) + '?$select=eTag,@microsoft.graph.downloadUrl');
+    // Pas de $select : OneDrive Entreprise omet alors @microsoft.graph.downloadUrl.
+    const r = await graph(itemPath(path));
     if (r.status === 404) return null;
     if (!r.ok) throw new Error(`OneDrive (${r.status}) : lecture de ${path} impossible.`);
     const meta = await r.json();
-    const c = await fetch(meta['@microsoft.graph.downloadUrl'], { cache: 'no-store' });
-    if (!c.ok) throw new Error(`OneDrive : téléchargement de ${path} impossible.`);
+    const url = meta['@microsoft.graph.downloadUrl'];
+    const c = url ? await fetch(url, { cache: 'no-store' }) : await graph(itemPath(path) + '/content', { cache: 'no-store' });
+    if (!c.ok) throw new Error(`OneDrive (${c.status}) : téléchargement de ${path} impossible.`);
     return { data: as === 'buffer' ? await c.arrayBuffer() : await c.text(), etag: meta.eTag };
   }
 

@@ -214,7 +214,7 @@ function entryLi(e, { showDate = false, showBill = true } = {}) {
       <div><strong>${esc(client(e.clientId).name)}</strong> ${e.onSite ? '<span class="pill">sur site</span>' : '<span class="pill">à distance</span>'}
         ${e.alescom ? '<span class="pill warn">alescom</span>' : ''}
         ${showBill && b ? `<span class="pill ok">facturé ${frDate(b.date)}${b.ref ? ' · ' + esc(b.ref) : ''}</span>` : ''}</div>
-      <div class="small muted">${showDate ? frDate(e.date) + ' · ' : ''}${e.start}–${e.end}${e.pauseMin ? ` · pause ${fmtDur(e.pauseMin)}` : ''}${e.install ? ' · ' + esc(e.install) : ''}</div>
+      <div class="small muted">${showDate ? frDate(e.date) + ' · ' : ''}${e.forfait ? 'forfait' : `${e.start}–${e.end}`}${e.pauseMin ? ` · pause ${fmtDur(e.pauseMin)}` : ''}${e.install ? ' · ' + esc(e.install) : ''}</div>
       ${e.description ? `<div class="small">${esc(e.description)}</div>` : ''}
     </div>
     <div class="dur">${fmtDur(e.minutes)}</div></li>`;
@@ -270,7 +270,8 @@ function viewToday() {
           <button class="btn primary grow" id="tStop">■ Arrêter</button></div>`
       : lastC ? `
         <select id="tClient">${clientOptions(lastC.id)}</select>
-        ${flags(lastC.defaultOnSite, lastC.defaultAlescom, 't')}
+        <input id="tDesc0" placeholder="Description de l'intervention" style="margin-top:10px">
+        ${flags(false, lastC.defaultAlescom, 't')}
         <div class="row" style="justify-content:center;margin-bottom:10px">
           <span class="small muted">Début</span>
           <input type="time" id="tAt" style="width:auto">
@@ -280,6 +281,10 @@ function viewToday() {
       : `<p class="muted">Commence par ajouter un client dans Réglages.</p>`}
     </div>
     <button class="btn big" id="addManual">+ Ajouter une intervention</button>
+    <div class="grid2" style="margin-top:10px">
+      <button class="btn" id="addMaint">🛠 Maintenance serveur</button>
+      <button class="btn" id="addUpd">⟳ Mise à jour serveur</button>
+    </div>
     <div class="kpis" style="margin-top:12px">
       <div class="kpi"><div class="v">${fmtDur(sum(todays))}</div><div class="l">aujourd'hui</div></div>
       <div class="kpi"><div class="v">${fmtDur(sum(week))}</div><div class="l">cette semaine</div></div>
@@ -290,6 +295,8 @@ function viewToday() {
     </div>`;
 
   $('#addManual').onclick = () => openEntry(null);
+  $('#addMaint').onclick = () => openForfait(null, 'maint');
+  $('#addUpd').onclick = () => openForfait(null, 'update');
   $('#goBill').onclick = () => { tab = 'billing'; render(); };
   bindEdits();
 
@@ -328,15 +335,12 @@ function viewToday() {
       }, true);
     };
   } else if ($('#tStart')) {
-    $('#tClient').onchange = ev => {
-      const c = client(ev.target.value);
-      $('#tSite').checked = !!c.defaultOnSite; $('#tAles').checked = !!c.defaultAlescom;
-    };
+    $('#tClient').onchange = ev => { $('#tAles').checked = !!client(ev.target.value).defaultAlescom; };
     $('#tStart').onclick = async () => {
       const at = $('#tAt').value;
       const start = at ? startFromTime(at) : new Date();
       state.lastClientId = $('#tClient').value;
-      setTimer({ clientId: state.lastClientId, start: start.toISOString(), description: '',
+      setTimer({ clientId: state.lastClientId, start: start.toISOString(), description: $('#tDesc0').value.trim(),
         onSite: $('#tSite').checked, alescom: $('#tAles').checked, pausedMs: 0, pausedAt: null });
       await persist();
     };
@@ -345,10 +349,11 @@ function viewToday() {
 
 // ---- dialogue intervention ----
 function openEntry(entry, preset = {}, fromTimer = false) {
+  if (entry?.forfait) return openForfait(entry);
   const c0 = state.clients.find(c => c.id === state.lastClientId && !c.deleted) || activeClients()[0];
   const e = entry || {
     clientId: c0?.id, date: today(), start: hhmm(new Date(Date.now() - 3600e3)), end: hhmm(new Date()), minutes: 60, pauseMin: 0,
-    description: '', install: '', onSite: !!c0?.defaultOnSite, alescom: !!c0?.defaultAlescom, ...preset
+    description: '', install: '', onSite: false, alescom: !!c0?.defaultAlescom, ...preset
   };
   if (!e.clientId) return alert("Ajoute d'abord un client dans Réglages.");
   const b = e.billId && bill(e.billId);
@@ -389,12 +394,9 @@ function openEntry(entry, preset = {}, fromTimer = false) {
     if (ev.target.value === '__new') {
       const name = (prompt('Nom du nouveau client :') || '').trim();
       let c = name && state.clients.find(x => !x.deleted && x.name.toLowerCase() === name.toLowerCase());
-      if (name && !c) state.clients.push(c = touch({ id: uid('c'), name, billitName: '', defaultOnSite: true, defaultAlescom: false }));
+      if (name && !c) state.clients.push(c = touch({ id: uid('c'), name, billitName: '', defaultOnSite: false, defaultAlescom: false }));
       ev.target.innerHTML = clientOptions(c?.id || e.clientId) + '<option value="__new">+ Nouveau client…</option>';
-    } else if (!entry) {
-      const c = client(ev.target.value);
-      $('#fSite').checked = !!c.defaultOnSite; $('#fAles').checked = !!c.defaultAlescom;
-    }
+    } else if (!entry) $('#fAles').checked = !!client(ev.target.value).defaultAlescom;
   };
   if ($('#fDel')) $('#fDel').onclick = async () => {
     if (!confirm('Supprimer cette intervention ?')) return;
@@ -420,6 +422,68 @@ function openEntry(entry, preset = {}, fromTimer = false) {
     dlg.close(); await persist(); toast('Enregistré');
   };
   dlg.showModal();
+}
+
+// ---- forfaits serveur : une date et une durée, sans heures de début / fin ----
+const FORFAITS = { maint: 'Maintenance serveur', update: 'Mise à jour serveur' };
+const serverCount = c => c?.server ? Math.max(1, +c.servers || 1) : 0;
+// Mise à jour serveur : 15 min pour 1 serveur, 10 min par serveur au-delà.
+const updateMinutes = c => { const n = serverCount(c) || 1; return n === 1 ? 15 : 10 * n; };
+
+function openForfait(entry, kind) {
+  kind = entry?.forfait || kind;
+  const label = FORFAITS[kind];
+  const clients = activeClients().sort((a, b) => (serverCount(b) > 0) - (serverCount(a) > 0) || a.name.localeCompare(b.name));
+  const c0 = entry ? client(entry.clientId)
+    : clients.find(c => c.id === state.lastClientId && (kind === 'maint' || c.server)) || clients.find(c => c.server) || clients[0];
+  if (!c0) return alert("Ajoute d'abord un client dans Réglages.");
+  const e = entry || { clientId: c0.id, date: today(), minutes: kind === 'update' ? updateMinutes(c0) : 0,
+    description: label, onSite: false, alescom: !!c0.defaultAlescom };
+  const b = e.billId && bill(e.billId);
+  const opts = clients.map(c => `<option value="${c.id}" ${c.id === e.clientId ? 'selected' : ''}>${esc(c.name)}${c.server ? ` · ${serverCount(c)} serveur(s)` : ''}</option>`).join('');
+  const hint = c => kind !== 'update' ? 'Forfait : seule la durée est facturée.'
+    : c.server ? `${serverCount(c)} serveur(s) → ${fmtDur(updateMinutes(c))}` : 'Client sans serveur renseigné (fiche client) : 15 min par défaut.';
+
+  const dlg = $('#dlg'), f = $('#dlgForm');
+  f.innerHTML = `<h2>${esc(label)}</h2>
+    ${b ? `<p class="small"><span class="pill ok">facturée le ${frDate(b.date)}${b.ref ? ' · ' + esc(b.ref) : ''}</span></p>` : ''}
+    <label>Client</label><select id="kClient">${opts}</select>
+    <div class="grid2">
+      <div><label>Date</label><input type="date" id="kDate" value="${e.date}"></div>
+      <div><label>Durée (H:MM)</label><input id="kDur" value="${e.minutes ? fmtDur(e.minutes) : ''}" placeholder="ex. 1:30"></div>
+    </div>
+    <p class="small muted" id="kHint">${esc(hint(client(e.clientId)))}</p>
+    <label>Description</label><textarea id="kDesc">${esc(e.description)}</textarea>
+    ${flags(e.onSite, e.alescom, 'k')}
+    <div class="actions">
+      ${entry && !b ? '<button class="btn danger" id="kDel" style="margin-right:auto">Supprimer</button>' : ''}
+      <button class="btn" value="cancel">Annuler</button>
+      <button class="btn primary" id="kSave">Enregistrer</button>
+    </div>`;
+  $('#kClient').onchange = ev => {
+    const c = client(ev.target.value);
+    $('#kHint').textContent = hint(c);
+    if (kind === 'update') $('#kDur').value = fmtDur(updateMinutes(c));
+    if (!entry) $('#kAles').checked = !!c.defaultAlescom;
+  };
+  if ($('#kDel')) $('#kDel').onclick = async () => {
+    if (!confirm('Supprimer cette intervention ?')) return;
+    entry.deleted = true; touch(entry); dlg.close(); await persist(); toast('Intervention supprimée');
+  };
+  $('#kSave').onclick = async ev => {
+    ev.preventDefault();
+    const minutes = parseDur($('#kDur').value);
+    if (isNaN(minutes) || minutes <= 0) return alert('Encode une durée (ex. 0:45 ou 1:30).');
+    if (b && !confirm('Cette intervention est déjà facturée. Modifier quand même l\'archive ?')) return;
+    const data = { clientId: $('#kClient').value, date: $('#kDate').value, start: '', end: '', minutes, pauseMin: 0,
+      description: $('#kDesc').value.trim(), onSite: $('#kSite').checked, alescom: $('#kAles').checked, install: '', forfait: kind };
+    if (entry) Object.assign(touch(entry), data);
+    else state.entries.push(touch({ id: uid('e'), billId: null, ...data }));
+    state.lastClientId = data.clientId;
+    dlg.close(); await persist(); toast('Enregistré');
+  };
+  dlg.showModal();
+  if (kind === 'maint' && !entry) $('#kDur').focus();
 }
 
 // ---- Interventions ----
@@ -499,7 +563,7 @@ function viewBillingTarget(key, all) {
     </div>
     <div class="card"><h2>Interventions (${sel.length}/${es.length})</h2>
       <ul class="list">${es.map(e => `<li><input type="checkbox" data-inc="${e.id}" ${excluded.has(e.id) ? '' : 'checked'}>
-        <div class="grow tap" data-edit="${e.id}"><div><strong>${frDate(e.date)}</strong> ${e.start}–${e.end}
+        <div class="grow tap" data-edit="${e.id}"><div><strong>${frDate(e.date)}</strong> ${e.forfait ? 'forfait' : `${e.start}–${e.end}`}
           ${info.partner ? '· ' + esc(client(e.clientId).name) : ''} ${e.onSite ? '<span class="pill">sur site</span>' : ''}</div>
           <div class="small muted">${esc(e.description)}${e.install ? ' · ' + esc(e.install) : ''}</div></div>
         <div class="dur">${fmtDur(e.minutes)}</div></li>`).join('')}</ul></div>`;
@@ -614,7 +678,7 @@ function viewSettings() {
     <div class="card"><div class="row"><h2 class="grow" style="margin:0">Clients</h2><button class="btn" id="addClient">+ Ajouter</button></div>
       <ul class="list" style="margin-top:8px">${state.clients.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name)).map(c => `
         <li class="tap" data-client="${c.id}"><div class="grow"><strong>${esc(c.name)}</strong> ${c.archived ? '<span class="pill">archivé</span>' : ''}
-          <div class="small muted">Billit : ${esc(c.billitName || '—')} · ${c.defaultOnSite ? 'sur site' : 'à distance'}${c.defaultAlescom ? ' · alescom' : ''}</div></div></li>`).join('')}</ul>
+          <div class="small muted">Billit : ${esc(c.billitName || '—')}${c.server ? ` · ${serverCount(c)} serveur(s)` : ''}${c.defaultAlescom ? ' · alescom' : ''}</div></div></li>`).join('')}</ul>
       <label>Nom Billit du commanditaire alescom</label><input id="alesBillit" value="${esc(s.alescomBillit)}">
     </div>
 
@@ -702,12 +766,17 @@ function editClient(c) {
   f.innerHTML = `<h2>${c ? 'Modifier' : 'Nouveau'} client</h2>
     <label>Nom</label><input id="cName" value="${esc(c?.name)}" placeholder="ex. Vedi">
     <label>Nom du client dans Billit</label><input id="cBillit" value="${esc(c?.billitName)}" placeholder="ex. V.T.S. SA">
-    <label class="check"><input type="checkbox" id="cSite" ${!c || c.defaultOnSite ? 'checked' : ''}> Sur site par défaut</label>
     <label class="check"><input type="checkbox" id="cAles" ${c?.defaultAlescom ? 'checked' : ''}> Commanditaire alescom par défaut</label>
+    <div class="row">
+      <label class="check grow"><input type="checkbox" id="cServer" ${c?.server ? 'checked' : ''}> Serveur(s)</label>
+      <div id="cServersBox" class="${c?.server ? '' : 'hidden'}" style="width:140px"><label style="margin-top:0">Nombre de serveurs</label>
+        <input type="number" id="cServers" min="1" step="1" value="${c?.servers || 1}"></div>
+    </div>
     ${c ? `<label class="check"><input type="checkbox" id="cArch" ${c.archived ? 'checked' : ''}> Archivé (masqué des listes)</label>` : ''}
     <div class="actions">
       ${c && !used ? '<button class="btn danger" id="cDel" style="margin-right:auto">Supprimer</button>' : ''}
       <button class="btn" value="cancel">Annuler</button><button class="btn primary" id="cSave">Enregistrer</button></div>`;
+  $('#cServer').onchange = ev => $('#cServersBox').classList.toggle('hidden', !ev.target.checked);
   if ($('#cDel')) $('#cDel').onclick = async () => { c.deleted = true; touch(c); dlg.close(); await persist(); };
   $('#cSave').onclick = async ev => {
     ev.preventDefault();
@@ -715,7 +784,9 @@ function editClient(c) {
     if (!name) return alert('Nom requis.');
     if (/\b(remote|distance)\b/i.test(name)) return alert('Retire « remote » / « distance » du nom : utilise la case « Sur site ».');
     if (state.clients.some(x => x !== c && !x.deleted && x.name.toLowerCase() === name.toLowerCase())) return alert('Ce client existe déjà.');
-    const data = { name, billitName: $('#cBillit').value.trim(), defaultOnSite: $('#cSite').checked, defaultAlescom: $('#cAles').checked, archived: !!$('#cArch')?.checked };
+    const server = $('#cServer').checked, servers = Math.max(1, parseInt($('#cServers').value, 10) || 1);
+    const data = { name, billitName: $('#cBillit').value.trim(), defaultAlescom: $('#cAles').checked, archived: !!$('#cArch')?.checked,
+      server, servers: server ? servers : 0 };
     if (c) Object.assign(touch(c), data); else state.clients.push(touch({ id: uid('c'), ...data }));
     dlg.close(); await persist();
   };

@@ -17,7 +17,8 @@ const Xlsx = (() => {
   }
 
   const date = d => { const [y, m, j] = d.split('-').map(Number); return new Date(Date.UTC(y, m - 1, j)); };
-  const time = hm => { const [h, m] = hm.split(':').map(Number); return new Date(Date.UTC(1899, 11, 30, h, m)); };
+  // Forfaits (maintenance / mise à jour serveur) : pas d'heures, cellule vide.
+  const time = hm => { if (!hm) return null; const [h, m] = hm.split(':').map(Number); return new Date(Date.UTC(1899, 11, 30, h, m)); };
 
   async function build(head, rows, { dateCols = [], timeCols = [], widths = [], total = null, filter = false } = {}) {
     await load();

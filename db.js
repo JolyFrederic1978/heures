@@ -38,7 +38,8 @@ const DB = (() => {
       },
       settingsAt: 0,
       // Propre à cet appareil
-      onedrive: { clientId: '', tenant: 'organizations', folder: 'Compta/TimeSheet' },
+      // Inscription Entra « Heures OLU » (One Level UP sprl) – identifiants publics, pas des secrets.
+      onedrive: { clientId: '0b486fd1-e8f9-4933-94cd-49c5df20d6d6', tenant: 'eb79b929-d806-4ec9-8282-a93399a8ca66', folder: 'Compta/TimeSheet' },
       published: {}, lastClientId: null, lastSync: 0
     };
   }
@@ -46,7 +47,10 @@ const DB = (() => {
   return {
     async load() {
       const s = await tx('readonly', st => st.get(KEY));
-      return s ? { ...defaults(), ...s } : defaults();
+      if (!s) return defaults();
+      const d = defaults();
+      if (!s.onedrive?.clientId) s.onedrive = { ...d.onedrive, folder: s.onedrive?.folder || d.onedrive.folder };
+      return { ...d, ...s };
     },
     save(state) { return tx('readwrite', st => st.put(state, KEY)); },
     defaults
