@@ -33,6 +33,7 @@ const DB = (() => {
         alescomBillit: 'ALESCOM SRL',
         rates: {
           client:  { h: 90,   m: 1.5,  dep: 60, hLabel: "Main d'œuvre client heures (mai-003)", mLabel: "Main d'œuvre client minutes (mai-004)", depLabel: 'Déplacement forfaitaire client (dep-002)' },
+          zone1:   { dep: 20, depLabel: 'Déplacement client zone 1 (dep-003)' },
           partner: { h: 76.8, m: 1.28, dep: 55, hLabel: "Main d'œuvre pour partenaire heure (mai-001)", mLabel: "Main d'œuvre partenaire minutes (mai-002)", depLabel: 'Déplacement forfaitaire Partner (dep-001)' }
         }
       },

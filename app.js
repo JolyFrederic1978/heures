@@ -23,6 +23,7 @@ const eur = n => new Intl.NumberFormat('fr-BE', { style: 'currency', currency: '
 const toMin = hm => { const [h, m] = (hm || '0:0').split(':').map(Number); return h * 60 + m; };
 const fromMin = m => { m = ((m % 1440) + 1440) % 1440; return `${pad(Math.floor(m / 60))}:${pad(m % 60)}`; };
 const diffMin = (a, b) => { let d = toMin(b) - toMin(a); if (d < 0) d += 1440; return d; };
+const fold = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');   // recherche sans accents
 const hash = s => { let h = 5381; for (let i = 0; i < s.length; i++) h = (h * 33 ^ s.charCodeAt(i)) >>> 0; return h.toString(36) + s.length; };
 
 function parseDur(s) {
@@ -81,14 +82,38 @@ function groupInfo(key) {
   const rates = state.settings.rates;
   if (key === 'alescom') return { key, label: 'alescom', billitName: state.settings.alescomBillit || 'alescom', rates: rates.partner, partner: true };
   const c = client(key.slice(2));
-  return { key, label: c.name, billitName: c.billitName || c.name, rates: rates.client, partner: false };
+  // Client proche : le déplacement est facturé avec l'article zone 1 (dep-003).
+  const r = c.near ? { ...rates.client, dep: rates.zone1.dep, depLabel: rates.zone1.depLabel } : rates.client;
+  return { key, label: c.name, billitName: c.billitName || c.name, rates: r, partner: false, near: !!c.near };
 }
 function totals(entries, r) {
   let h = 0, m = 0, dep = 0;
   for (const e of entries) { h += Math.floor(e.minutes / 60); m += e.minutes % 60; dep += e.onSite ? 1 : 0; }
   return { h, m, dep, amount: h * r.h + m * r.m + dep * r.dep, minutes: entries.reduce((s, e) => s + e.minutes, 0) };
 }
-const entryAmount = e => totals([e], e.alescom ? state.settings.rates.partner : state.settings.rates.client).amount;
+const entryAmount = e => totals([e], groupInfo(groupKey(e)).rates).amount;
+
+// Valeurs ajoutées après la première version : complétées si absentes (données déjà synchronisées).
+function normalizeSettings() {
+  state.settings.rates.zone1 ||= { dep: 20, depLabel: 'Déplacement client zone 1 (dep-003)' };
+}
+
+// Liste de clients fournie par Fred (oct. 2026) : ajoutée une seule fois, sans doublon (comparaison sans casse).
+const CLIENTS_SEED = ['Ace', 'Acofisc', 'AFM', 'All Clean', 'Atelier C', 'BAEV', 'BC Béton', 'BDS', 'BHE', 'BKLZ', 'Burima',
+  'CDDH', 'Clinquart', 'Clio', 'Defitec', 'Deroover', 'Dewilde', 'Dufaux', 'Duthoit', 'Enercetec', 'Energen', 'Home', 'Hugo',
+  'INT', 'JMD', 'Krack', 'LCTS', 'Marvelle', 'MCS', 'Metalik Pro', 'MF', 'Nextgen', 'P4P', 'PAPV', 'Pitau', 'Quertinmont',
+  'SFER', 'Trav', 'Vedi', 'Viart', 'Warnier'];
+function seedClients() {
+  if (state.settings.clientsSeed >= 1) return false;
+  const have = new Set(state.clients.filter(c => !c.deleted).map(c => c.name.toLowerCase()));
+  for (const name of CLIENTS_SEED) {
+    if (have.has(name.toLowerCase())) continue;
+    state.clients.push(touch({ id: uid('c'), name, billitName: '', near: false, defaultAlescom: false, server: false, servers: 0 }));
+    have.add(name.toLowerCase());
+  }
+  state.settings.clientsSeed = 1; state.settingsAt = Date.now();
+  return true;
+}
 const xrow = e => ({ ...e, client: client(e.clientId).name });
 
 const prestationsName = b => `Prestations - ${b.label} ${b.date}.xlsx`;
@@ -142,6 +167,7 @@ function mergeRemote(remote) {
   state.bills = mergeArr(state.bills, remote.bills);
   if ((remote.timerAt || 0) > (state.timerAt || 0)) { state.timer = remote.timer; state.timerAt = remote.timerAt; }
   if (remote.settings && (remote.settingsAt || 0) > (state.settingsAt || 0)) { state.settings = remote.settings; state.settingsAt = remote.settingsAt; }
+  normalizeSettings();
   return before !== JSON.stringify([state.entries, state.clients, state.bills, state.timer, state.settings]);
 }
 
@@ -176,6 +202,7 @@ async function sync() {
       const cur = await OneDrive.get(P.data());
       if (cur) changed = mergeRemote(JSON.parse(cur.data)) || changed;
       changed = mergeRemoteClients() || changed;
+      changed = seedClients() || changed;      // après la fusion : pas de doublon entre appareils
       const payload = JSON.stringify({ version: 3, entries: state.entries, clients: state.clients, bills: state.bills,
         timer: state.timer, timerAt: state.timerAt, settings: state.settings, settingsAt: state.settingsAt });
       const r = await OneDrive.put(P.data(), payload, { etag: cur?.etag, type: 'application/json' });
@@ -228,7 +255,7 @@ function clientOptions(sel) {
 const flags = (site, ales, p) => `
   <div class="row">
     <label class="check grow"><input type="checkbox" id="${p}Site" ${site ? 'checked' : ''}> Sur site</label>
-    <label class="check grow"><input type="checkbox" id="${p}Ales" ${ales ? 'checked' : ''}> Commanditaire alescom</label>
+    <label class="check grow"><input type="checkbox" id="${p}Ales" ${ales ? 'checked' : ''}> alescom</label>
   </div>`;
 
 // Heure de début ramenée à aujourd'hui (ou hier si elle est dans le futur).
@@ -489,12 +516,15 @@ function openForfait(entry, kind) {
 // ---- Interventions ----
 let listMonth = today().slice(0, 7), listClient = '', listStatus = '';
 function viewList() {
-  const es = sortEntries(live().filter(e => e.date.startsWith(listMonth) && (!listClient || e.clientId === listClient)
+  const es = sortEntries(live().filter(e => (!listMonth || e.date.startsWith(listMonth)) && (!listClient || e.clientId === listClient)
     && (!listStatus || (listStatus === 'open') === !e.billId))).reverse();
   const days = [...new Set(es.map(e => e.date))];
+  const months = [...new Set([today().slice(0, 7), ...live().map(e => e.date.slice(0, 7))])].sort().reverse();
+  const monthLabel = m => new Date(m + '-01T00:00').toLocaleDateString('fr-BE', { month: 'long', year: 'numeric' });
   $('#view').innerHTML = `
     <div class="card"><div class="grid3">
-      <div><label>Mois</label><input type="month" id="hMonth" value="${listMonth}"></div>
+      <div><label>Mois</label><select id="hMonth"><option value="">Tous</option>
+        ${months.map(m => `<option value="${m}" ${m === listMonth ? 'selected' : ''}>${monthLabel(m)}</option>`).join('')}</select></div>
       <div><label>Client</label><select id="hClient"><option value="">Tous</option>${clientOptions(listClient)}</select></div>
       <div><label>Statut</label><select id="hStatus"><option value="">Toutes</option>
         <option value="open" ${listStatus === 'open' ? 'selected' : ''}>À facturer</option>
@@ -504,7 +534,7 @@ function viewList() {
     ${days.length ? days.map(d => `<div class="day">${longDate(d)}</div>
       <div class="card" style="padding:4px 14px"><ul class="list">${es.filter(e => e.date === d).map(e => entryLi(e)).join('')}</ul></div>`).join('')
       : '<div class="empty">Aucune intervention.</div>'}`;
-  $('#hMonth').onchange = e => { listMonth = e.target.value || today().slice(0, 7); render(); };
+  $('#hMonth').onchange = e => { listMonth = e.target.value; render(); };
   $('#hClient').onchange = e => { listClient = e.target.value; render(); };
   $('#hStatus').onchange = e => { listStatus = e.target.value; render(); };
   bindEdits();
@@ -675,14 +705,21 @@ function viewSettings() {
       <div><label>€ déplacement</label><input type="number" step="0.01" data-rate="${k}.dep" value="${r[k].dep}"></div></div>`;
   $('#view').innerHTML = `
     ${installPrompt ? '<button class="btn primary big" id="install" style="margin-bottom:12px">Installer l\'application</button>' : ''}
-    <div class="card"><div class="row"><h2 class="grow" style="margin:0">Clients</h2><button class="btn" id="addClient">+ Ajouter</button></div>
-      <ul class="list" style="margin-top:8px">${state.clients.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name)).map(c => `
-        <li class="tap" data-client="${c.id}"><div class="grow"><strong>${esc(c.name)}</strong> ${c.archived ? '<span class="pill">archivé</span>' : ''}
-          <div class="small muted">Billit : ${esc(c.billitName || '—')}${c.server ? ` · ${serverCount(c)} serveur(s)` : ''}${c.defaultAlescom ? ' · alescom' : ''}</div></div></li>`).join('')}</ul>
+    <div class="card"><div class="row"><h2 class="grow" style="margin:0">Clients (${state.clients.filter(c => !c.deleted).length})</h2><button class="btn" id="addClient">+ Ajouter</button></div>
+      <input type="search" id="cSearch" placeholder="Rechercher un client…" style="margin-top:10px">
+      <ul class="list" style="margin-top:8px;max-height:420px;overflow:auto">${state.clients.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name)).map(c => `
+        <li data-name="${esc(fold(c.name + ' ' + (c.billitName || '')))}">
+          <div class="grow tap" data-client="${c.id}"><strong>${esc(c.name)}</strong> ${c.archived ? '<span class="pill">archivé</span>' : ''}
+            <div class="small muted">Billit : ${esc(c.billitName || '—')}${c.near ? ' · proche (zone 1)' : ''}${c.server ? ` · ${serverCount(c)} serveur(s)` : ''}${c.defaultAlescom ? ' · alescom' : ''}</div></div>
+          <button class="btn danger chip" data-delclient="${c.id}" title="Supprimer">🗑</button></li>`).join('')}</ul>
       <label>Nom Billit du commanditaire alescom</label><input id="alesBillit" value="${esc(s.alescomBillit)}">
     </div>
 
-    <div class="card">${rateBlock('client', 'Tarifs clients')}<div style="height:12px"></div>${rateBlock('partner', 'Tarifs alescom (partenaire)')}</div>
+    <div class="card">${rateBlock('client', 'Tarifs clients')}
+      <div class="grid2" style="margin-top:4px">
+        <div><label>€ déplacement client proche (dep-003)</label><input type="number" step="0.01" data-rate="zone1.dep" value="${r.zone1.dep}"></div>
+      </div>
+      <div style="height:12px"></div>${rateBlock('partner', 'Tarifs alescom (partenaire)')}</div>
 
     <div class="card"><h2>OneDrive</h2>
       <p class="small" id="odStatus">${esc(statusText())}</p>
@@ -717,6 +754,11 @@ function viewSettings() {
   if (installPrompt) $('#install').onclick = async () => { installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; render(); };
   $('#addClient').onclick = () => editClient(null);
   $$('[data-client]').forEach(li => li.onclick = () => editClient(state.clients.find(c => c.id === li.dataset.client)));
+  $$('[data-delclient]').forEach(b => b.onclick = () => deleteClient(state.clients.find(c => c.id === b.dataset.delclient)));
+  $('#cSearch').oninput = ev => {
+    const q = fold(ev.target.value.trim());
+    $$('li[data-name]').forEach(li => li.classList.toggle('hidden', !!q && !li.dataset.name.includes(q)));
+  };
   const saveSettings = async () => { state.settingsAt = Date.now(); await DB.save(state); scheduleSync(); toast('Enregistré'); };
   $('#alesBillit').onchange = ev => { s.alescomBillit = ev.target.value.trim(); saveSettings(); };
   $$('[data-rate]').forEach(inp => inp.onchange = () => {
@@ -760,13 +802,24 @@ function viewSettings() {
   });
 }
 
+// Suppression "douce" : le client disparaît des listes, ses interventions gardent son nom dans l'historique.
+async function deleteClient(c) {
+  const n = live().filter(e => e.clientId === c.id).length;
+  const open = live().filter(e => e.clientId === c.id && !e.billId).length;
+  if (!confirm(`Supprimer le client « ${c.name} » ?` + (n ? `\n\n${n} intervention(s) liée(s) restent dans l'historique${open ? `, dont ${open} pas encore facturée(s)` : ''}.` : ''))) return;
+  c.deleted = true; touch(c);
+  if (state.lastClientId === c.id) state.lastClientId = null;
+  if ($('#dlg').open) $('#dlg').close();
+  await persist(); toast('Client supprimé');
+}
+
 function editClient(c) {
   const dlg = $('#dlg'), f = $('#dlgForm');
-  const used = c && live().some(e => e.clientId === c.id);
   f.innerHTML = `<h2>${c ? 'Modifier' : 'Nouveau'} client</h2>
     <label>Nom</label><input id="cName" value="${esc(c?.name)}" placeholder="ex. Vedi">
     <label>Nom du client dans Billit</label><input id="cBillit" value="${esc(c?.billitName)}" placeholder="ex. V.T.S. SA">
-    <label class="check"><input type="checkbox" id="cAles" ${c?.defaultAlescom ? 'checked' : ''}> Commanditaire alescom par défaut</label>
+    <label class="check"><input type="checkbox" id="cNear" ${c?.near ? 'checked' : ''}> Client proche (déplacement zone 1, dep-003)</label>
+    <label class="check"><input type="checkbox" id="cAles" ${c?.defaultAlescom ? 'checked' : ''}> alescom par défaut</label>
     <div class="row">
       <label class="check grow"><input type="checkbox" id="cServer" ${c?.server ? 'checked' : ''}> Serveur(s)</label>
       <div id="cServersBox" class="${c?.server ? '' : 'hidden'}" style="width:140px"><label style="margin-top:0">Nombre de serveurs</label>
@@ -774,10 +827,10 @@ function editClient(c) {
     </div>
     ${c ? `<label class="check"><input type="checkbox" id="cArch" ${c.archived ? 'checked' : ''}> Archivé (masqué des listes)</label>` : ''}
     <div class="actions">
-      ${c && !used ? '<button class="btn danger" id="cDel" style="margin-right:auto">Supprimer</button>' : ''}
+      ${c ? '<button class="btn danger" id="cDel" style="margin-right:auto">Supprimer</button>' : ''}
       <button class="btn" value="cancel">Annuler</button><button class="btn primary" id="cSave">Enregistrer</button></div>`;
   $('#cServer').onchange = ev => $('#cServersBox').classList.toggle('hidden', !ev.target.checked);
-  if ($('#cDel')) $('#cDel').onclick = async () => { c.deleted = true; touch(c); dlg.close(); await persist(); };
+  if ($('#cDel')) $('#cDel').onclick = () => deleteClient(c);
   $('#cSave').onclick = async ev => {
     ev.preventDefault();
     const name = $('#cName').value.trim().replace(/\s+/g, ' ');
@@ -785,7 +838,7 @@ function editClient(c) {
     if (/\b(remote|distance)\b/i.test(name)) return alert('Retire « remote » / « distance » du nom : utilise la case « Sur site ».');
     if (state.clients.some(x => x !== c && !x.deleted && x.name.toLowerCase() === name.toLowerCase())) return alert('Ce client existe déjà.');
     const server = $('#cServer').checked, servers = Math.max(1, parseInt($('#cServers').value, 10) || 1);
-    const data = { name, billitName: $('#cBillit').value.trim(), defaultAlescom: $('#cAles').checked, archived: !!$('#cArch')?.checked,
+    const data = { name, billitName: $('#cBillit').value.trim(), near: $('#cNear').checked, defaultAlescom: $('#cAles').checked, archived: !!$('#cArch')?.checked,
       server, servers: server ? servers : 0 };
     if (c) Object.assign(touch(c), data); else state.clients.push(touch({ id: uid('c'), ...data }));
     dlg.close(); await persist();
@@ -855,8 +908,10 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 
 (async () => {
   state = await DB.load();
-  if (mergeRemoteClients()) await DB.save(state);
+  normalizeSettings();
   OneDrive.configure(() => state.onedrive);
+  // Sans OneDrive connecté, on ajoute la liste tout de suite ; sinon pendant la synchro (après fusion des données).
+  if (mergeRemoteClients() | (!OneDrive.signedIn() && seedClients())) await DB.save(state);
   try { if (await OneDrive.handleRedirect()) { tab = 'settings'; toast('Connecté à OneDrive'); } }
   catch (e) { alert('Connexion OneDrive : ' + e.message); }
   render();
