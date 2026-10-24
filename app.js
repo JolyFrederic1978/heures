@@ -103,6 +103,8 @@ function normalizeSettings() {
   r.zone1.depRef ||= 'dep-003';
   state.settings.billit ||= { mode: 'test', test: { apiKey: '', partyId: '' }, live: { apiKey: '', partyId: '' } };
 }
+// Échéance des factures Billit (jours) : fixe, à modifier au besoin dans Billit.
+const dueDays = info => info.partner ? 10 : 15;
 const pick = o => Object.fromEntries(['hRef', 'mRef', 'depRef'].filter(k => o[k]).map(k => [k, o[k]]));
 
 // Liste de clients fournie par Fred (oct. 2026) : ajoutée une seule fois, sans doublon (comparaison sans casse).
@@ -776,7 +778,7 @@ async function sendToBillit(b) {
     if (!lines.length) throw new Error('Aucune ligne à facturer.');
     const total = lines.reduce((s, l) => s + l.Quantity * l.UnitPriceExcl, 0);
     const inst = live().filter(e => e.billId === b.id && e.install);
-    const due = new Date(); due.setDate(due.getDate() + 30);
+    const days = dueDays(info), due = new Date(); due.setDate(due.getDate() + days);
     const order = {
       // Draft = « Projet » dans Billit (sans ce statut, la facture est numérotée tout de suite).
       OrderType: 'Invoice', OrderDirection: 'Income', OrderStatus: 'Draft', Currency: 'EUR',
@@ -787,6 +789,7 @@ async function sendToBillit(b) {
     };
     const summary = lines.map(l => `- ${l.Reference} ${l.Description} : ${l.Quantity} × ${eur(l.UnitPriceExcl)}`).join('\n');
     if (!confirm(`${m === 'live' ? '⚠ MODE RÉEL – vraie comptabilité' : 'Mode TEST (sandbox)'}\n\nFacture pour ${info.billitName}\n${order.OrderTitle}\n${summary}\nTotal HTVA : ${eur(total)}`
+      + `\nÉchéance : ${frDate(order.ExpiryDate)} (${days} jours)`
       + (missing.length ? `\n\nArticles introuvables dans Billit (prix de l'app utilisé) : ${missing.join(', ')}` : '')
       + (inst.length ? `\n\nInstallations NON ajoutées (à ajouter dans Billit) : ${inst.map(e => e.install).join(', ')}` : '')
       + '\n\nCréer la facture ?')) return say('Envoi annulé.');
@@ -952,8 +955,7 @@ function viewSettings() {
   $$('[data-bk]').forEach(inp => inp.onchange = () => {
     const [k, fld] = inp.dataset.bk.split('.');
     s.billit[k][fld] = inp.value.trim(); saveSettings();
-  });
-  $('#bTest').onclick = async () => {
+  });  $('#bTest').onclick = async () => {
     const out = $('#bTestRes'); out.textContent = 'Connexion…';
     try {
       const a = await Billit.account();
