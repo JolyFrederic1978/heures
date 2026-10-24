@@ -1226,6 +1226,14 @@ document.addEventListener('visibilitychange', () => {
   if (!locked) sync();
   navigator.storage?.persist?.();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-    navigator.serviceWorker.register('sw.js');
+    // Nouvelle version publiée : le service worker la met en cache puis prend la main → on recharge une fois
+    // pour l'afficher tout de suite (sinon l'ancienne version resterait jusqu'au chargement suivant).
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloaded || $('#dlg').open) return;
+      reloaded = true; location.reload();
+    });
+    navigator.serviceWorker.register('sw.js').then(r => r.update()).catch(() => {});
   }
 })();
