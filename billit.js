@@ -44,9 +44,9 @@ const Billit = (() => {
       try { return items(await call('/v1/parties' + odata("PartyType eq 'Customer'"))); }
       catch (_) { return items(await call('/v1/parties')); }
     },
-    // Factures de vente pas encore envoyées (statut ToSend) pour ce client.
+    // Factures de vente en projet (Draft) ou pas encore envoyées (ToSend) pour ce client.
     async openInvoices(customerId) {
-      const all = items(await call('/v1/orders' + odata("OrderType eq 'Invoice' and OrderDirection eq 'Income' and OrderStatus eq 'ToSend'")));
+      const all = items(await call('/v1/orders' + odata("OrderType eq 'Invoice' and OrderDirection eq 'Income' and (OrderStatus eq 'Draft' or OrderStatus eq 'ToSend')")));
       return all.filter(o => String(o.CounterParty?.PartyID ?? o.CustomerID ?? o.Customer?.PartyID) === String(customerId));
     },
     createOrder: order => call('/v1/orders', { method: 'POST', body: JSON.stringify(order) }),

@@ -778,7 +778,8 @@ async function sendToBillit(b) {
     const inst = live().filter(e => e.billId === b.id && e.install);
     const due = new Date(); due.setDate(due.getDate() + 30);
     const order = {
-      OrderType: 'Invoice', OrderDirection: 'Income', Currency: 'EUR',
+      // Draft = « Projet » dans Billit (sans ce statut, la facture est numérotée tout de suite).
+      OrderType: 'Invoice', OrderDirection: 'Income', OrderStatus: 'Draft', Currency: 'EUR',
       OrderDate: today(), ExpiryDate: isoDate(due), CustomerID: +customerId || customerId,
       OrderTitle: `Intervention du ${frDate(b.from)} au ${frDate(b.to)}`,
       OrderLines: lines,
@@ -797,9 +798,10 @@ async function sendToBillit(b) {
     try { o = await Billit.getOrder(id); } catch (_) { /* la facture est créée, le détail est facultatif */ }
     b.billit = { id, mode: m, at: Date.now(), url: Billit.orderUrl(id), number: o?.OrderNumber || '', status: o?.OrderStatus || '' };
     touch(b); await persist();
-    say(billitStatus(b) + (b.billit.number
-      ? `<p class="small"><span class="pill warn">Billit a attribué le n° ${esc(b.billit.number)} : vérifie si la facture est en Projet ou déjà définitive.</span></p>`
-      : '<p class="small muted">Vérifie la facture dans Billit avant de la créer définitivement.</p>'));
+    const draft = /draft/i.test(b.billit.status);
+    say(billitStatus(b) + (draft
+      ? '<p class="small"><span class="pill ok">Créée en Projet</span> Vérifie-la dans Billit avant de la créer définitivement.</p>'
+      : `<p class="small"><span class="pill warn">Attention : Billit ne l'a pas créée en Projet (statut ${esc(b.billit.status || 'inconnu')}${b.billit.number ? ', n° ' + esc(b.billit.number) : ''}).</span></p>`));
     toast('Facture créée dans Billit');
   } catch (e) {
     say(`<span class="pill warn">${esc(e.message)}</span>`);
