@@ -83,7 +83,7 @@ function groupInfo(key) {
   if (key === 'alescom') return { key, label: 'alescom', billitName: state.settings.alescomBillit || 'alescom', rates: rates.partner, partner: true };
   const c = client(key.slice(2));
   // Client proche : le déplacement est facturé avec l'article zone 1 (dep-003).
-  const r = c.near ? { ...rates.client, dep: rates.zone1.dep, depLabel: rates.zone1.depLabel } : rates.client;
+  const r = c.near ? { ...rates.client, dep: rates.zone1.dep, depLabel: rates.zone1.depLabel, depRef: rates.zone1.depRef } : rates.client;
   return { key, label: c.name, billitName: c.billitName || c.name, rates: r, partner: false, near: !!c.near };
 }
 function totals(entries, r) {
@@ -95,8 +95,15 @@ const entryAmount = e => totals([e], groupInfo(groupKey(e)).rates).amount;
 
 // Valeurs ajoutées après la première version : complétées si absentes (données déjà synchronisées).
 function normalizeSettings() {
-  state.settings.rates.zone1 ||= { dep: 20, depLabel: 'Déplacement client zone 1 (dep-003)' };
+  const r = state.settings.rates;
+  r.zone1 ||= { dep: 20, depLabel: 'Déplacement client zone 1 (dep-003)' };
+  // Codes des articles Billit utilisés pour chaque ligne de facture.
+  Object.assign(r.client, { hRef: 'mai-003', mRef: 'mai-004', depRef: 'dep-002', ...pick(r.client) });
+  Object.assign(r.partner, { hRef: 'mai-001', mRef: 'mai-002', depRef: 'dep-001', ...pick(r.partner) });
+  r.zone1.depRef ||= 'dep-003';
+  state.settings.billit ||= { mode: 'test', test: { apiKey: '', partyId: '' }, live: { apiKey: '', partyId: '' } };
 }
+const pick = o => Object.fromEntries(['hRef', 'mRef', 'depRef'].filter(k => o[k]).map(k => [k, o[k]]));
 
 // Liste de clients fournie par Fred (oct. 2026) : ajoutée une seule fois, sans doublon (comparaison sans casse).
 const CLIENTS_SEED = ['Ace', 'Acofisc', 'AFM', 'All Clean', 'Atelier C', 'BAEV', 'BC Béton', 'BDS', 'BHE', 'BKLZ', 'Burima',
@@ -636,6 +643,11 @@ async function showBill(b, justCreated = false) {
   f.innerHTML = `<h2>${justCreated ? 'Facturé : ' : ''}${esc(b.label)}</h2>
     <p class="small muted">Facturé le ${frDate(b.date)} · ${es.length} interv. · du ${frDate(b.from)} au ${frDate(b.to)}</p>
     <p class="small" id="bFile">${justCreated ? 'Envoi du fichier Prestations vers OneDrive…' : ''}</p>
+    <div class="card" style="margin:10px 0;padding:10px">
+      <div class="row"><strong class="grow">Billit</strong>
+        <button class="btn ${b.billit ? '' : 'primary'}" id="bSend">📤 ${b.billit ? 'Renvoyer' : 'Envoyer'} vers Billit (${Billit.mode() === 'live' ? 'réel' : 'test'})</button></div>
+      <div class="small" id="bBillitMsg" style="margin-top:6px">${billitStatus(b)}</div>
+    </div>
     <label>N° de facture Billit</label><input id="bRef" value="${esc(b.ref)}">
     ${totalsTable(t, info.rates)}
     <pre class="recap">${esc(recapBillit(b))}</pre>
@@ -649,6 +661,7 @@ async function showBill(b, justCreated = false) {
   const saveRef = async () => { const v = $('#bRef').value.trim(); if (v !== (b.ref || '')) { b.ref = v; touch(b); await persist(); } };
   $('#bOk').onclick = async ev => { ev.preventDefault(); await saveRef(); dlg.close(); };
   $('#bCopy').onclick = () => copy(recapBillit(b));
+  $('#bSend').onclick = async () => { const btn = $('#bSend'); btn.disabled = true; try { await sendToBillit(b); } finally { if (btn.isConnected) btn.disabled = false; } };
   $('#bDl').onclick = async () => { try { download(await prestationsFile(b), prestationsName(b)); } catch (e) { alert(e.message); } };
   $('#bUndo').onclick = async () => {
     if (!confirm('Remettre ces interventions dans « à facturer » ? (le fichier Prestations déjà créé n\'est pas supprimé)')) return;
@@ -669,6 +682,127 @@ async function showBill(b, justCreated = false) {
     } catch (e) {
       if (el) el.innerHTML = `<span class="pill warn">Fichier non envoyé (${esc(e.message)}) : utilise « ⬇ Prestations ».</span>`;
     }
+  }
+}
+
+// ---- Envoi vers Billit (API) ----
+// Crée la facture dans Billit avec les articles (mai-xxx, dep-xxx) et le fichier Prestations en pièce jointe.
+// L'API ne permet pas d'ajouter des lignes à une facture existante : si une facture non envoyée existe déjà
+// pour le client, on prévient et on laisse le choix.
+const billitModeLabel = m => m === 'live' ? 'réel' : 'test (sandbox)';
+function billitStatus(b) {
+  const x = b.billit;
+  if (!x) return Billit.ready() ? '<span class="muted">Pas encore envoyée.</span>'
+    : '<span class="muted">Renseigne la clé API et le PartyID Billit dans Réglages.</span>';
+  return `<span class="pill ok">✓ Envoyée (${billitModeLabel(x.mode)}) le ${new Date(x.at).toLocaleString('fr-BE', { dateStyle: 'short', timeStyle: 'short' })}</span>
+    ${x.number ? ` · n° ${esc(x.number)}` : ''}${x.status ? ` · statut ${esc(x.status)}` : ''}
+    · <a href="${esc(x.url)}" target="_blank" rel="noopener">Ouvrir dans Billit</a>`;
+}
+
+const toBase64 = blob => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(String(r.result).split(',')[1]);
+  r.onerror = () => reject(r.error);
+  r.readAsDataURL(blob);
+});
+
+// ID du client Billit (mémorisé par mode : les ID du sandbox et du réel sont différents).
+async function resolveBillitCustomer(info, say) {
+  const m = Billit.mode();
+  const c = info.partner ? null : client(info.key.slice(2));
+  const stored = info.partner ? state.settings.alescomBillitIds?.[m] : c.billitIds?.[m];
+  if (stored) return stored;
+  say('Recherche du client dans Billit…');
+  const all = await Billit.customers();
+  const want = fold(info.billitName);
+  const exact = all.filter(p => [p.Name, p.CommercialName, p.DisplayName].some(n => n && fold(n) === want));
+  let id = exact.length === 1 ? exact[0].PartyID : null;
+  if (!id) {
+    // Choix manuel : les correspondances partielles en premier.
+    const score = p => fold(Billit.partyName(p)).includes(want) || want.includes(fold(Billit.partyName(p))) ? 0 : 1;
+    const list = all.slice().sort((a, b) => score(a) - score(b) || Billit.partyName(a).localeCompare(Billit.partyName(b)));
+    if (!list.length) throw new Error('Aucun client trouvé dans Billit.');
+    say(`<label style="margin-top:0">Client Billit pour « ${esc(info.label)} »</label>
+      <select id="bCust">${list.map(p => `<option value="${p.PartyID}">${esc(Billit.partyName(p))}${p.VATNumber ? ' · ' + esc(p.VATNumber) : ''}</option>`).join('')}</select>
+      <div class="row" style="margin-top:8px"><button class="btn" id="bCustNo">Annuler</button><button class="btn primary" id="bCustOk">Utiliser ce client</button></div>`);
+    $$('#bCustNo, #bCustOk').forEach(x => x.type = 'button');
+    id = await new Promise(res => { $('#bCustOk').onclick = () => res($('#bCust').value); $('#bCustNo').onclick = () => res(null); });
+    if (!id) return null;
+  }
+  if (info.partner) { state.settings.alescomBillitIds = { ...state.settings.alescomBillitIds, [m]: id }; state.settingsAt = Date.now(); }
+  else { c.billitIds = { ...c.billitIds, [m]: id }; touch(c); }
+  await DB.save(state); scheduleSync();
+  return id;
+}
+
+function billitLines(b, info, products) {
+  const r = info.rates, t = totals(live().filter(e => e.billId === b.id), r);
+  const byRef = ref => products.find(p => fold(p.Reference) === fold(ref));
+  const missing = [];
+  const line = (qty, ref, label, price) => {
+    const p = byRef(ref);
+    if (!p) missing.push(ref);
+    return { Quantity: qty, Reference: ref, Description: p?.Description || label,
+      UnitPriceExcl: p?.AmountExcl ?? p?.UnitPriceExcl ?? price, VATPercentage: p?.VAT ?? p?.VATPercentage ?? 21,
+      ...(p?.ProductID ? { ProductID: p.ProductID } : {}) };
+  };
+  const lines = [];
+  if (t.h) lines.push(line(t.h, r.hRef, r.hLabel, r.h));
+  if (t.m) lines.push(line(t.m, r.mRef, r.mLabel, r.m));
+  if (t.dep) lines.push(line(t.dep, r.depRef, r.depLabel, r.dep));
+  return { lines, missing };
+}
+
+async function sendToBillit(b) {
+  const say = h => { const el = $('#bBillitMsg'); if (el) el.innerHTML = h; };
+  const info = groupInfo(b.key), m = Billit.mode();
+  try {
+    if (!Billit.ready()) throw new Error('Renseigne la clé API et le PartyID Billit dans Réglages.');
+    if (b.billit && !confirm(`Cette facture a déjà été envoyée vers Billit (${billitModeLabel(b.billit.mode)}).\nEn créer une nouvelle quand même ?`)) return;
+    const customerId = await resolveBillitCustomer(info, say);
+    if (!customerId) return say('Envoi annulé.');
+
+    say('Vérification des factures non envoyées pour ce client…');
+    const open = await Billit.openInvoices(customerId);
+    if (open.length) {
+      const desc = open.map(o => `- ${o.OrderNumber || '(sans n°)'} du ${frDate(String(o.OrderDate || '').slice(0, 10))}${o.TotalExcl != null ? ` : ${eur(o.TotalExcl)} HTVA` : ''}`).join('\n');
+      if (!confirm(`${open.length} facture(s) non envoyée(s) existent déjà pour ${info.billitName} :\n${desc}\n\nL'API Billit ne permet pas d'y ajouter des lignes.\nCréer une NOUVELLE facture quand même ?\n(Annuler = compléter toi-même ou avec la tâche Claude)`)) {
+        return say('Envoi annulé. Factures existantes : ' + open.map(o => `<a href="${esc(Billit.orderUrl(o.OrderID))}" target="_blank" rel="noopener">${esc(o.OrderNumber || 'facture ' + o.OrderID)}</a>`).join(', '));
+      }
+    }
+
+    say('Lecture des articles Billit…');
+    const { lines, missing } = billitLines(b, info, await Billit.products());
+    if (!lines.length) throw new Error('Aucune ligne à facturer.');
+    const total = lines.reduce((s, l) => s + l.Quantity * l.UnitPriceExcl, 0);
+    const inst = live().filter(e => e.billId === b.id && e.install);
+    const due = new Date(); due.setDate(due.getDate() + 30);
+    const order = {
+      OrderType: 'Invoice', OrderDirection: 'Income', Currency: 'EUR',
+      OrderDate: today(), ExpiryDate: isoDate(due), CustomerID: +customerId || customerId,
+      OrderTitle: `Intervention du ${frDate(b.from)} au ${frDate(b.to)}`,
+      OrderLines: lines,
+      Attachments: [{ FileName: prestationsName(b), FileContent: await toBase64(await prestationsFile(b)), MimeType: Xlsx.MIME }]
+    };
+    const summary = lines.map(l => `- ${l.Reference} ${l.Description} : ${l.Quantity} × ${eur(l.UnitPriceExcl)}`).join('\n');
+    if (!confirm(`${m === 'live' ? '⚠ MODE RÉEL – vraie comptabilité' : 'Mode TEST (sandbox)'}\n\nFacture pour ${info.billitName}\n${order.OrderTitle}\n${summary}\nTotal HTVA : ${eur(total)}`
+      + (missing.length ? `\n\nArticles introuvables dans Billit (prix de l'app utilisé) : ${missing.join(', ')}` : '')
+      + (inst.length ? `\n\nInstallations NON ajoutées (à ajouter dans Billit) : ${inst.map(e => e.install).join(', ')}` : '')
+      + '\n\nCréer la facture ?')) return say('Envoi annulé.');
+
+    say('Création de la facture…');
+    const res = await Billit.createOrder(order);
+    const id = typeof res === 'object' && res ? (res.OrderID ?? res.id ?? res.Id) : res;
+    let o = null;
+    try { o = await Billit.getOrder(id); } catch (_) { /* la facture est créée, le détail est facultatif */ }
+    b.billit = { id, mode: m, at: Date.now(), url: Billit.orderUrl(id), number: o?.OrderNumber || '', status: o?.OrderStatus || '' };
+    touch(b); await persist();
+    say(billitStatus(b) + (b.billit.number
+      ? `<p class="small"><span class="pill warn">Billit a attribué le n° ${esc(b.billit.number)} : vérifie si la facture est en Projet ou déjà définitive.</span></p>`
+      : '<p class="small muted">Vérifie la facture dans Billit avant de la créer définitivement.</p>'));
+    toast('Facture créée dans Billit');
+  } catch (e) {
+    say(`<span class="pill warn">${esc(e.message)}</span>`);
   }
 }
 
@@ -751,6 +885,20 @@ function viewSettings() {
       </details>
     </div>
 
+    <div class="card"><h2>Billit</h2>
+      <div class="row">
+        <label class="check grow"><input type="radio" name="bMode" value="test" ${s.billit.mode !== 'live' ? 'checked' : ''}> Test (sandbox)</label>
+        <label class="check grow"><input type="radio" name="bMode" value="live" ${s.billit.mode === 'live' ? 'checked' : ''}> Réel</label>
+      </div>
+      ${['test', 'live'].map(k => `<div class="grid2">
+        <div><label>Clé API (${k === 'live' ? 'réel' : 'test'})</label><input type="password" autocomplete="off" data-bk="${k}.apiKey" value="${esc(s.billit[k].apiKey)}"></div>
+        <div><label>PartyID (${k === 'live' ? 'réel' : 'test'})</label><input inputmode="numeric" data-bk="${k}.partyId" value="${esc(s.billit[k].partyId)}"></div>
+      </div>`).join('')}
+      <div class="row" style="margin-top:10px"><button class="btn" id="bTest">Tester la connexion</button><span class="small" id="bTestRes"></span></div>
+      <p class="small muted">Clé et PartyID : dans Billit, menu de ton profil → API. Ils sont enregistrés dans tes données OneDrive
+        (protégées par ta connexion Microsoft et ton code PIN), jamais sur GitHub. La clé donne accès à tout ton Billit : tu peux la révoquer à tout moment dans Billit.</p>
+    </div>
+
     <div class="card"><h2>Code PIN</h2>
       <p class="small muted">${state.settings.pin ? 'Un code PIN est demandé à l\'ouverture de l\'app et après 5 minutes en arrière-plan, sur tous tes appareils.'
         : 'Aucun code PIN : l\'app s\'ouvre dès que tu es connecté à Microsoft 365.'}</p>
@@ -795,6 +943,22 @@ function viewSettings() {
   if ($('#odIn')) $('#odIn').onclick = () => OneDrive.login().catch(e => alert(e.message));
   if ($('#odSync')) $('#odSync').onclick = () => { state.published = {}; sync(); };
   if ($('#odOut')) $('#odOut').onclick = () => { if (confirm('Se déconnecter ?\nLa copie locale de cet appareil est effacée ; tes données restent dans OneDrive.')) signOut(); };
+  $$('input[name="bMode"]').forEach(x => x.onchange = async () => {
+    if (x.value === 'live' && !confirm('Passer en mode RÉEL ?\nLes factures seront créées dans ta vraie comptabilité Billit.')) { render(); return; }
+    s.billit.mode = x.value; await saveSettings(); render();
+  });
+  $$('[data-bk]').forEach(inp => inp.onchange = () => {
+    const [k, fld] = inp.dataset.bk.split('.');
+    s.billit[k][fld] = inp.value.trim(); saveSettings();
+  });
+  $('#bTest').onclick = async () => {
+    const out = $('#bTestRes'); out.textContent = 'Connexion…';
+    try {
+      const a = await Billit.account();
+      const name = a?.Companies?.[0]?.Name || a?.Name || a?.CompanyName || a?.Email || 'OK';
+      out.innerHTML = `<span class="pill ok">✓ Connecté (${esc(billitModeLabel(Billit.mode()))}) : ${esc(name)}</span>`;
+    } catch (e) { out.innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
+  };
   $('#pinSet').onclick = () => editPin();
   if ($('#pinDel')) $('#pinDel').onclick = async () => {
     if (!confirm('Supprimer le code PIN (sur tous tes appareils) ?')) return;
@@ -1035,6 +1199,7 @@ document.addEventListener('visibilitychange', () => {
   state = await DB.load();
   normalizeSettings();
   OneDrive.configure(() => state.onedrive);
+  Billit.configure(() => state.settings.billit);
   if (mergeRemoteClients()) await DB.save(state);
   let justLoggedIn = false;
   try { if ((justLoggedIn = await OneDrive.handleRedirect())) toast('Connecté'); }
