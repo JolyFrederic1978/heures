@@ -465,10 +465,17 @@ const updateMinutes = c => { const n = serverCount(c) || 1; return n === 1 ? 15 
 function openForfait(entry, kind) {
   kind = entry?.forfait || kind;
   const label = FORFAITS[kind];
-  const clients = activeClients().sort((a, b) => (serverCount(b) > 0) - (serverCount(a) > 0) || a.name.localeCompare(b.name));
-  const c0 = entry ? client(entry.clientId)
-    : clients.find(c => c.id === state.lastClientId && (kind === 'maint' || c.server)) || clients.find(c => c.server) || clients[0];
-  if (!c0) return alert("Ajoute d'abord un client dans Réglages.");
+  // Seulement les clients avec serveur(s) dont ce forfait n'a pas encore été encodé ce mois-ci
+  // (en modification, le client de l'intervention reste proposé).
+  const month = today().slice(0, 7);
+  const done = new Set(live().filter(e => e.forfait === kind && e.date.startsWith(month) && e.id !== entry?.id).map(e => e.clientId));
+  const clients = activeClients().filter(c => (c.server && !done.has(c.id)) || c.id === entry?.clientId);
+  if (!clients.length) {
+    const n = activeClients().filter(c => c.server).length;
+    return alert(n ? `${label} : déjà encodée ce mois-ci pour les ${n} client(s) avec serveur.`
+      : 'Aucun client avec serveur : coche « Serveur(s) » dans la fiche client (Réglages).');
+  }
+  const c0 = entry ? client(entry.clientId) : clients.find(c => c.id === state.lastClientId) || clients[0];
   const e = entry || { clientId: c0.id, date: today(), minutes: kind === 'update' ? updateMinutes(c0) : 0,
     description: label, onSite: false, alescom: !!c0.defaultAlescom };
   const b = e.billId && bill(e.billId);
