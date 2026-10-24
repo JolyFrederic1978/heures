@@ -131,7 +131,7 @@ const prestationsFile = b => Xlsx.prestations(sortEntries(live().filter(e => e.b
 function recapBillit(b) {
   const info = groupInfo(b.key), r = info.rates;
   const s = sortEntries(live().filter(e => e.billId === b.id)), t = totals(s, r);
-  const lines = [`Client Billit : ${info.billitName}`, `Objet : Intervention du ${frDate(b.from)} au ${frDate(b.to)}`, ''];
+  const lines = [`Client Billit : ${info.billitName}`, `Objet : Interventions du ${frDate(b.from)} au ${frDate(b.to)}`, ''];
   if (t.h) lines.push(`${r.hLabel} : ${t.h} × ${eur(r.h)} = ${eur(t.h * r.h)}`);
   if (t.m) lines.push(`${r.mLabel} : ${t.m} × ${eur(r.m)} = ${eur(t.m * r.m)}`);
   if (t.dep) lines.push(`${r.depLabel} : ${t.dep} × ${eur(r.dep)} = ${eur(t.dep * r.dep)}`);
@@ -783,7 +783,7 @@ async function sendToBillit(b) {
       // Draft = « Projet » dans Billit (sans ce statut, la facture est numérotée tout de suite).
       OrderType: 'Invoice', OrderDirection: 'Income', OrderStatus: 'Draft', Currency: 'EUR',
       OrderDate: today(), ExpiryDate: isoDate(due), CustomerID: +customerId || customerId,
-      OrderTitle: `Intervention du ${frDate(b.from)} au ${frDate(b.to)}`,
+      OrderTitle: `Interventions du ${frDate(b.from)} au ${frDate(b.to)}`,
       OrderLines: lines,
       Attachments: [{ FileName: prestationsName(b), FileContent: await toBase64(await prestationsFile(b)), MimeType: Xlsx.MIME }]
     };
