@@ -10,8 +10,9 @@ const Billit = (() => {
 
   async function call(path, opts = {}) {
     const k = keys();
-    if (!k.apiKey || !k.partyId) throw new Error(`Clé API / PartyID Billit (${mode() === 'live' ? 'réel' : 'test'}) manquants dans Réglages.`);
-    const headers = { ApiKey: k.apiKey, PartyID: k.partyId, Accept: 'application/json' };
+    if (!k.apiKey || (!k.partyId && !opts.noParty)) throw new Error(`Clé API / PartyID Billit (${mode() === 'live' ? 'réel' : 'test'}) manquants dans Réglages.`);
+    const headers = { ApiKey: k.apiKey, Accept: 'application/json' };
+    if (k.partyId) headers.PartyID = k.partyId;
     if (opts.body) headers['Content-Type'] = 'application/json';
     const r = await fetch(API[mode()] + path, { ...opts, headers });
     const text = await r.text();
@@ -36,7 +37,8 @@ const Billit = (() => {
     ready: () => !!(keys().apiKey && keys().partyId),
     orderUrl: id => `${WEB[mode()]}/Order/Income/Invoice/${id}/EditOrder`,
     partyName,
-    account: () => call('/v1/account/accountInformation'),
+    // Fonctionne avec la clé seule : sert aussi à retrouver le PartyID de la société.
+    account: () => call('/v1/account/accountInformation', { noParty: true }),
     products: async () => items(await call('/v1/products')),
     async customers() {
       try { return items(await call('/v1/parties' + odata("PartyType eq 'Customer'"))); }

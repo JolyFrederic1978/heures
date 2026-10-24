@@ -895,7 +895,7 @@ function viewSettings() {
         <div><label>PartyID (${k === 'live' ? 'réel' : 'test'})</label><input inputmode="numeric" data-bk="${k}.partyId" value="${esc(s.billit[k].partyId)}"></div>
       </div>`).join('')}
       <div class="row" style="margin-top:10px"><button class="btn" id="bTest">Tester la connexion</button><span class="small" id="bTestRes"></span></div>
-      <p class="small muted">Clé et PartyID : dans Billit, menu de ton profil → API. Ils sont enregistrés dans tes données OneDrive
+      <p class="small muted">Clé API : dans Billit, menu de ton profil → API. Laisse le PartyID vide puis clique « Tester la connexion » : il est retrouvé automatiquement. Ils sont enregistrés dans tes données OneDrive
         (protégées par ta connexion Microsoft et ton code PIN), jamais sur GitHub. La clé donne accès à tout ton Billit : tu peux la révoquer à tout moment dans Billit.</p>
     </div>
 
@@ -955,8 +955,23 @@ function viewSettings() {
     const out = $('#bTestRes'); out.textContent = 'Connexion…';
     try {
       const a = await Billit.account();
-      const name = a?.Companies?.[0]?.Name || a?.Name || a?.CompanyName || a?.Email || 'OK';
-      out.innerHTML = `<span class="pill ok">✓ Connecté (${esc(billitModeLabel(Billit.mode()))}) : ${esc(name)}</span>`;
+      const companies = a?.Companies || a?.companies || [];
+      const k = s.billit[Billit.mode()];
+      // PartyID vide : on le reprend de la société liée à la clé (choix si plusieurs sociétés).
+      if (!k.partyId) {
+        let co = companies[0];
+        if (companies.length > 1) {
+          const i = prompt('Plusieurs sociétés pour cette clé :\n' + companies.map((c, n) => `${n + 1}. ${c.Name || c.CommercialName} (PartyID ${c.PartyID})`).join('\n') + '\n\nNuméro de la société :', '1');
+          co = companies[(+i || 1) - 1];
+        }
+        if (!co?.PartyID) throw new Error('PartyID introuvable dans la réponse de Billit : ' + JSON.stringify(a).slice(0, 200));
+        k.partyId = String(co.PartyID);
+        await saveSettings();
+        render();
+        return toast(`PartyID ${co.PartyID} (${co.Name || ''}) enregistré`);
+      }
+      const co = companies.find(c => String(c.PartyID) === String(k.partyId)) || companies[0];
+      out.innerHTML = `<span class="pill ok">✓ Connecté (${esc(billitModeLabel(Billit.mode()))}) : ${esc(co?.Name || a?.Email || 'OK')} · PartyID ${esc(k.partyId)}</span>`;
     } catch (e) { out.innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
   };
   $('#pinSet').onclick = () => editPin();
