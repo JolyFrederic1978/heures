@@ -252,9 +252,9 @@ async function sync() {
 }
 
 // ---------- rendu ----------
-const TITLES = { today: "Aujourd'hui", list: 'Interventions', billing: 'Facturer', archive: 'Archives', achats: 'Achats', settings: 'Réglages' };
-// Achats : module séparé (achats.js), avec ses propres données et sa propre synchro.
-const VIEWS = () => ({ today: viewToday, list: viewList, billing: viewBilling, archive: viewArchive, achats: Achats.view, settings: viewSettings });
+const TITLES = { today: "Aujourd'hui", list: 'Interventions', billing: 'Facturer', archive: 'Archives', achats: 'Achats', articles: 'Articles', settings: 'Réglages' };
+// Achats et Articles : module séparé (achats.js), avec ses propres données et sa propre synchro.
+const VIEWS = () => ({ today: viewToday, list: viewList, billing: viewBilling, archive: viewArchive, achats: Achats.view, articles: Achats.articles, settings: viewSettings });
 function render() {
   clearInterval(tick);
   // Accès : connexion Microsoft obligatoire, puis code PIN s'il est défini.

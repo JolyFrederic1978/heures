@@ -104,7 +104,7 @@ const Achats = (() => {
   const product = ref => ref && products?.find(p => fold(p.Reference) === fold(ref));
   const productPrice = p => p ? +(p.AmountExcl ?? p.UnitPriceExcl ?? 0) : null;
   // Relue si plus vieille que maxAge (ms) : les prix peuvent être changés dans Billit pendant que l'app est ouverte.
-  // Les dialogues (article, client, Articles et marges) demandent une liste fraîche (maxAge 0).
+  // Les dialogues (article, client, fiche d'un article Billit) demandent une liste fraîche (maxAge 0).
   async function loadProducts(maxAge = 60000) {
     if (!Billit.ready()) { products = null; productsErr = 'Clé API Billit absente (Réglages) : prix Billit non vérifiés.'; return; }
     if (products && productsMode === Billit.mode() && Date.now() - productsAt < maxAge) return;
@@ -467,10 +467,6 @@ const Achats = (() => {
             <div class="dur">${i.totalExcl != null ? eur(i.totalExcl) : ''}</div>
             ${i.file ? `<button class="btn chip" data-ipdf="${i.id}" title="Voir la facture">📄 PDF</button>` : ''}</li>`).join('')}</ul>
           <p class="small muted" id="iMore"></p>` : '<div class="empty">Aucune facture importée.</div>'}</div>
-      <div class="card"><div class="row"><h2 class="grow" style="margin:0">Articles et marges</h2>
-        <button class="btn" id="aArts">Ouvrir</button></div>
-        <p class="small muted">Correspondance article fournisseur → article Billit (${alive(A.mapping).length}), marges des fournisseurs
-          (${alive(A.suppliers).map(s => `${esc(s.name)} ${isSet(s.margin) ? pct(s.margin) : '?'}`).join(', ')}), création d'articles Billit.</p></div>
       <div class="card"><h2>Factures fournisseurs</h2>
         <p class="small muted" style="margin-top:0">À l'ouverture de l'app, puis toutes les heures et sur « Vérifier maintenant », l'app lit :</p>
         <ul class="small muted" style="margin:0 0 8px;padding-left:18px">
@@ -532,7 +528,6 @@ const Achats = (() => {
       });
       filterInv();
     }
-    $('#aArts').onclick = () => showArticles();
     bindLines();
     bindWorks();
   }
@@ -662,22 +657,24 @@ const Achats = (() => {
     }
     return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
-  // Référence suivante d'une catégorie : préfixe le plus courant (« int », « log »…), numéro suivant parmi tous les articles de ce préfixe.
+  // Référence proposée (règle de Fred) : 3 premières lettres de la catégorie, « - », puis le numéro suivant disponible
+  // pour ce préfixe (ex. « logiciel » : LOG-001, log-002, log-003 → log-004 ; « matériel » → mat-…). Numéro sur 3 chiffres.
+  // Exceptions voulues par Fred : ces catégories gardent leurs anciens préfixes.
+  const REF_PREFIX = { 'service internet': 'int', reseau: 'net' };
+  const refPrefix = g => REF_PREFIX[fold(g.name).trim()] || fold(g.name).replace(/[^a-z]/g, '').slice(0, 3);
   function nextRef(g) {
-    const pre = {};
-    for (const r of g.refs) { const m = /^([a-z]+)-\d+$/i.exec(r || ''); if (m) pre[m[1].toLowerCase()] = (pre[m[1].toLowerCase()] || 0) + 1; }
-    const p = Object.entries(pre).sort((a, b) => b[1] - a[1])[0]?.[0];
+    const p = refPrefix(g);
     if (!p) return '';
-    const max = Math.max(0, ...(products || []).map(x => new RegExp(`^${p}-(\\d+)$`, 'i').exec(x.Reference || '')?.[1]).filter(Boolean).map(Number));
-    return `${p}-${String(max + 1).padStart(3, '0')}`;
+    const used = (products || []).map(x => new RegExp(`^${p}-(\\d+)$`, 'i').exec(x.Reference || '')?.[1]).filter(Boolean).map(Number);
+    return `${p}-${String(Math.max(0, ...used) + 1).padStart(3, '0')}`;
   }
 
   // Création d'un article dans Billit. back(ref) : retour à l'écran précédent (ref = article créé, ou rien si annulé).
-  function createArticle(pre = {}, back = () => showArticles()) {
+  function createArticle(pre = {}, back = backToArticles) {
     const f = $('#dlgForm');
     f.innerHTML = `<h2>Nouvel article Billit</h2>
       <p class="small muted">Créé dans Billit en mode ${Billit.mode() === 'live' ? 'réel' : 'test (sandbox)'}.</p>
-      <label>Catégorie Billit</label><select id="pGroup"><option value="">— sans catégorie —</option>
+      <label>Catégorie Billit (obligatoire)</label><select id="pGroup"><option value="">— choisir —</option>
         ${categories().map(g => `<option value="${g.id}" ${String(g.id) === String(pre.GroupID ?? '') ? 'selected' : ''}>${esc(g.name)} (${g.refs.length})</option>`).join('')}</select>
       <label>Référence</label><input id="pRef" value="${esc(pre.Reference)}" placeholder="ex. int-005" autocapitalize="off">
       <p class="small muted" id="pRefHint" style="margin:4px 0 0"></p>
@@ -693,11 +690,12 @@ const Achats = (() => {
     };
     $('#pBuy').oninput = $('#pPrice').oninput = showMargin;
     showMargin();
-    // Catégorie choisie : référence suivante proposée (ex. « logiciel » : LOG-001, log-002, log-003 → log-004), si le champ est vide ou déjà proposé.
+    // Catégorie choisie : référence proposée (3 lettres de la catégorie + numéro suivant), si le champ est vide ou déjà proposé.
     let suggested = '';
     const onGroup = () => {
       const g = categories().find(x => String(x.id) === $('#pGroup').value), next = g && nextRef(g);
-      $('#pRefHint').textContent = g ? `Articles de cette catégorie : ${g.refs.slice(0, 8).join(', ')}${g.refs.length > 8 ? '…' : ''}` : '';
+      $('#pRefHint').textContent = !categories().length ? 'Aucune catégorie trouvée dans Billit (liste des articles non chargée ?).'
+        : g ? `Articles de cette catégorie : ${g.refs.slice(0, 8).join(', ')}${g.refs.length > 8 ? '…' : ''}` : 'Choisis la catégorie : la référence est proposée.';
       if (next && (!$('#pRef').value.trim() || $('#pRef').value === suggested)) $('#pRef').value = suggested = next;
     };
     $('#pGroup').onchange = onGroup;
@@ -706,7 +704,8 @@ const Achats = (() => {
     $('#pSave').onclick = async ev => {
       ev.preventDefault();
       const item = { Reference: $('#pRef').value.trim(), Description: $('#pDesc').value.trim(), AmountExcl: +$('#pPrice').value, VAT: +$('#pVat').value,
-        ...($('#pBuy').value !== '' ? { BuyExcl: +$('#pBuy').value } : {}), ...($('#pGroup').value ? { GroupID: +$('#pGroup').value } : {}) };
+        ...($('#pBuy').value !== '' ? { BuyExcl: +$('#pBuy').value } : {}), GroupID: +$('#pGroup').value };
+      if (!$('#pGroup').value) return alert('Choisis la catégorie Billit de l\'article.');
       if (!item.Reference || !item.Description) return alert('Référence et description requises.');
       if (!(item.AmountExcl >= 0) || $('#pPrice').value === '') return alert('Prix requis.');
       await loadProducts(0);
@@ -858,61 +857,88 @@ const Achats = (() => {
     openDlg();
   }
 
-  // Page « Articles et marges » : marges fournisseurs, correspondances, articles Billit.
-  async function showArticles() {
-    const f = $('#dlgForm');
-    const draw = () => {
-      const maps = alive(A.mapping).sort((a, b) => (a.supplier + a.label).localeCompare(b.supplier + b.label));
-      const sups = alive(A.suppliers).sort((a, b) => a.name.localeCompare(b.name));
-      f.innerHTML = `<h2>Articles et marges</h2>
-        <h2 style="font-size:15px;margin-top:14px">Correspondance des articles (${maps.length})</h2>
-        <p class="small muted" style="margin:0">Article du fournisseur → article Billit. Touche une ligne pour la modifier (nom, article, marge).</p>
-        ${maps.length ? `<ul class="list">${maps.map(m => { const p = product(m.billitRef); return `<li class="tap" data-map="${m.id}"><div class="grow" style="flex:1;min-width:0"><strong>${esc(m.label)}</strong>
-            <div class="small muted">${esc(m.supplier)}${m.ignore ? ' · non refacturé' : ''}${isSet(m.margin) ? ` · marge article ${pct(m.margin)}` : ''}${p ? ` · Billit ${eur(productPrice(p))}` : ''}</div></div>
+  // Onglet « Articles » : articles Billit (création sans passer par un import), correspondances, marges des fournisseurs, contacts → clients.
+  // Les fiches s'ouvrent en fenêtre ; « Retour » / enregistrement reviennent sur la page.
+  let artFind = '', artCat = '';
+  const backToArticles = () => { if ($('#dlg').open) $('#dlg').close(); render(); };
+  function articles() {
+    if (!A) { $('#view').innerHTML = '<div class="empty">Chargement…</div>'; load().then(() => tab === 'articles' && render()); return; }
+    if (Billit.ready() && !productsErr && (!products || Date.now() - productsAt > 60000)) loadProducts().then(() => tab === 'articles' && !$('#dlg').open && render());
+    if (!Billit.ready() && !productsErr) productsErr = 'Clé API Billit absente (Réglages).';
+    const cats = categories(), catOf = p => p.GroupID ? cats.find(g => g.id === p.GroupID)?.name || p.GroupName || '' : '';
+    const prods = (products || []).slice().sort((a, b) => String(a.Reference).localeCompare(String(b.Reference)));
+    const maps = alive(A.mapping).sort((a, b) => (a.supplier + a.label).localeCompare(b.supplier + b.label));
+    const sups = alive(A.suppliers).sort((a, b) => a.name.localeCompare(b.name));
+    const hints = alive(A.hints).sort((a, b) => a.label.localeCompare(b.label));
+    $('#view').innerHTML = `
+      <div class="card"><div class="row"><h2 class="grow" style="margin:0;border:0;padding:0">Articles Billit (${products ? products.length : '?'})</h2>
+          <button class="btn primary" id="pNew" ${Billit.ready() && products ? '' : 'disabled'}>+ Nouvel article</button></div>
+        <p class="small muted" style="margin:6px 0 10px">Billit ${Billit.mode() === 'live' ? 'réel' : 'test (sandbox)'}. Touche un article pour le modifier (nom, prix, TVA, catégorie).</p>
+        ${productsErr ? `<p class="small"><span class="pill warn">${esc(productsErr)}</span></p>` : ''}
+        ${products ? `<input type="search" id="artFind" placeholder="Rechercher : référence, nom…" value="${esc(artFind)}">
+          <select id="artCat" style="margin-top:8px"><option value="">Toutes les catégories</option>
+            ${cats.map(g => `<option value="${g.id}" ${String(g.id) === artCat ? 'selected' : ''}>${esc(g.name)} (${g.refs.length})</option>`).join('')}
+            <option value="none" ${artCat === 'none' ? 'selected' : ''}>Sans catégorie (${prods.filter(p => !p.GroupID).length})</option></select>
+          <ul class="list" id="artList" style="margin-top:8px">${prods.map(p => `<li class="tap" data-prod="${esc(p.ProductID)}" data-cat="${esc(p.GroupID || 'none')}"
+              data-find="${esc(fold([p.Reference, p.Description, catOf(p)].join(' ')))}">
+            <div class="grow" style="flex:1;min-width:0"><strong>${esc(p.Reference || '(sans réf.)')}</strong> ${esc(p.Description || '')}
+              <div class="small muted">${catOf(p) ? esc(catOf(p)) : '<span class="pill warn">sans catégorie</span>'}${p.VAT != null ? ` · TVA ${esc(p.VAT)} %` : ''}</div></div>
+            <div class="dur">${eur(productPrice(p))}</div></li>`).join('')}</ul>
+          <p class="small muted" id="artMore"></p>` : !productsErr ? '<div class="empty">Chargement des articles Billit…</div>' : ''}
+      </div>
+      <div class="card"><h2>Correspondance des articles fournisseurs (${maps.length})</h2>
+        <p class="small muted" style="margin-top:0">Article d'une facture fournisseur → article Billit. Touche une ligne pour la modifier (nom, article, marge).</p>
+        ${maps.length ? `<ul class="list">${maps.map(m => { const p = product(m.billitRef); return `<li class="tap" data-map="${m.id}"><div class="grow" style="flex:1;min-width:0">${supPill(m.supplier)} <strong>${esc(m.label)}</strong>
+            <div class="small muted">${[m.ignore && 'non refacturé', isSet(m.margin) && `marge article ${pct(m.margin)}`, p && `Billit ${eur(productPrice(p))}`].filter(Boolean).join(' · ')}</div></div>
             <div class="dur">${esc(m.billitRef || '—')}${m.billitRef && products && !p ? '<div><span class="pill warn">inconnu</span></div>' : ''}</div></li>`; }).join('')}</ul>`
-          : '<div class="empty">Vide : elle se remplit quand tu complètes les articles importés.</div>'}
-        <h2 style="font-size:15px;margin-top:16px">Articles Billit (${products ? products.length : '?'}) <span class="small muted">· ${Billit.mode() === 'live' ? 'réel' : 'test'}</span></h2>
-        ${productsErr ? `<p class="small muted">${esc(productsErr)}</p>` : ''}
-        ${products ? `<ul class="list small" style="max-height:260px;overflow:auto">${products.slice().sort((a, b) => String(a.Reference).localeCompare(String(b.Reference))).map(p => `<li class="tap" data-prod="${p.ProductID}">
-            <strong style="min-width:70px">${esc(p.Reference || '(sans réf.)')}</strong><div class="grow" style="flex:1;min-width:0">${esc(p.Description || '')}</div><div class="dur">${eur(productPrice(p))}</div></li>`).join('')}</ul>` : ''}
-        <div class="row" style="margin-top:8px"><button class="btn chip" id="pNew" ${Billit.ready() ? '' : 'disabled'}>+ Nouvel article Billit</button></div>
-        ${alive(A.hints).length ? `<h2 style="font-size:15px;margin-top:16px">Contacts → clients (${alive(A.hints).length})</h2>
-          <p class="small muted" style="margin:0">Pour les fournisseurs sans domaine (MGK) : appris en complétant un article.</p>
-          <ul class="list">${alive(A.hints).sort((a, b) => a.label.localeCompare(b.label)).map(h => `<li style="align-items:center"><div class="grow" style="flex:1;min-width:0">
-            <strong>${esc(h.label)}</strong> → ${esc(client(h.clientId).name)}<div class="small muted">${esc(h.supplier)}</div></div>
-            <button class="btn danger chip" data-delhint="${h.id}" title="Oublier">🗑</button></li>`).join('')}</ul>` : ''}
-        <h2 style="font-size:15px;margin-top:16px">Marges des fournisseurs</h2>
-        <p class="small muted" style="margin:0">Utilisée quand l'article n'a pas sa propre marge. Prix de vente = achat × (1 + marge).</p>
-        <ul class="list">${sups.map(s => `<li style="align-items:center"><strong class="grow" style="flex:1">${esc(s.name)}</strong>
+          : '<div class="empty">Vide : elle se remplit quand tu complètes les articles importés (onglet Achats).</div>'}
+      </div>
+      <div class="card"><h2>Marges des fournisseurs</h2>
+        <p class="small muted" style="margin-top:0">Utilisée quand l'article n'a pas sa propre marge. Prix de vente = achat × (1 + marge).</p>
+        <ul class="list">${sups.map(s => `<li style="align-items:center"><span class="grow" style="flex:1">${supPill(s.name)}</span>
           <input type="number" step="0.1" data-smargin="${s.id}" value="${esc(s.margin)}" style="width:90px"> %</li>`).join('')}</ul>
         <div class="row"><button class="btn chip" id="sAdd">+ Fournisseur</button></div>
-        <div class="actions"><button class="btn" value="cancel">Fermer</button></div>`;
-      $$('[data-smargin]', f).forEach(inp => inp.onchange = async () => {
-        const s = A.suppliers.find(x => x.id === inp.dataset.smargin);
-        Object.assign(touch(s), { margin: inp.value === '' ? '' : +inp.value });
-        await save(); scheduleSync(); toast(`Marge ${s.name} : ${inp.value === '' ? 'aucune' : pct(inp.value)}`);
-      });
-      $('#sAdd').onclick = async () => {
-        const name = (prompt('Nom du fournisseur (tel qu\'il apparaît dans l\'app) :', '') || '').trim();
-        if (!name) return;
-        if (supplierOf(name)) return alert('Ce fournisseur existe déjà.');
-        const m = prompt(`Marge par défaut de ${name} (%) :`, '100');
-        A.suppliers.push(touch({ id: uid('sup'), name, margin: m === null || m.trim() === '' ? '' : +m.replace(',', '.') }));
-        await save(); scheduleSync(); draw();
-      };
-      $$('[data-delhint]', f).forEach(b => b.onclick = async () => {
-        const h = A.hints.find(x => x.id === b.dataset.delhint);
-        if (!confirm(`Oublier « ${h.label} » → ${client(h.clientId).name} ? (les articles déjà attribués ne changent pas)`)) return;
-        touch(h).deleted = true; await save(); scheduleSync(); draw();
-      });
-      $$('[data-map]', f).forEach(li => li.onclick = () => editMap(A.mapping.find(m => m.id === li.dataset.map)));
-      $$('[data-prod]', f).forEach(li => li.onclick = () => editProduct(products.find(p => String(p.ProductID) === li.dataset.prod)));
-      $('#pNew').onclick = () => createArticle({}, () => showArticles());
+      </div>
+      <div class="card"><h2>Contacts → clients (${hints.length})</h2>
+        <p class="small muted" style="margin-top:0">Pour les fournisseurs sans domaine (MGK) : appris en complétant un article (« Retenir … pour ce client »).</p>
+        ${hints.length ? `<ul class="list">${hints.map(h => `<li style="align-items:center"><div class="grow" style="flex:1;min-width:0">
+            <strong>${esc(h.label)}</strong> → ${esc(client(h.clientId).name)}<div class="small muted">${esc(h.supplier)}</div></div>
+            <button class="btn danger chip" data-delhint="${h.id}" title="Oublier">🗑</button></li>`).join('')}</ul>` : '<div class="empty">Aucun contact appris.</div>'}
+      </div>`;
+
+    // Recherche / catégorie sans redessiner la page.
+    const filterArt = () => {
+      const words = fold(artFind).split(/\s+/).filter(Boolean), all = $$('#artList > li');
+      const hits = all.filter(li => (!artCat || li.dataset.cat === artCat) && words.every(w => li.dataset.find.includes(w)));
+      all.forEach(li => li.classList.toggle('hidden', !hits.includes(li)));
+      if ($('#artMore')) $('#artMore').textContent = hits.length === all.length ? '' : `${hits.length} article(s) sur ${all.length}.`;
     };
-    draw();
-    openDlg();
-    await loadProducts(0);
-    if ($('#dlg').open && $('#pNew')) draw();
+    if ($('#artFind')) {
+      $('#artFind').oninput = ev => { artFind = ev.target.value; filterArt(); };
+      $('#artCat').onchange = ev => { artCat = ev.target.value; filterArt(); };
+      filterArt();
+    }
+    $('#pNew').onclick = () => createArticle(artCat && artCat !== 'none' ? { GroupID: artCat } : {}, backToArticles);
+    $$('[data-prod]').forEach(li => li.onclick = () => editProduct(products.find(p => String(p.ProductID) === li.dataset.prod)));
+    $$('[data-map]').forEach(li => li.onclick = () => editMap(A.mapping.find(m => m.id === li.dataset.map)));
+    $$('[data-smargin]').forEach(inp => inp.onchange = async () => {
+      const s = A.suppliers.find(x => x.id === inp.dataset.smargin);
+      Object.assign(touch(s), { margin: inp.value === '' ? '' : +inp.value });
+      await save(); scheduleSync(); toast(`Marge ${s.name} : ${inp.value === '' ? 'aucune' : pct(inp.value)}`);
+    });
+    $('#sAdd').onclick = async () => {
+      const name = (prompt('Nom du fournisseur (tel qu\'il apparaît dans l\'app) :', '') || '').trim();
+      if (!name) return;
+      if (supplierOf(name)) return alert('Ce fournisseur existe déjà.');
+      const m = prompt(`Marge par défaut de ${name} (%) :`, '100');
+      A.suppliers.push(touch({ id: uid('sup'), name, margin: m === null || m.trim() === '' ? '' : +m.replace(',', '.') }));
+      await changed();
+    };
+    $$('[data-delhint]').forEach(b => b.onclick = async () => {
+      const h = A.hints.find(x => x.id === b.dataset.delhint);
+      if (!confirm(`Oublier « ${h.label} » → ${client(h.clientId).name} ? (les articles déjà attribués ne changent pas)`)) return;
+      touch(h).deleted = true; await changed();
+    });
   }
 
   function editMap(m) {
@@ -926,7 +952,7 @@ const Achats = (() => {
       <label class="check"><input type="checkbox" id="mIgnore" ${m.ignore ? 'checked' : ''}> Ne jamais refacturer ce type d'article</label>
       <div class="actions"><button class="btn danger" id="mDel" style="margin-right:auto">Supprimer</button>
         <button class="btn" id="mBack">Retour</button><button class="btn primary" id="mSave">Enregistrer</button></div>`;
-    $('#mBack').onclick = () => showArticles();
+    $('#mBack').onclick = backToArticles;
     $('#mSave').onclick = async ev => {
       ev.preventDefault();
       const margin = $('#mMargin').value.trim(), label = $('#mLabel').value.trim().replace(/\s+/g, ' ');
@@ -934,13 +960,13 @@ const Achats = (() => {
       // Le nom est repris par les lignes de ce type (la clé de correspondance, elle, ne change pas).
       if (label !== m.label) alive(A.lines).forEach(l => { if (l.mapId === m.id && l.label === m.label) { l.label = label; touch(l); } });
       Object.assign(touch(m), { label, billitRef: $('#mRef').value.trim(), margin: margin === '' ? '' : +margin, ignore: $('#mIgnore').checked });
-      await save(); scheduleSync(); showArticles();
+      await save(); scheduleSync(); backToArticles();
     };
     $('#mDel').onclick = async () => {
       if (!confirm('Supprimer cette correspondance ? Les articles non facturés de ce type redeviendront « à compléter ».')) return;
       touch(m).deleted = true;
       alive(A.lines).forEach(l => { if (l.mapId === m.id && l.status !== 'billed') { l.mapId = null; touch(l); } });
-      await save(); scheduleSync(); showArticles();
+      await save(); scheduleSync(); backToArticles();
     };
   }
 
@@ -950,15 +976,19 @@ const Achats = (() => {
     const f = $('#dlgForm');
     f.innerHTML = `<h2>Article Billit ${esc(p.Reference || '')}</h2>
       <p class="small muted">Modifié dans Billit en mode ${Billit.mode() === 'live' ? 'réel' : 'test (sandbox)'}.</p>
+      <label>Catégorie Billit</label><select id="pGroup"><option value="">${p.GroupID ? '— choisir —' : '— sans catégorie —'}</option>
+        ${categories().map(g => `<option value="${g.id}" ${g.id === p.GroupID ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
       <label>Référence</label><input id="pRef" value="${esc(p.Reference)}" autocapitalize="off">
       <label>Nom (description)</label><input id="pDesc" value="${esc(p.Description)}">
       <div class="grid2"><div><label>Prix de vente HTVA</label><input type="number" step="0.01" id="pPrice" value="${esc(productPrice(p))}"></div>
         <div><label>TVA %</label><input type="number" step="1" id="pVat" value="${esc(p.VAT ?? 21)}"></div></div>
       <div class="actions"><button class="btn" id="pBack">Retour</button><button class="btn primary" id="pSave">Enregistrer dans Billit</button></div>`;
-    $('#pBack').onclick = () => showArticles();
+    $('#pBack').onclick = backToArticles;
     $('#pSave').onclick = async ev => {
       ev.preventDefault();
-      const item = { ...productBody(p), Reference: $('#pRef').value.trim(), Description: $('#pDesc').value.trim(), AmountExcl: +$('#pPrice').value, VAT: +$('#pVat').value };
+      const item = { ...productBody(p), Reference: $('#pRef').value.trim(), Description: $('#pDesc').value.trim(), AmountExcl: +$('#pPrice').value, VAT: +$('#pVat').value,
+        ...($('#pGroup').value ? { GroupID: +$('#pGroup').value } : {}) };
+      if (p.GroupID && !$('#pGroup').value) return alert('Choisis une catégorie (un article ne peut pas perdre sa catégorie).');
       if (!item.Reference || !item.Description || $('#pPrice').value === '') return alert('Référence, nom et prix requis.');
       if (item.Reference !== p.Reference && products.some(x => x !== p && fold(x.Reference) === fold(item.Reference))) return alert(`La référence ${item.Reference} existe déjà.`);
       if (item.Reference !== p.Reference && alive(A.mapping).some(m => fold(m.billitRef) === fold(p.Reference))
@@ -970,7 +1000,7 @@ const Achats = (() => {
           alive(A.mapping).forEach(m => { if (fold(m.billitRef) === fold(p.Reference)) { m.billitRef = item.Reference; touch(m); } });
           await save(); scheduleSync();
         }
-        await loadProducts(0); toast('Article mis à jour dans Billit'); showArticles();
+        await loadProducts(0); toast('Article mis à jour dans Billit'); backToArticles();
       } catch (e) { alert(e.message); if (btn.isConnected) btn.disabled = false; }
     };
     openDlg();
@@ -1019,5 +1049,5 @@ const Achats = (() => {
   // Déconnexion : on oublie la copie locale (les données restent dans OneDrive).
   async function reset() { A = null; products = null; productsErr = ''; lastCheck = 0; msg = ''; await idb('readwrite', s => s.delete('data')); }
 
-  return { view, sync, reset, readyClients, readyFor, ofBill, attach, detach, orderLines };
+  return { view, articles, sync, reset, readyClients, readyFor, ofBill, attach, detach, orderLines };
 })();
