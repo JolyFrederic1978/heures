@@ -1,6 +1,7 @@
 {
-  "name": "Heures OLU – suivi et facturation",
-  "short_name": "Heures",
+  "name": "OLU Gestion",
+  "short_name": "OLU Gestion",
+  "description": "Outil interne de One Level UP : pointage, facturation et refacturation des achats.",
   "lang": "fr",
   "start_url": "./",
   "scope": "./",

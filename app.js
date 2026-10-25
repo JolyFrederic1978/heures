@@ -1,4 +1,5 @@
-// Heures OLU – pointage des interventions, facturation et archivage, synchronisés sur OneDrive.
+// OLU Gestion (anciennement Heures OLU) – pointage des interventions, facturation et archivage, synchronisés sur OneDrive.
+// Les noms techniques gardent « heures » (heures-data.json, base locale, cache) : les changer ferait perdre données et connexion.
 // Source de vérité : App/heures-data.json. Les fichiers Excel sont régénérés à partir de ces données :
 //   Interventions-A-Facturer.xlsx, Archives/Archive-Interventions.xlsx, A facturer/Prestations - Client date.xlsx
 let state;
@@ -257,7 +258,7 @@ function render() {
   // Accès : connexion Microsoft obligatoire, puis code PIN s'il est défini.
   const gate = !OneDrive.signedIn() ? 'login' : locked ? 'pin' : null;
   document.body.classList.toggle('locked', !!gate);
-  if (gate) { if ($('#dlg').open) $('#dlg').close(); $('#viewTitle').textContent = 'Heures'; return gate === 'login' ? viewLogin() : viewPin(); }
+  if (gate) { if ($('#dlg').open) $('#dlg').close(); $('#viewTitle').textContent = 'OLU Gestion'; return gate === 'login' ? viewLogin() : viewPin(); }
   $('#viewTitle').textContent = TITLES[tab];
   $$('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   VIEWS()[tab]();
@@ -655,10 +656,9 @@ function viewBillingTarget(key, all) {
   $$('[data-inca]').forEach(c => c.onchange = () => { c.checked ? excludedAch.delete(c.dataset.inca) : excludedAch.add(c.dataset.inca); render(); });
   bindEdits();
   $('#doBill').onclick = async () => {
+    // Pas de question sur le n° de facture : il se saisit dans la fenêtre de la facture (champ « N° de facture Billit »).
     const total = t.amount + achSum(selA);
-    const ref = prompt(`Facturer ${what} de ${info.label} pour ${eur(total)} HTVA.\n\nN° de facture Billit (optionnel, modifiable plus tard dans Archives) :`, '');
-    if (ref === null) return;
-    const b = touch({ id: uid('b'), key, label: info.label, date: today(), ref: ref.trim(), entryIds: sel.map(e => e.id),
+    const b = touch({ id: uid('b'), key, label: info.label, date: today(), ref: '', entryIds: sel.map(e => e.id),
       from: sel[0]?.date || null, to: sel[sel.length - 1]?.date || null, amount: total });
     state.bills.push(b);
     sel.forEach(e => { e.billId = b.id; touch(e); });
@@ -1185,8 +1185,8 @@ function viewLogin() {
   $('#view').innerHTML = `
     <div class="card" style="text-align:center;margin-top:24px">
       <img src="icons/icon-192.png" alt="" width="72" height="72" style="border-radius:16px">
-      <h2 style="font-size:18px;margin:12px 0 4px">One Level UP · Heures</h2>
-      <p class="muted">Outil interne de pointage de One Level UP.</p>
+      <h2 style="font-size:18px;margin:12px 0 4px">OLU Gestion</h2>
+      <p class="muted">Outil interne de gestion de One Level UP.</p>
       <button class="btn primary big" id="loginBtn" ${OneDrive.configured() ? '' : 'disabled'}>Se connecter avec Microsoft 365</button>
       ${OneDrive.configured() ? '' : '<p class="small"><span class="pill warn">ID d\'application manquant dans la configuration.</span></p>'}
       <p class="small muted" style="margin-bottom:0">Connexion sur la page officielle de Microsoft : le mot de passe n'est jamais saisi ici.</p>
