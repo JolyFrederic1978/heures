@@ -347,7 +347,8 @@ const Achats = (() => {
         ${invoices.length ? `<ul class="list">${invoices.map(i => `<li class="tap" data-inv="${i.id}"><div class="grow" style="flex:1;min-width:0"><strong>${esc(i.supplier)} ${esc(i.number)}</strong>
             ${i.warn ? '<span class="pill warn">à vérifier</span>' : ''}
             <div class="small muted">${frDate(i.date)} · ${alive(A.lines).filter(l => l.invoiceId === i.id).length} article(s)${i.skipped ? ` · ${i.skipped} à 0 € ignoré(s)` : ''}</div></div>
-            <div class="dur">${i.totalExcl != null ? eur(i.totalExcl) : ''}</div></li>`).join('')}</ul>` : '<div class="empty">Aucune facture importée.</div>'}</div>
+            <div class="dur">${i.totalExcl != null ? eur(i.totalExcl) : ''}</div>
+            ${i.file ? `<button class="btn chip" data-ipdf="${i.id}" title="Voir la facture">📄 PDF</button>` : ''}</li>`).join('')}</ul>` : '<div class="empty">Aucune facture importée.</div>'}</div>
       <div class="card"><div class="row"><h2 class="grow" style="margin:0">Articles et marges</h2>
         <button class="btn" id="aArts">Ouvrir</button></div>
         <p class="small muted">Correspondance article fournisseur → article Billit (${alive(A.mapping).length}), marges des fournisseurs
@@ -368,6 +369,7 @@ const Achats = (() => {
     $$('[data-pretry]').forEach(b => b.onclick = async () => { const p = A.files.find(x => x.id === b.dataset.pretry); p.status = 'retry'; touch(p); await save(); sync(true); });
     $$('[data-aclient]').forEach(li => li.onclick = () => billClient(li.dataset.aclient));
     $$('[data-inv]').forEach(li => li.onclick = () => showInvoice(inv(li.dataset.inv)));
+    $$('[data-ipdf]').forEach(b => b.onclick = ev => { ev.stopPropagation(); showPdf(inv(b.dataset.ipdf)); });
     $('#aArts').onclick = () => showArticles();
     bindLines();
   }
@@ -466,14 +468,22 @@ const Achats = (() => {
       <p class="small muted">Créé dans Billit en mode ${Billit.mode() === 'live' ? 'réel' : 'test (sandbox)'}.</p>
       <label>Référence</label><input id="pRef" value="${esc(pre.Reference)}" placeholder="ex. int-005" autocapitalize="off">
       <label>Description</label><input id="pDesc" value="${esc(pre.Description)}">
-      <div class="grid2"><div><label>Prix de vente HTVA</label><input type="number" step="0.01" id="pPrice" value="${esc(pre.AmountExcl)}"></div>
-        <div><label>TVA %</label><input type="number" step="1" id="pVat" value="${esc(pre.VAT ?? 21)}"></div></div>
+      <div class="grid2"><div><label>Prix d'achat HTVA</label><input type="number" step="0.01" id="pBuy" value="${esc(pre.BuyExcl)}"></div>
+        <div><label>Prix de vente HTVA</label><input type="number" step="0.01" id="pPrice" value="${esc(pre.AmountExcl)}"></div></div>
+      <div class="grid2"><div><label>TVA %</label><input type="number" step="1" id="pVat" value="${esc(pre.VAT ?? 21)}"></div>
+        <div><label>Marge</label><p class="small muted" id="pMargin" style="margin:10px 0 0"></p></div></div>
       <div class="actions"><button class="btn" id="pBack">Retour</button><button class="btn primary" id="pSave">Créer dans Billit</button></div>`;
+    const showMargin = () => {
+      const buy = +$('#pBuy').value, sale = +$('#pPrice').value;
+      $('#pMargin').textContent = $('#pBuy').value !== '' && $('#pPrice').value !== '' && buy > 0 ? `${pct(Math.round((sale - buy) / buy * 1000) / 10)} (${eur(sale - buy)})` : '—';
+    };
+    $('#pBuy').oninput = $('#pPrice').oninput = showMargin;
+    showMargin();
     $('#pBack').onclick = () => back();
     $('#pSave').onclick = async ev => {
       ev.preventDefault();
       const item = { Reference: $('#pRef').value.trim(), Description: $('#pDesc').value.trim(), AmountExcl: +$('#pPrice').value, VAT: +$('#pVat').value,
-        ...(pre.BuyExcl != null ? { BuyExcl: pre.BuyExcl } : {}) };
+        ...($('#pBuy').value !== '' ? { BuyExcl: +$('#pBuy').value } : {}) };
       if (!item.Reference || !item.Description) return alert('Référence et description requises.');
       if (!(item.AmountExcl >= 0) || $('#pPrice').value === '') return alert('Prix requis.');
       await loadProducts(0);
@@ -564,14 +574,14 @@ const Achats = (() => {
     f.innerHTML = `<h2>${esc(i.supplier)} ${esc(i.number)}</h2>
       <p class="small muted">Du ${frDate(i.date)} · total HTVA ${i.totalExcl != null ? eur(i.totalExcl) : '?'} · importée le ${frDate(isoDate(new Date(i.importedAt)))}
         ${i.skipped ? `· ${i.skipped} article(s) à 0 € ignoré(s)` : ''}<br><code>${esc(i.file)}</code></p>
-      <button class="btn" id="iPdf">📄 Voir la facture</button>
+      ${i.file ? '<button class="btn" id="iPdf">📄 Voir la facture</button>' : ''}
       ${i.warn ? `<p class="small"><span class="pill warn">${esc(i.warn)}</span></p>` : ''}
       <ul class="list">${ls.map(lineLi).join('')}</ul>
       <div class="actions"><button class="btn danger" id="iDel" style="margin-right:auto">Supprimer l'import</button>
         ${ls.some(l => ['todo', 'ready'].includes(lineState(l))) ? '<button class="btn" id="iDone">Déjà refacturée</button>' : ''}
         <button class="btn" value="cancel">Fermer</button></div>`;
     bindLines(f);
-    $('#iPdf').onclick = () => showPdf(i);
+    if ($('#iPdf')) $('#iPdf').onclick = () => showPdf(i);
     // Facture déjà refacturée hors de l'app (ex. avant la mise en service du module) : tout passe en « facturé ».
     if ($('#iDone')) $('#iDone').onclick = async () => {
       const todo = ls.filter(l => ['todo', 'ready'].includes(lineState(l)));
