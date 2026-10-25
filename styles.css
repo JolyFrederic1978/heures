@@ -112,6 +112,7 @@ dialog.wide #pPages { max-height: calc(100vh - 150px) !important; }
 .sup-mgk { --sup: #1d9e75; }
 .sup-lisam { --sup: #7f77dd; }
 .sup-alescom { --sup: #d4537e; }
+.sup-dsd { --sup: #639922; }
 .sup-autre { --sup: #ba7517; }
 ul.arts { list-style: none; margin: 6px 0 0; padding: 0; }
 ul.arts li { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; border: 0; font-size: 13px; color: var(--muted); }

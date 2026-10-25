@@ -61,13 +61,15 @@ const Fournisseurs = (() => {
   }
   const DATE = /(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})/;
   const MONTHS = ['janvier', 'fevrier', 'mars', 'avril', 'mai', 'juin', 'juillet', 'aout', 'septembre', 'octobre', 'novembre', 'decembre'];
+  // Mois en anglais (factures DSD : « 21 September 2026 »).
+  const MONTHS_EN = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
   const plain = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
   // « 01/04/2026 » ou « 01 Avril 2026 » → 2026-04-01
   function isoDate(s) {
     let m = DATE.exec(s || '');
     if (m) return `${m[3]}-${pad(m[2])}-${pad(m[1])}`;
     m = /(\d{1,2})\s+([a-z]+)\s+(\d{4})/.exec(plain(s));
-    const mo = m ? MONTHS.indexOf(m[2]) : -1;
+    const mo = m ? (MONTHS.includes(m[2]) ? MONTHS.indexOf(m[2]) : MONTHS_EN.indexOf(m[2])) : -1;
     return mo >= 0 ? `${m[3]}-${pad(mo + 1)}-${pad(m[1])}` : null;
   }
   const period = s => {
@@ -307,7 +309,38 @@ const Fournisseurs = (() => {
     }
   };
 
-  const READERS = [ovh, mgk, lisam, alescom];
+  // DSD Europe (licences Microsoft, vérifié sur 3 factures 2026 ajoutées à la main dans Billit : 902796, 902798, 956143) :
+  //   Facture 956143 / DSD Europe B.V. / Numéro de facture | 956143 / Date | 21 September 2026   ← date en anglais
+  //   Référence produit | Produit | Valeur | Total (EUR)                                         ← en-tête, puis « (EUR) »
+  //   DSD270015 | Microsoft 365 Famille 6-PC/MAC 1 an | 1 | € 94,30 | € 94,30
+  //   Total/per page: | € 188,60 / Sous-total HT: | € 188,60   (autoliquidation, pas de TVA)
+  // Pas de domaine ni de contact : le client se choisit à la main. Correspondance par la référence produit DSD.
+  const euro = s => String(s || '').replace(/^€\s*/, '');
+  const dsd = {
+    id: 'dsd', name: 'DSD',
+    detect: rows => rows.some(r => /^DSD Europe\b/i.test(r.text)),
+    parse(rows, fileName) {
+      const number = find(rows, /^Numéro de facture\s+(\d+)/i)?.[1] || find(rows, /^(?:Facture|Invoice)\s+(\d+)/i)?.[1] || /(\d{5,})/.exec(fileName || '')?.[1] || '';
+      const date = isoDate(find(rows, /^Date\s+(\d{1,2}\s+[A-Za-zéû]+\s+\d{4})/i)?.[1]);
+      const totalM = find(rows, /Sous-total HT:?\s+€?\s*(-?[\d .  ]+[.,]\d{2})/i);
+      const lines = [];
+      let inTable = false;
+      for (const r of rows) {
+        const t = r.text, c = r.cells.map(euro), n = c.length;
+        if (/^Référence produit/i.test(t)) { inTable = true; continue; }
+        if (!inTable) continue;
+        if (/^(Total\/per page|Sous-total|Total:)/i.test(t)) { inTable = false; continue; }
+        if (n >= 4 && isAmount(c[n - 1]) && isAmount(c[n - 2]) && /^\d+(?:[.,]\d+)?$/.test(c[n - 3])) {
+          const ref = n >= 5 ? c[0] : '', label = c.slice(n >= 5 ? 1 : 0, n - 3).join(' ');
+          lines.push({ label, detail: ref ? `réf. DSD ${ref}` : '', key: ref ? 'code:' + ref.toLowerCase() : keyOf(label), domain: '', ref,
+            qty: parseFloat(c[n - 3].replace(',', '.')), unit: num(c[n - 2]), total: num(c[n - 1]) });
+        } else if (lines.length && !/^\(EUR\)$/i.test(t)) lines[lines.length - 1].detail = [lines[lines.length - 1].detail, t].filter(Boolean).join(' · ');
+      }
+      return { supplier: 'DSD', number, date, totalExcl: totalM ? num(totalM[1]) : null, lines };
+    }
+  };
+
+  const READERS = [ovh, mgk, lisam, alescom, dsd];
 
   // --- e-facture UBL (Peppol, reçue dans Billit) ---
   const ublDoc = xml => new DOMParser().parseFromString(xml, 'application/xml');

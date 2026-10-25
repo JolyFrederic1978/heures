@@ -1242,7 +1242,9 @@ function viewPin() {
     ev.preventDefault();
     const p = state.settings.pin;
     if (p && await pinHash($('#pinIn').value, p.salt) === p.hash) {
-      locked = false; state.pinFails = 0; await DB.save(state); render(); sync(); return;
+      // Déverrouillé : toujours sur « Aujourd'hui » (demande de Fred), écran Facturer remis à sa liste.
+      locked = false; tab = 'today'; billingTarget = null;
+      state.pinFails = 0; await DB.save(state); render(); sync(); return;
     }
     state.pinFails = fails + 1; await DB.save(state);
     if (state.pinFails >= PIN_MAX_FAILS) { alert('Trop d\'essais : déconnexion.'); return signOut(); }

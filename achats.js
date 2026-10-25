@@ -12,7 +12,8 @@ const Achats = (() => {
   const CHECK_EVERY = 60 * 60000;     // Entrant et Billit : à l'ouverture de l'app, puis au plus toutes les heures (et sur « Vérifier maintenant »)
   // Marges par défaut données par Fred (25/10/2026). Identifiants fixes : pas de doublon entre appareils.
   const SUPPLIERS_SEED = [{ id: 'sup_ovh', name: 'OVH', margin: 100 }, { id: 'sup_mgk', name: 'MGK', margin: 35 },
-    { id: 'sup_lisam', name: 'lisam.cloud', margin: 100 }, { id: 'sup_alescom', name: 'Alescom', margin: '' }];
+    { id: 'sup_lisam', name: 'lisam.cloud', margin: 100 }, { id: 'sup_alescom', name: 'Alescom', margin: '' },
+    { id: 'sup_dsd', name: 'DSD', margin: '' }];
   let A = null;                       // données du module
   let lastCheck = 0, busy = false, msg = '';
   let invFind = '', invSup = '';      // recherche et filtre fournisseur des « Factures importées »
@@ -97,7 +98,7 @@ const Achats = (() => {
   const clientName = l => l.clientId ? client(l.clientId).name : '';
   const pct = n => `${String(n).replace('.', ',')} %`;
   // Couleur par fournisseur (styles.css : sup-ovh, sup-mgk…) et étiquette colorée.
-  const supCls = s => ({ ovh: 'sup-ovh', mgk: 'sup-mgk', 'lisam.cloud': 'sup-lisam', alescom: 'sup-alescom' })[String(s || '').toLowerCase()] || 'sup-autre';
+  const supCls = s => ({ ovh: 'sup-ovh', mgk: 'sup-mgk', 'lisam.cloud': 'sup-lisam', alescom: 'sup-alescom', dsd: 'sup-dsd' })[String(s || '').toLowerCase()] || 'sup-autre';
   const supPill = s => `<span class="pill sup-p ${supCls(s)}">${esc(s)}</span>`;
 
   // --- articles Billit ---
@@ -230,7 +231,7 @@ const Achats = (() => {
   // Date de la mise en service, synchronisée (Réglages de l'app) : sert aussi à ne demander à Billit que les factures modifiées depuis.
   const billitFrom = () => state.settings.achatsBillitFrom?.[Billit.mode()] || '';
   // Fournisseur Billit (nom de la société) → nom du lecteur.
-  const BILLIT_SUP = [[/\bovh\b/i, 'OVH'], [/\bmgk\b/i, 'MGK'], [/lisam/i, 'lisam.cloud'], [/alescom/i, 'Alescom']];
+  const BILLIT_SUP = [[/\bovh\b/i, 'OVH'], [/\bmgk\b/i, 'MGK'], [/lisam/i, 'lisam.cloud'], [/alescom/i, 'Alescom'], [/\bdsd\b/i, 'DSD']];
   const supOf = o => BILLIT_SUP.find(([re]) => re.test(o.CounterParty?.DisplayName || ''))?.[1];
   // Date « AAAA-MM-JJ » d'un champ Billit (tout autre contenu est ignoré : il est affiché dans l'app).
   const dayOf = s => /^\d{4}-\d{2}-\d{2}/.exec(String(s || ''))?.[0] || '';
