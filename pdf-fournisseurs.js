@@ -228,7 +228,86 @@ const Fournisseurs = (() => {
     }
   };
 
-  const READERS = [ovh, mgk, lisam];
+  // Alescom (factures « INV/AAAA/NNNNN », vérifié sur 4 factures 2026 reçues par Peppol dans Billit) :
+  //   Facture INV/2026/00209 / Date de facturation | Échéance | … puis 07/07/2026 | 22/07/2026 | …
+  //   DESCRIPTION | QUANTITÉ | PRIX UNITAIRE | [REM.%] | TAXES | MONTANT                      ← en-tête
+  //   [GEODISHMDO] Intervention à distance via | 1,00 | 96,00 | 20,00 | 21% | 76,80 €         ← [code] nom, montant net de remise
+  //   TeamViewer et/ou téléphone / heure - Geoffrey                                            ← suite du nom
+  //   16/3 / 15h15-16h33 / vedi / répertoire réseau mathieu …                                  ← détails de l'intervention : jour, heures, client, travail
+  //   [TTT] Frais de transport | 1,00 | 5,00 | 21% | 5,00 €
+  //   Montant hors taxes | 99,84 €
+  // Les lignes « Intervention » ne sont pas refacturées comme achats : elles deviennent des interventions à ajouter au pointage
+  // (invoice.interventions) ; un « Déplacement » les marque sur site ; les « Frais de transport » ne sont jamais refacturés.
+  const alescom = {
+    id: 'alescom', name: 'Alescom',
+    detect: rows => rows.some(r => /^ALESCOM\b/i.test(r.text)) && rows.some(r => /^Facture\s+INV\//i.test(r.text)),
+    parse(rows) {
+      const number = find(rows, /^Facture\s+(INV\/\d{4}\/\d+)/i)?.[1] || '';
+      const hi = rows.findIndex(r => /^Date de facturation/i.test(r.text));
+      const date = hi >= 0 ? isoDate(rows[hi + 1]?.cells[0]) : null;
+      const totalM = find(rows, /Montant hors taxes\s+(-?[\d .  ]+[.,]\d{2})/i);
+      const END = /^(Conditions de paiement|Paiement dès|Communication de paiement|Montant hors taxes)/i;
+      const DAY = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b\s*(.*)$/;
+      const items = [];
+      let inTable = false;
+      for (const r of rows) {
+        const t = r.text, c = r.cells, n = c.length;
+        if (/^DESCRIPTION\b.*MONTANT/i.test(t)) { inTable = true; continue; }
+        if (!inTable) continue;
+        if (END.test(t)) { inTable = false; continue; }
+        if (n >= 4 && isAmount(c[n - 1]) && /^\d+(?:[.,]\d+)?\s*%$/.test(c[n - 2]) && /^-?\d+(?:[.,]\d+)?$/.test(c[1])) {
+          items.push({ desc: [c[0]], qty: num(c[1]), total: num(c[n - 1]), details: [] });
+        } else if (items.length) {
+          const it = items[items.length - 1];
+          // Les détails commencent au premier « jour/mois » ; avant, c'est la suite du nom de l'article.
+          if (it.details.length || DAY.test(t)) it.details.push(t); else it.desc.push(t);
+        }
+      }
+      const year = (date || '').slice(0, 4), month = +(date || '').slice(5, 7);
+      const lines = items.map(it => {
+        const full = it.desc.join(' ').replace(/\s+/g, ' ').trim();
+        const code = /^\[([^\]]+)\]\s*/.exec(full)?.[1] || '';
+        const label = full.replace(/^\[[^\]]+\]\s*/, '');
+        const kind = /frais de transport/i.test(label) ? 'transport' : /intervention/i.test(label) ? 'intervention' : /d[ée]placement/i.test(label) ? 'deplacement' : '';
+        // Article ordinaire : ce qui suit le nom (ex. « 18/06/2026 au 30/06/2026 : 2 TB ») est un détail, avec la période éventuelle.
+        const more = kind === 'intervention' ? '' : it.details.join(' ');
+        return { label, detail: [code && `réf. Alescom ${code}`, more].filter(Boolean).join(' · '), key: code ? 'code:' + code.toLowerCase() : keyOf(label),
+          domain: '', ref: code, qty: it.qty, unit: it.qty ? Math.round(it.total / it.qty * 100) / 100 : it.total, total: it.total,
+          skip: kind, details: it.details, ...period(more) };
+      });
+      // Interventions : un groupe par « jour/mois » dans les détails (heures « 15h15-16h33 », puis le client, puis le travail fait).
+      const work = lines.filter(l => l.skip === 'intervention');
+      const onSite = lines.some(l => l.skip === 'deplacement') || work.some(l => /sur site|sur place/i.test(l.label));
+      const tech = work.map(l => / - ([A-Za-zÀ-ÿ' -]+)$/.exec(l.label)?.[1]?.trim()).find(Boolean) || '';
+      const minutesQty = work.reduce((s, l) => s + (/\/\s*heure/i.test(l.label) ? l.qty * 60 : /\/\s*minute/i.test(l.label) ? l.qty : 0), 0);
+      const hm = s => { const m = /^(\d{1,2})h(\d{0,2})$/i.exec(s); return m ? `${pad(m[1])}:${pad(m[2] || 0)}` : ''; };
+      const groups = [];
+      for (const t of work.flatMap(l => l.details)) {
+        const d = DAY.exec(t);
+        let rest = t;
+        if (d) {
+          let y = d[3] ? (d[3].length === 2 ? '20' + d[3] : d[3]) : year;
+          if (!d[3] && year && +d[2] > month) y = String(+year - 1);       // facture de janvier pour une intervention de décembre
+          groups.push({ date: y ? `${y}-${pad(d[2])}-${pad(d[1])}` : null, start: '', end: '', client: '', notes: [] });
+          rest = d[4].trim();
+          if (!rest) continue;
+        }
+        const g = groups[groups.length - 1];
+        if (!g) continue;
+        const tm = /^(\d{1,2}h\d{0,2})\s*[-–à]\s*(\d{1,2}h\d{0,2})\s*(.*)$/i.exec(rest);
+        if (tm && !g.start) { g.start = hm(tm[1]); g.end = hm(tm[2]); rest = tm[3].trim(); if (!rest) continue; }
+        if (!g.client) g.client = rest; else g.notes.push(rest);
+      }
+      const diff = (a, b) => { const [h1, m1] = a.split(':').map(Number), [h2, m2] = b.split(':').map(Number); return (h2 * 60 + m2) - (h1 * 60 + m1); };
+      const interventions = (groups.length ? groups : work.length ? [{ date, start: '', end: '', client: '', notes: [] }] : []).map(g => ({
+        date: g.date || date, start: g.start, end: g.end,
+        minutes: g.start && g.end && diff(g.start, g.end) > 0 ? diff(g.start, g.end) : groups.length <= 1 ? minutesQty : 0,
+        client: g.client, notes: g.notes.join(' ; '), onSite, tech }));
+      return { supplier: 'Alescom', number, date, totalExcl: totalM ? num(totalM[1]) : null, lines, interventions };
+    }
+  };
+
+  const READERS = [ovh, mgk, lisam, alescom];
 
   // --- e-facture UBL (Peppol, reçue dans Billit) ---
   const ublDoc = xml => new DOMParser().parseFromString(xml, 'application/xml');
@@ -270,8 +349,9 @@ const Fournisseurs = (() => {
   const round = n => Math.round(n * 100) / 100;
 
   // Lit un PDF : { reader, invoice } ou { reader: null } si aucun lecteur ne reconnaît le fournisseur.
-  async function read(buffer, fileName) {
-    const rows = await readRows(buffer);
+  async function read(buffer, fileName) { return fromRows(await readRows(buffer), fileName); }
+  // Même chose à partir des lignes déjà extraites (sert aussi aux tests).
+  function fromRows(rows, fileName) {
     if (!rows.length) return { rows, reader: null, error: 'PDF sans texte (facture scannée ?) : lecture impossible.' };
     const reader = READERS.find(r => r.detect(rows));
     if (!reader) return { rows, reader: null, error: 'Fournisseur non reconnu : aucun lecteur pour ce format.' };
@@ -299,5 +379,5 @@ const Fournisseurs = (() => {
     return { pages: pdf.numPages, shown: n };
   }
 
-  return { read, readRows, render, domains, keyOf, ublPdfs, fromUbl, readers: () => READERS.map(r => ({ id: r.id, name: r.name })) };
+  return { read, readRows, fromRows, render, domains, keyOf, ublPdfs, fromUbl, readers: () => READERS.map(r => ({ id: r.id, name: r.name })) };
 })();

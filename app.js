@@ -405,7 +405,8 @@ function viewToday() {
 }
 
 // ---- dialogue intervention ----
-function openEntry(entry, preset = {}, fromTimer = false) {
+// onSaved(intervention) : appelé après l'enregistrement d'une nouvelle intervention (ex. intervention lue sur une facture Alescom).
+function openEntry(entry, preset = {}, fromTimer = false, onSaved = null) {
   if (entry?.forfait) return openForfait(entry);
   const c0 = state.clients.find(c => c.id === state.lastClientId && !c.deleted) || activeClients()[0];
   const e = entry || {
@@ -472,10 +473,12 @@ function openEntry(entry, preset = {}, fromTimer = false) {
       description: $('#fDesc').value.trim(), onSite: $('#fSite').checked, alescom: $('#fAles').checked, install: $('#fInst').value.trim()
     };
     if (b && !confirm('Cette intervention est déjà facturée. Modifier quand même l\'archive ?')) return;
+    let saved = entry;
     if (entry) Object.assign(touch(entry), data);
-    else state.entries.push(touch({ id: uid('e'), billId: null, ...data }));
+    else state.entries.push(saved = touch({ id: uid('e'), billId: null, ...data }));
     state.lastClientId = clientId;
     if (fromTimer) setTimer(null);
+    if (!entry && onSaved) await onSaved(saved);
     dlg.close(); await persist(); toast('Enregistré');
   };
   dlg.showModal();

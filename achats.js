@@ -12,7 +12,7 @@ const Achats = (() => {
   const CHECK_EVERY = 60 * 60000;     // Entrant et Billit : à l'ouverture de l'app, puis au plus toutes les heures (et sur « Vérifier maintenant »)
   // Marges par défaut données par Fred (25/10/2026). Identifiants fixes : pas de doublon entre appareils.
   const SUPPLIERS_SEED = [{ id: 'sup_ovh', name: 'OVH', margin: 100 }, { id: 'sup_mgk', name: 'MGK', margin: 35 },
-    { id: 'sup_lisam', name: 'lisam.cloud', margin: 100 }];
+    { id: 'sup_lisam', name: 'lisam.cloud', margin: 100 }, { id: 'sup_alescom', name: 'Alescom', margin: '' }];
   let A = null;                       // données du module
   let lastCheck = 0, busy = false, msg = '';
   let invFind = '', invSup = '';      // recherche et filtre fournisseur des « Factures importées »
@@ -65,6 +65,13 @@ const Achats = (() => {
   const hintOf = (supplier, hint) => hint ? alive(A.hints).find(h => h.supplier === supplier && h.text === hintKey(hint)) : null;
   const clientByHint = (supplier, hint) => { const h = hintOf(supplier, hint); const c = h && state.clients.find(x => x.id === h.clientId && !x.deleted); return c || null; };
   const clientFor = l => clientByDomain(l.domain) || clientByHint(l.supplier, l.hint);
+  // Client écrit dans les détails d'une facture (ex. « vedi » chez Alescom) : nom de la fiche ou nom Billit, sans accents ni casse.
+  const clientByName = name => {
+    const k = fold(name).replace(/[^a-z0-9]+/g, ' ').trim();
+    if (!k) return null;
+    const cs = state.clients.filter(c => !c.deleted), n = c => [c.name, c.billitName].map(s => fold(s).replace(/[^a-z0-9]+/g, ' ').trim());
+    return cs.find(c => n(c).includes(k)) || cs.find(c => n(c).some(x => x && (x.startsWith(k + ' ') || k.startsWith(x + ' ')))) || null;
+  };
   const whereOf = l => l.domain || l.hint || '';          // domaine (OVH) ou contact (MGK)
   const isSet = v => v !== '' && v != null;
   const round2 = n => Math.round(n * 100) / 100;
@@ -90,7 +97,7 @@ const Achats = (() => {
   const clientName = l => l.clientId ? client(l.clientId).name : '';
   const pct = n => `${String(n).replace('.', ',')} %`;
   // Couleur par fournisseur (styles.css : sup-ovh, sup-mgk…) et étiquette colorée.
-  const supCls = s => ({ ovh: 'sup-ovh', mgk: 'sup-mgk', 'lisam.cloud': 'sup-lisam' })[String(s || '').toLowerCase()] || 'sup-autre';
+  const supCls = s => ({ ovh: 'sup-ovh', mgk: 'sup-mgk', 'lisam.cloud': 'sup-lisam', alescom: 'sup-alescom' })[String(s || '').toLowerCase()] || 'sup-autre';
   const supPill = s => `<span class="pill sup-p ${supCls(s)}">${esc(s)}</span>`;
 
   // --- articles Billit ---
@@ -223,18 +230,23 @@ const Achats = (() => {
   // Date de la mise en service, synchronisée (Réglages de l'app) : sert aussi à ne demander à Billit que les factures modifiées depuis.
   const billitFrom = () => state.settings.achatsBillitFrom?.[Billit.mode()] || '';
   // Fournisseur Billit (nom de la société) → nom du lecteur.
-  const BILLIT_SUP = [[/\bovh\b/i, 'OVH'], [/\bmgk\b/i, 'MGK'], [/lisam/i, 'lisam.cloud']];
+  const BILLIT_SUP = [[/\bovh\b/i, 'OVH'], [/\bmgk\b/i, 'MGK'], [/lisam/i, 'lisam.cloud'], [/alescom/i, 'Alescom']];
   const supOf = o => BILLIT_SUP.find(([re]) => re.test(o.CounterParty?.DisplayName || ''))?.[1];
   async function checkBillit() {
     if (!Billit.ready()) return false;
     const mode = Billit.mode(), from = billitFrom(), bid = o => `bd_${mode}_${o.OrderID}`;   // même id sur tous les appareils
-    if (!from) {
-      const day = today();
+    // Fournisseurs déjà mis en service dans ce mode (les 3 premiers l'ont été en même temps que la date de départ).
+    // Un fournisseur ajouté plus tard (Alescom) : ses factures déjà dans Billit sont notées « old » à sa première vérification.
+    const done = state.settings.achatsBillitSups?.[mode] || (from ? ['OVH', 'MGK', 'lisam.cloud'] : []);
+    const todo = BILLIT_SUP.map(x => x[1]).filter(s => !done.includes(s));
+    if (todo.length) {
       for (const o of await Billit.costInvoices('2000-01-01')) {
-        if (supOf(o) && !A.bdocs.some(x => x.id === bid(o)))
+        if (todo.includes(supOf(o)) && !A.bdocs.some(x => x.id === bid(o)))
           A.bdocs.push(touch({ id: bid(o), orderId: o.OrderID, mode, supplier: supOf(o), number: o.OrderNumber || '', date: (o.OrderDate || '').slice(0, 10), status: 'old' }));
       }
-      state.settings.achatsBillitFrom = { ...state.settings.achatsBillitFrom, [mode]: day }; state.settingsAt = Date.now();
+      state.settings.achatsBillitFrom = { ...state.settings.achatsBillitFrom, [mode]: from || today() };
+      state.settings.achatsBillitSups = { ...state.settings.achatsBillitSups, [mode]: [...done, ...todo] };
+      state.settingsAt = Date.now();
       await DB.save(state); scheduleSync();
       return true;
     }
@@ -311,9 +323,15 @@ const Achats = (() => {
       if (!up.ok && up.status !== 412) throw new Error(`OneDrive (${up.status}) : copie de ${name} dans Traités impossible.`);
     }
     if (rec) { rec.deleted = true; touch(rec); }
-    const kept = i.lines.filter(l => l.total || l.unit);           // articles à 0 € : pas pris en compte
+    // Articles à 0 € : pas pris en compte. Lignes « skip » (Alescom) : frais de transport jamais refacturés,
+    // interventions et déplacement repris au pointage (invoice.interventions) au lieu d'être refacturés comme achats.
+    const kept = i.lines.filter(l => (l.total || l.unit) && !l.skip);
+    const skips = i.lines.filter(l => l.skip), zero = i.lines.filter(l => !l.skip && !(l.total || l.unit)).length;
+    const notes = [['transport', 'frais de transport non refacturé(s)'], ['intervention', "ligne(s) d'intervention → pointage"], ['deplacement', 'déplacement → pointage (sur site)']]
+      .map(([k, t]) => { const x = skips.filter(l => l.skip === k); return x.length ? `${x.length} ${t} (${eur(x.reduce((s, l) => s + l.total, 0))})` : ''; }).filter(Boolean);
     const invoice = touch({ id: uid('ai'), supplier: i.supplier, number: i.number, date: i.date, totalExcl: i.totalExcl,
-      file: `${path.done(year)}/${stored}`, importedAt: Date.now(), skipped: i.lines.length - kept.length, warn: totalWarn(i, r.billitTotal) });
+      file: `${path.done(year)}/${stored}`, importedAt: Date.now(), skipped: zero, notes, warn: totalWarn(i, r.billitTotal),
+      interventions: (i.interventions || []).map(x => ({ id: uid('aw'), ...x, clientId: clientByName(x.client)?.id || null, entryId: null, dismissed: false })) });
     A.invoices.push(invoice);
     for (const l of kept) {
       const m = findMap(i.supplier, l.key), c = clientFor({ ...l, supplier: i.supplier });
@@ -321,7 +339,8 @@ const Achats = (() => {
         domain: l.domain, hint: l.hint || '', from: l.from || null, to: l.to || null, qty: l.qty, unit: l.unit, total: l.total,
         clientId: c?.id || null, mapId: m?.id || null, status: 'open' }));
     }
-    return `${i.supplier} ${i.number || name} : ${kept.length} article(s) importé(s)${invoice.skipped ? `, ${invoice.skipped} à 0 € ignoré(s)` : ''}.`
+    return `${i.supplier} ${i.number || name} : ${kept.length} article(s) importé(s)${invoice.skipped ? `, ${invoice.skipped} à 0 € ignoré(s)` : ''}`
+      + `${notes.length ? ', ' + notes.join(', ') : ''}${invoice.interventions.length ? `, ${invoice.interventions.length} intervention(s) à ajouter au pointage` : ''}.`
       + (invoice.warn ? ` ⚠ ${invoice.warn}` : '');
   }
   // Contrôle à l'import : total des articles lus (0 € compris) = total HTVA de la facture, et = total connu par Billit pour une facture reçue dans Billit.
@@ -415,6 +434,7 @@ const Achats = (() => {
     const findText = i => fold([i.supplier, i.number, frDate(i.date), i.totalExcl != null ? eur(i.totalExcl) : '', i.totalExcl,
       ...alive(A.lines).filter(l => l.invoiceId === i.id).flatMap(l => [clientName(l), whereOf(l), l.label])].join(' '));
     const problems = alive(A.files), checks = invoices.filter(toCheck);
+    const works = invoices.flatMap(i => (i.interventions || []).filter(x => !x.entryId && !x.dismissed).map(x => ({ i, x })));
     const bdone = alive(A.bdocs).filter(b => b.mode === Billit.mode()), bErr = bdone.filter(b => b.status === 'error');
     const gaps = ready.filter(l => priceGap(l)).length;
     $('#view').innerHTML = `
@@ -444,6 +464,10 @@ const Achats = (() => {
             <button class="btn chip" data-ptext="${p.id}">Texte</button>${p.status === 'error' ? `<button class="btn chip" data-pretry="${p.id}">Réessayer</button>` : ''}</li>`).join('')}</ul>
           <p class="small muted">Retire du dossier Entrant les fichiers qui ne sont pas à traiter : ils disparaîtront de cette liste.</p>` : ''}
       </div>
+      ${works.length ? `<div class="card"><h2>Interventions à ajouter au pointage (${works.length})</h2>
+        <p class="small muted" style="margin-top:0">Lues sur les factures Alescom (lignes « Intervention ») : elles ne sont pas refacturées comme achats.
+          « Ajouter » ouvre l'intervention préremplie ; vérifie-la puis enregistre.</p>
+        <ul class="list">${works.map(({ i, x }) => workLi(i, x)).join('')}</ul></div>` : ''}
       ${todo.length ? `<div class="card"><h2>À compléter (${todo.length})</h2><ul class="list">${todo.map(lineLi).join('')}</ul></div>` : ''}
       <div class="card"><h2>Prêt à refacturer</h2>
         <p class="small muted" style="margin-top:0">Ces articles sont proposés dans l'onglet <strong>Facturer</strong>, sur la facture du client (avec ses interventions).</p>
@@ -508,6 +532,36 @@ const Achats = (() => {
     }
     $('#aArts').onclick = () => showArticles();
     bindLines();
+    bindWorks();
+  }
+
+  // --- interventions lues sur une facture (Alescom) ---
+  const workLi = (i, x) => {
+    const c = x.clientId && state.clients.find(k => k.id === x.clientId && !k.deleted);
+    const st = x.entryId ? '<span class="pill ok">ajoutée au pointage</span>' : x.dismissed ? '<span class="pill">ignorée</span>' : '';
+    return `<li><div class="grow" style="flex:1;min-width:0">${supPill(i.supplier)} <strong>${frDate(x.date)}</strong>
+        ${x.start ? `${esc(x.start)}–${esc(x.end)}` : ''} (${fmtDur(x.minutes || 0)}) · ${c ? esc(c.name) : `<span class="pill warn">client « ${esc(x.client || '?')} » à choisir</span>`}
+        ${x.onSite ? '<span class="pill">sur site</span>' : '<span class="pill">à distance</span>'} ${st}
+        <div class="small muted">${[x.notes, x.tech && `par ${x.tech}`, `facture ${i.number}`].filter(Boolean).map(esc).join(' · ')}</div></div>
+      ${!x.entryId && !x.dismissed ? `<button class="btn chip" data-wadd="${i.id}|${x.id}">➕ Ajouter</button><button class="btn chip" data-wskip="${i.id}|${x.id}">Ignorer</button>` : ''}</li>`;
+  };
+  function bindWorks(root = document) {
+    const get = v => { const [a, b] = v.split('|'), i = inv(a); return { i, x: (i.interventions || []).find(w => w.id === b) }; };
+    $$('[data-wadd]', root).forEach(btn => btn.onclick = ev => {
+      ev.preventDefault();
+      const { i, x } = get(btn.dataset.wadd);
+      const preset = { date: x.date, start: x.start || '', end: x.end || '', minutes: x.minutes || 0, pauseMin: 0, onSite: !!x.onSite, alescom: false, install: '',
+        description: [x.notes, `(${[i.supplier, x.tech].filter(Boolean).join(' – ')}, facture ${i.number})`].filter(Boolean).join(' ') };
+      if (x.clientId && state.clients.some(c => c.id === x.clientId && !c.deleted)) preset.clientId = x.clientId;
+      openEntry(null, preset, false, async e => { x.entryId = e.id; touch(i); await save(); });
+    });
+    $$('[data-wskip]', root).forEach(btn => btn.onclick = async ev => {
+      ev.preventDefault();
+      const { i, x } = get(btn.dataset.wskip);
+      x.dismissed = true; touch(i);
+      if ($('#dlg').open) $('#dlg').close();
+      await changed(); toast('Intervention ignorée');
+    });
   }
 
   function showText(p) {
@@ -597,12 +651,34 @@ const Achats = (() => {
     openDlg();
   }
 
+  // Catégories Billit (GroupID / GroupName des articles existants : l'API ne les liste pas à part).
+  function categories() {
+    const m = new Map();
+    for (const p of products || []) if (p.GroupID) {
+      const g = m.get(p.GroupID) || m.set(p.GroupID, { id: p.GroupID, name: p.GroupName || `Catégorie ${p.GroupID}`, refs: [] }).get(p.GroupID);
+      g.refs.push(p.Reference);
+    }
+    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+  // Référence suivante d'une catégorie : préfixe le plus courant (« int », « log »…), numéro suivant parmi tous les articles de ce préfixe.
+  function nextRef(g) {
+    const pre = {};
+    for (const r of g.refs) { const m = /^([a-z]+)-\d+$/i.exec(r || ''); if (m) pre[m[1].toLowerCase()] = (pre[m[1].toLowerCase()] || 0) + 1; }
+    const p = Object.entries(pre).sort((a, b) => b[1] - a[1])[0]?.[0];
+    if (!p) return '';
+    const max = Math.max(0, ...(products || []).map(x => new RegExp(`^${p}-(\\d+)$`, 'i').exec(x.Reference || '')?.[1]).filter(Boolean).map(Number));
+    return `${p}-${String(max + 1).padStart(3, '0')}`;
+  }
+
   // Création d'un article dans Billit. back(ref) : retour à l'écran précédent (ref = article créé, ou rien si annulé).
   function createArticle(pre = {}, back = () => showArticles()) {
     const f = $('#dlgForm');
     f.innerHTML = `<h2>Nouvel article Billit</h2>
       <p class="small muted">Créé dans Billit en mode ${Billit.mode() === 'live' ? 'réel' : 'test (sandbox)'}.</p>
+      <label>Catégorie Billit</label><select id="pGroup"><option value="">— sans catégorie —</option>
+        ${categories().map(g => `<option value="${g.id}" ${String(g.id) === String(pre.GroupID ?? '') ? 'selected' : ''}>${esc(g.name)} (${g.refs.length})</option>`).join('')}</select>
       <label>Référence</label><input id="pRef" value="${esc(pre.Reference)}" placeholder="ex. int-005" autocapitalize="off">
+      <p class="small muted" id="pRefHint" style="margin:4px 0 0"></p>
       <label>Description</label><input id="pDesc" value="${esc(pre.Description)}">
       <div class="grid2"><div><label>Prix d'achat HTVA</label><input type="number" step="0.01" id="pBuy" value="${esc(pre.BuyExcl)}"></div>
         <div><label>Prix de vente HTVA</label><input type="number" step="0.01" id="pPrice" value="${esc(pre.AmountExcl)}"></div></div>
@@ -615,11 +691,20 @@ const Achats = (() => {
     };
     $('#pBuy').oninput = $('#pPrice').oninput = showMargin;
     showMargin();
+    // Catégorie choisie : référence suivante proposée (ex. « logiciel » : LOG-001, log-002, log-003 → log-004), si le champ est vide ou déjà proposé.
+    let suggested = '';
+    const onGroup = () => {
+      const g = categories().find(x => String(x.id) === $('#pGroup').value), next = g && nextRef(g);
+      $('#pRefHint').textContent = g ? `Articles de cette catégorie : ${g.refs.slice(0, 8).join(', ')}${g.refs.length > 8 ? '…' : ''}` : '';
+      if (next && (!$('#pRef').value.trim() || $('#pRef').value === suggested)) $('#pRef').value = suggested = next;
+    };
+    $('#pGroup').onchange = onGroup;
+    onGroup();
     $('#pBack').onclick = () => back();
     $('#pSave').onclick = async ev => {
       ev.preventDefault();
       const item = { Reference: $('#pRef').value.trim(), Description: $('#pDesc').value.trim(), AmountExcl: +$('#pPrice').value, VAT: +$('#pVat').value,
-        ...($('#pBuy').value !== '' ? { BuyExcl: +$('#pBuy').value } : {}) };
+        ...($('#pBuy').value !== '' ? { BuyExcl: +$('#pBuy').value } : {}), ...($('#pGroup').value ? { GroupID: +$('#pGroup').value } : {}) };
       if (!item.Reference || !item.Description) return alert('Référence et description requises.');
       if (!(item.AmountExcl >= 0) || $('#pPrice').value === '') return alert('Prix requis.');
       await loadProducts(0);
@@ -723,6 +808,8 @@ const Achats = (() => {
 
   function showInvoice(i) {
     const ls = alive(A.lines).filter(l => l.invoiceId === i.id);
+    // Marqués « facturé » à la main (« Déjà refacturée », « Marquer comme facturé ») : annulable ; une facture de l'onglet Facturer s'annule là-bas.
+    const manual = ls.filter(l => l.status === 'billed' && !l.billId);
     const dlg = $('#dlg'), f = $('#dlgForm');
     f.innerHTML = `<h2>${esc(i.supplier)} ${esc(i.number)}</h2>
       <p class="small muted">Du ${frDate(i.date)} · total HTVA ${i.totalExcl != null ? eur(i.totalExcl) : '?'} · importée le ${frDate(isoDate(new Date(i.importedAt)))}
@@ -734,12 +821,23 @@ const Achats = (() => {
           <button class="btn chip" id="iWarnOk">✓ Total vérifié, c'est correct</button>`
         : i.warn ? `<p class="small muted">Total vérifié${i.warnOk ? ` le ${frDate(i.warnOk)}` : ''} (${esc(i.warn)})</p>`
         : `<p class="small"><span class="pill ok">✓ total des articles = total de la facture</span></p>`}
+      ${i.notes?.length ? `<p class="small muted">Non importé comme achat : ${esc(i.notes.join(' ; '))}.</p>` : ''}
       <ul class="list">${ls.map(lineLi).join('')}</ul>
+      ${i.interventions?.length ? `<p class="small" style="margin:12px 0 0"><strong>Interventions (pointage)</strong></p>
+        <ul class="list" id="iWorks">${i.interventions.map(x => workLi(i, x)).join('')}</ul>` : ''}
       <div class="actions"><button class="btn danger" id="iDel" style="margin-right:auto">Supprimer l'import</button>
         ${ls.some(l => ['todo', 'ready'].includes(lineState(l))) ? '<button class="btn" id="iDone">Déjà refacturée</button>' : ''}
+        ${manual.length ? `<button class="btn" id="iUndo">↩ Remettre à facturer (${manual.length})</button>` : ''}
         <button class="btn" value="cancel">Fermer</button></div>`;
     bindLines(f);
     if ($('#iPdf')) $('#iPdf').onclick = () => showPdf(i);
+    bindWorks(f);
+    if ($('#iUndo')) $('#iUndo').onclick = async ev => {
+      ev.preventDefault();
+      if (!confirm(`Remettre ${manual.length} article(s) de ${i.supplier} ${i.number} à facturer ?\n\nIls avaient été marqués comme facturés (${[...new Set(manual.map(l => l.billRef || 'sans n°'))].join(', ')}) : ils reviennent dans « Prêt à refacturer » ou « À compléter ».`)) return;
+      manual.forEach(l => { Object.assign(touch(l), { status: 'open' }); delete l.billedAt; delete l.billRef; delete l.billedUnit; });
+      dlg.close(); await changed(); toast('Articles remis à facturer');
+    };
     if ($('#iWarnOk')) $('#iWarnOk').onclick = async ev => { ev.preventDefault(); touch(i).warnOk = today(); dlg.close(); await changed(); toast('Total marqué comme vérifié'); };
     // Facture déjà refacturée hors de l'app (ex. avant la mise en service du module) : tout passe en « facturé ».
     if ($('#iDone')) $('#iDone').onclick = async () => {
