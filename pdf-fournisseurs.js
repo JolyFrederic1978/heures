@@ -204,13 +204,14 @@ const Fournisseurs = (() => {
   }
 
   // Affiche les pages du PDF en images (canvas) dans el : marche aussi sur téléphone, sans lecteur PDF.
+  // Dessinées en plus haute résolution que la largeur affichée, pour rester nettes quand on zoome.
   async function render(buffer, el, maxPages = 10) {
     await load();
     const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
     const n = Math.min(pdf.numPages, maxPages);
     for (let p = 1; p <= n; p++) {
       const page = await pdf.getPage(p);
-      const w = Math.max(el.clientWidth, 320) * (window.devicePixelRatio || 1);
+      const w = Math.min(Math.max(el.clientWidth, 320) * (window.devicePixelRatio || 1) * 2, 2000);
       const vp = page.getViewport({ scale: w / page.getViewport({ scale: 1 }).width });
       const c = document.createElement('canvas');
       c.width = vp.width; c.height = vp.height;

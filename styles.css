@@ -34,7 +34,7 @@ body.locked .tabs, body.locked #syncPill { display: none; }
 
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 14px; margin-bottom: 12px; }
-.card h2 { font-size: 15px; margin: 0 0 10px; }
+.card h2 { font-size: 17px; margin: 0 0 12px; color: var(--accent); padding-bottom: 8px; border-bottom: 2px solid var(--accent-soft); }
 .muted { color: var(--muted); }
 .small { font-size: 13px; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -99,6 +99,18 @@ dialog { border: 0; border-radius: var(--radius); padding: 0; width: min(520px, 
 dialog::backdrop { background: rgba(0,0,0,.45); }
 dialog form { padding: 16px; }
 dialog h2 { margin: 0 0 6px; font-size: 17px; }
+dialog.wide { width: 100vw; max-width: 100vw; height: 100vh; max-height: 100vh; border-radius: 0; }
+dialog.wide #pPages { max-height: calc(100vh - 150px) !important; }
+
+/* Fournisseurs (module Achats) : une couleur chacun */
+.sup { border-left: 4px solid var(--sup, var(--line)); padding-left: 10px; }
+.pill.sup-p { background: color-mix(in srgb, var(--sup, var(--muted)) 15%, transparent); color: var(--sup, var(--muted)); font-weight: 600; }
+.sup-ovh { --sup: #378add; }
+.sup-mgk { --sup: #1d9e75; }
+.sup-lisam { --sup: #7f77dd; }
+.sup-autre { --sup: #ba7517; }
+ul.arts { list-style: none; margin: 6px 0 0; padding: 0; }
+ul.arts li { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; border: 0; font-size: 13px; color: var(--muted); }
 .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
 
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(76px + env(safe-area-inset-bottom));

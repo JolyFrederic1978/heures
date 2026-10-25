@@ -122,9 +122,9 @@ const OneDrive = (() => {
 
   // Déplace un fichier dans un autre dossier (créé au besoin), en le renommant si un fichier du même nom y est déjà.
   // Renvoie le nom final du fichier.
-  async function move(path, folder) {
+  async function move(path, folder, newName) {
     await mkdir(folder);
-    const name = path.split('/').pop();
+    const name = newName || path.split('/').pop();
     const r = await graph(itemPath(path) + '?@microsoft.graph.conflictBehavior=rename', {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ parentReference: { path: '/drive/root:/' + folder.split('/').filter(Boolean).join('/') }, name })

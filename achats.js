@@ -15,6 +15,7 @@ const Achats = (() => {
     { id: 'sup_lisam', name: 'lisam.cloud', margin: 100 }];
   let A = null;                       // données du module
   let lastCheck = 0, busy = false, msg = '';
+  let invFind = '', invSup = '';      // recherche et filtre fournisseur des « Factures importées »
   let products = null, productsErr = '', productsMode = '', productsAt = 0;   // articles Billit (mémoire seulement)
 
   // --- cache local (base IndexedDB à part : n'interfère pas avec celle du pointage) ---
@@ -87,6 +88,9 @@ const Achats = (() => {
   const missing = l => [!l.clientId && 'client', !mapOf(l)?.billitRef && 'article Billit', saleUnit(l) == null && 'marge'].filter(Boolean);
   const clientName = l => l.clientId ? client(l.clientId).name : '';
   const pct = n => `${String(n).replace('.', ',')} %`;
+  // Couleur par fournisseur (styles.css : sup-ovh, sup-mgk…) et étiquette colorée.
+  const supCls = s => ({ ovh: 'sup-ovh', mgk: 'sup-mgk', 'lisam.cloud': 'sup-lisam' })[String(s || '').toLowerCase()] || 'sup-autre';
+  const supPill = s => `<span class="pill sup-p ${supCls(s)}">${esc(s)}</span>`;
 
   // --- articles Billit ---
   const product = ref => ref && products?.find(p => fold(p.Reference) === fold(ref));
@@ -222,10 +226,12 @@ const Achats = (() => {
       return `${name} : ${problem}`;
     }
     const year = (i.date || today()).slice(0, 4);
-    let stored = name;                               // nom dans Traités (OneDrive peut le renommer s'il existe déjà)
-    if (fromInbox) stored = await OneDrive.move(`${path.inbox()}/${name}`, path.done(year)) || name;
+    // Nom dans Traités : « Fournisseur - nom d'origine » (ex. OVH - Facture_FR78898017.pdf). OneDrive peut encore le renommer s'il existe déjà.
+    const sup = i.supplier.replace(/[\\/:*?"<>|]/g, '');
+    let stored = fold(name).startsWith(fold(`${sup} - `)) ? name : `${sup} - ${name}`;
+    if (fromInbox) stored = await OneDrive.move(`${path.inbox()}/${name}`, path.done(year), stored) || stored;
     else {
-      const up = await OneDrive.put(`${path.done(year)}/${name}`, buffer, { type: 'application/pdf' });
+      const up = await OneDrive.put(`${path.done(year)}/${stored}`, buffer, { type: 'application/pdf' });
       if (!up.ok && up.status !== 412) throw new Error(`OneDrive (${up.status}) : copie de ${name} dans Traités impossible.`);
     }
     if (rec) { rec.deleted = true; touch(rec); }
@@ -317,7 +323,11 @@ const Achats = (() => {
     const ready = ls.filter(l => lineState(l) === 'ready');
     const groups = [...new Set(ready.map(l => l.clientId))].map(id => ({ id, ls: ready.filter(l => l.clientId === id) }))
       .sort((a, b) => client(a.id).name.localeCompare(client(b.id).name));
-    const invoices = alive(A.invoices).sort((a, b) => (b.date || '').localeCompare(a.date || '')).slice(0, 15);
+    const invoices = alive(A.invoices).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const sups = [...new Set(invoices.map(i => i.supplier))].sort();
+    // Texte cherché : n°, fournisseur, date, montant, clients, domaines / contacts et noms des articles.
+    const findText = i => fold([i.supplier, i.number, frDate(i.date), i.totalExcl != null ? eur(i.totalExcl) : '', i.totalExcl,
+      ...alive(A.lines).filter(l => l.invoiceId === i.id).flatMap(l => [clientName(l), whereOf(l), l.label])].join(' '));
     const problems = alive(A.files);
     const gaps = ready.filter(l => priceGap(l)).length;
     $('#view').innerHTML = `
@@ -340,15 +350,21 @@ const Achats = (() => {
         ${gaps ? `<p class="small"><span class="pill warn">${gaps} article(s) dont le prix Billit diffère du prix calculé : ouvre le client pour ajuster.</span></p>` : ''}
         ${productsErr ? `<p class="small muted">${esc(productsErr)}</p>` : ''}
         ${groups.length ? `<ul class="list">${groups.map(g => `<li class="tap" data-aclient="${g.id}"><div class="grow" style="flex:1;min-width:0"><strong>${esc(client(g.id).name)}</strong>
-            <div class="small muted">${g.ls.length} article(s) · achat ${eur(g.ls.reduce((s, l) => s + l.total, 0))}</div></div>
+            <div class="small muted">${g.ls.length} article(s) · achat ${eur(g.ls.reduce((s, l) => s + l.total, 0))}</div>
+            <ul class="arts">${g.ls.sort(byClient).map(l => `<li>${supPill(l.supplier)}<span style="flex:1;min-width:0">${[mapOf(l).billitRef, l.label, whereOf(l)].filter(Boolean).map(esc).join(' · ')}${l.qty !== 1 ? ` (× ${esc(l.qty)})` : ''}</span>
+              <span class="dur">${eur(saleTotal(l))}</span></li>`).join('')}</ul></div>
             <div class="dur">${eur(g.ls.reduce((s, l) => s + saleTotal(l), 0))}</div></li>`).join('')}</ul>`
           : '<div class="empty">Rien à refacturer pour l\'instant.</div>'}</div>
-      <div class="card"><h2>Factures importées</h2>
-        ${invoices.length ? `<ul class="list">${invoices.map(i => `<li class="tap" data-inv="${i.id}"><div class="grow" style="flex:1;min-width:0"><strong>${esc(i.supplier)} ${esc(i.number)}</strong>
+      <div class="card"><h2>Factures importées (${invoices.length})</h2>
+        ${invoices.length ? `<input type="search" id="iFind" placeholder="Rechercher : n°, fournisseur, client, domaine, montant" value="${esc(invFind)}">
+          <div class="row" style="margin:8px 0">${['', ...sups].map(s => `<button class="btn chip ${s === invSup ? 'active' : ''}" data-isup="${esc(s)}">${s ? esc(s) : 'Tous'}</button>`).join('')}</div>
+          <ul class="list" id="iList">${invoices.map(i => `<li class="tap sup ${supCls(i.supplier)}" data-inv="${i.id}" data-sup="${esc(i.supplier)}" data-find="${esc(findText(i))}"><div class="grow" style="flex:1;min-width:0">${supPill(i.supplier)} <strong>${esc(i.number)}</strong>
             ${i.warn ? '<span class="pill warn">à vérifier</span>' : ''}
-            <div class="small muted">${frDate(i.date)} · ${alive(A.lines).filter(l => l.invoiceId === i.id).length} article(s)${i.skipped ? ` · ${i.skipped} à 0 € ignoré(s)` : ''}</div></div>
+            <div class="small muted">${[frDate(i.date), `${alive(A.lines).filter(l => l.invoiceId === i.id).length} article(s)`, i.skipped && `${i.skipped} à 0 € ignoré(s)`,
+              [...new Set(alive(A.lines).filter(l => l.invoiceId === i.id).map(l => clientName(l) || whereOf(l)).filter(Boolean))].join(', ')].filter(Boolean).map(esc).join(' · ')}</div></div>
             <div class="dur">${i.totalExcl != null ? eur(i.totalExcl) : ''}</div>
-            ${i.file ? `<button class="btn chip" data-ipdf="${i.id}" title="Voir la facture">📄 PDF</button>` : ''}</li>`).join('')}</ul>` : '<div class="empty">Aucune facture importée.</div>'}</div>
+            ${i.file ? `<button class="btn chip" data-ipdf="${i.id}" title="Voir la facture">📄 PDF</button>` : ''}</li>`).join('')}</ul>
+          <p class="small muted" id="iMore"></p>` : '<div class="empty">Aucune facture importée.</div>'}</div>
       <div class="card"><div class="row"><h2 class="grow" style="margin:0">Articles et marges</h2>
         <button class="btn" id="aArts">Ouvrir</button></div>
         <p class="small muted">Correspondance article fournisseur → article Billit (${alive(A.mapping).length}), marges des fournisseurs
@@ -370,6 +386,23 @@ const Achats = (() => {
     $$('[data-aclient]').forEach(li => li.onclick = () => billClient(li.dataset.aclient));
     $$('[data-inv]').forEach(li => li.onclick = () => showInvoice(inv(li.dataset.inv)));
     $$('[data-ipdf]').forEach(b => b.onclick = ev => { ev.stopPropagation(); showPdf(inv(b.dataset.ipdf)); });
+    // Recherche / filtre fournisseur, sans redessiner l'écran. Sans critère : les 15 plus récentes.
+    const filterInv = () => {
+      const words = fold(invFind).split(/\s+/).filter(Boolean), all = $$('#iList > li');
+      const hits = all.filter(li => (!invSup || li.dataset.sup === invSup) && words.every(w => li.dataset.find.includes(w)));
+      const shown = words.length || invSup ? hits : hits.slice(0, 15);
+      all.forEach(li => li.classList.toggle('hidden', !shown.includes(li)));
+      $('#iMore').textContent = !hits.length ? 'Aucune facture trouvée.' : shown.length < hits.length ? `${shown.length} plus récentes sur ${hits.length} : utilise la recherche pour les autres.` : '';
+    };
+    if ($('#iFind')) {
+      $('#iFind').oninput = ev => { invFind = ev.target.value; filterInv(); };
+      $$('[data-isup]').forEach(b => b.onclick = () => {
+        invSup = b.dataset.isup;
+        $$('[data-isup]').forEach(x => x.classList.toggle('active', x === b));
+        filterInv();
+      });
+      filterInv();
+    }
     $('#aArts').onclick = () => showArticles();
     bindLines();
   }
@@ -546,12 +579,28 @@ const Achats = (() => {
   // PDF d'origine (rangé dans Traités/AAAA) : pages affichées en images + téléchargement. Gardé en mémoire pendant la session.
   const pdfCache = new Map();
   async function showPdf(i) {
-    const f = $('#dlgForm'), name = i.file.split('/').pop();
-    f.innerHTML = `<h2>${esc(i.supplier)} ${esc(i.number)}</h2><p class="small muted" id="pMsg">Chargement de ${esc(name)}…</p>
+    const dlg = $('#dlg'), f = $('#dlgForm'), name = i.file.split('/').pop();
+    let zoom = 100;
+    f.innerHTML = `<div class="row"><h2 class="grow">${esc(i.supplier)} ${esc(i.number)}</h2>
+        <button class="btn chip" id="pOut" title="Réduire">−</button><span class="small" id="pZoom" style="min-width:44px;text-align:center">100 %</span>
+        <button class="btn chip" id="pIn" title="Agrandir">+</button><button class="btn chip" id="pFit">Ajuster</button>
+        <button class="btn chip" id="pWide">⛶ Grand écran</button></div>
+      <p class="small muted" id="pMsg">Chargement de ${esc(name)}…</p>
       <div id="pPages" style="max-height:65vh;overflow:auto"></div>
       <div class="actions"><button class="btn" id="pDl" disabled>⬇ Télécharger</button><button class="btn" id="pBack">Retour</button>
         <button class="btn" value="cancel">Fermer</button></div>`;
-    $('#pBack').onclick = () => showInvoice(i);
+    const setZoom = z => {
+      zoom = Math.min(300, Math.max(50, z));
+      $('#pZoom').textContent = `${zoom} %`;
+      $$('#pPages canvas').forEach(c => c.style.width = `${zoom}%`);
+    };
+    const setWide = on => { dlg.classList.toggle('wide', on); if ($('#pWide')) $('#pWide').textContent = on ? '⛶ Réduire la fenêtre' : '⛶ Grand écran'; };
+    $('#pOut').onclick = ev => { ev.preventDefault(); setZoom(zoom - 25); };
+    $('#pIn').onclick = ev => { ev.preventDefault(); setZoom(zoom + 25); };
+    $('#pFit').onclick = ev => { ev.preventDefault(); setZoom(100); };
+    $('#pWide').onclick = ev => { ev.preventDefault(); setWide(!dlg.classList.contains('wide')); };
+    dlg.addEventListener('close', () => setWide(false), { once: true });
+    $('#pBack').onclick = () => { setWide(false); showInvoice(i); };
     openDlg();
     try {
       let buf = pdfCache.get(i.id);
@@ -564,6 +613,7 @@ const Achats = (() => {
       $('#pDl').disabled = false;
       $('#pDl').onclick = () => download(new Blob([buf], { type: 'application/pdf' }), name);
       const r = await Fournisseurs.render(buf.slice(0), $('#pPages'));
+      setZoom(zoom);                                 // zoom choisi pendant le chargement
       if ($('#pMsg')) $('#pMsg').textContent = `${name} · ${r.pages} page(s)${r.shown < r.pages ? ` (${r.shown} affichées : télécharge pour le reste)` : ''}`;
     } catch (e) { if ($('#pMsg')) $('#pMsg').innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
   }
