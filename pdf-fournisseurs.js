@@ -4,26 +4,24 @@
 // label = nom du produit (sans le domaine du client) ; key = ce nom sans dates ni nombres :
 // sert à la table de correspondance avec les articles Billit.
 const Fournisseurs = (() => {
-  const SRC = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js';
-  const WORKER = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+  // pdf.js 4.10.38 (build « legacy », compatible avec les navigateurs plus anciens), servi depuis lib/ :
+  // pas de dépendance à un site extérieur. Version ≥ 4.2.67 : corrige la faille CVE-2024-4367 (code caché dans un PDF).
+  const SRC = new URL('lib/pdf.min.mjs', location.href).href;
+  const WORKER = new URL('lib/pdf.worker.min.mjs', location.href).href;
   const pad = n => String(n).padStart(2, '0');
-  let loading;
+  let pdfjsLib, loading;
 
   function load() {
-    if (window.pdfjsLib) return Promise.resolve();
-    return loading ||= new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = SRC;
-      s.onload = () => { pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER; resolve(); };
-      s.onerror = () => { loading = null; reject(new Error('Impossible de charger pdf.js (connexion requise la première fois).')); };
-      document.head.appendChild(s);
-    });
+    return loading ||= import(SRC).then(m => { pdfjsLib = m; pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER; })
+      .catch(e => { loading = null; throw new Error('Impossible de charger pdf.js : ' + e.message); });
   }
+  // isEvalSupported: false : pdf.js ne compile jamais de code à partir du contenu d'un PDF (protection en plus de la mise à jour).
+  const openPdf = buffer => pdfjsLib.getDocument({ data: new Uint8Array(buffer), isEvalSupported: false }).promise;
 
   // Lignes du PDF de haut en bas : { page, cells: [texte des colonnes], text }.
   async function readRows(buffer) {
     await load();
-    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+    const pdf = await openPdf(buffer);
     const rows = [];
     for (let p = 1; p <= pdf.numPages; p++) {
       const { items } = await (await pdf.getPage(p)).getTextContent();
@@ -207,7 +205,7 @@ const Fournisseurs = (() => {
   // Dessinées en plus haute résolution que la largeur affichée, pour rester nettes quand on zoome.
   async function render(buffer, el, maxPages = 10) {
     await load();
-    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+    const pdf = await openPdf(buffer);
     const n = Math.min(pdf.numPages, maxPages);
     for (let p = 1; p <= n; p++) {
       const page = await pdf.getPage(p);

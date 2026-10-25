@@ -6,6 +6,11 @@
   <title>OLU Gestion</title>
   <meta name="description" content="OLU Gestion, outil interne de One Level UP : pointage des interventions, préparation des factures et refacturation des achats. Connexion par la page officielle de Microsoft 365.">
   <meta name="robots" content="noindex, nofollow">
+  <!-- Sécurité : seuls ce site, Microsoft (connexion, OneDrive) et Billit sont autorisés. Ajouter ici tout nouveau service appelé par l'app. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline';
+    img-src 'self' data: blob:; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self';
+    connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com https://*.sharepoint.com https://*.1drv.com https://*.livefilestore.com
+      https://api.billit.be https://api.sandbox.billit.be">
   <meta name="theme-color" content="#1f5f8b">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">

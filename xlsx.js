@@ -1,7 +1,7 @@
 // Fichiers Excel : liste à facturer, archive, fichier Prestations (format repris par la facture Billit)
 // et lecture de l'ancien ArchiveTemplate.xlsx pour la migration.
 const Xlsx = (() => {
-  const SRC = 'https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';
+  const SRC = 'lib/exceljs.min.js';                // ExcelJS 4.4.0, servi par le site (plus de site extérieur)
   const MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   const pad = n => String(n).padStart(2, '0');
   let loading;
@@ -11,7 +11,7 @@ const Xlsx = (() => {
     return loading ||= new Promise((resolve, reject) => {
       const s = document.createElement('script');
       s.src = SRC; s.onload = resolve;
-      s.onerror = () => { loading = null; reject(new Error('Impossible de charger ExcelJS (connexion requise la première fois).')); };
+      s.onerror = () => { loading = null; reject(new Error('Impossible de charger ExcelJS.')); };
       document.head.appendChild(s);
     });
   }
