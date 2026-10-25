@@ -136,7 +136,61 @@ const Fournisseurs = (() => {
     }
   };
 
-  const READERS = [ovh];
+  // MGK Technologies (licences ESET, vérifié sur 3 factures 2025-2026) :
+  //   No. | Référence Description | Informations complémentaires | Remise | Qté | Prix unitaire | Montant   ← en-tête
+  //   1 | 106 | ESET NOD32 Antivirus | Hugo Bauwens | 1 | 33.05 | 33.05      ← « Informations » = contact chez le client
+  //   Type d'achat: Renew / Période de validité: 1 année / Valide du 21.09.2025 jusqu'au / 20.09.2026
+  //   Nombre de postes: 5 / Public ID: … / SKU Code: ENOD-NB5-R-1Y
+  //   Date du document: | 30.09.2025 | Total | 33.05 €
+  // Pas de domaine : le client est retrouvé par le contact (hint). Correspondance par code SKU (postes, durée et prix différents).
+  const mgk = {
+    id: 'mgk', name: 'MGK',
+    detect: rows => rows.some(r => /MGK Technologies/i.test(r.text)),
+    parse(rows, fileName) {
+      const number = find(rows, /No\. de document\s*:?\s*([A-Z]{2,}\d{4}-\d+)/i)?.[1] || /(FAC\d{4}-\d+)/i.exec(fileName || '')?.[1] || '';
+      const date = isoDate(find(rows, /Date du document\s*:?\s*(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{4})/i)?.[1]);
+      const totalM = find(rows, /\bTotal\s+(-?[\d .  ,]+[.,]\d{2})\s*€?\s*$/i);
+      const items = [];
+      let inTable = false;
+      for (const r of rows) {
+        const t = r.text;
+        if (/^No\.\s.*Montant/i.test(t)) { inTable = true; continue; }
+        if (!inTable) continue;
+        if (/^Date du document/i.test(t)) { inTable = false; continue; }
+        if (/^produit\b/i.test(t)) continue;
+        const cells = [...r.cells], amounts = [];
+        while (cells.length && isAmount(cells[cells.length - 1])) amounts.unshift(num(cells.pop()));
+        if (/^\d+$/.test(cells[0] || '') && amounts.length >= 2) {
+          const qty = cells.length > 1 && /^\d+(?:[.,]\d+)?$/.test(cells[cells.length - 1]) ? parseFloat(cells.pop().replace(',', '.')) : 1;
+          if (cells.length > 3 && /^-?\d+(?:[.,]\d+)?\s*%?$/.test(cells[cells.length - 1])) cells.pop();   // remise
+          cells.shift();                                                                                   // n° de ligne
+          let ref = cells.shift() || '';
+          if (!/^\d+$/.test(ref)) { const m = /^(\d+)\s+(.*)$/.exec(ref); if (m) { cells.unshift(m[2]); ref = m[1]; } }
+          items.push({ ref, desc: cells.shift() || '', hint: cells.join(' '), qty,
+            unit: amounts[amounts.length - 2], total: amounts[amounts.length - 1], info: [] });
+        } else if (items.length) items[items.length - 1].info.push(t);
+      }
+      const lines = items.map(it => {
+        const info = it.info.join(' ');
+        const get = re => (re.exec(info) || [])[1]?.trim() || '';
+        const sku = get(/SKU Code\s*:\s*(\S+)/i), seats = get(/Nombre de postes\s*:\s*(\d+)/i);
+        const type = get(/Type d'achat\s*:\s*(\w+)/i), validity = get(/Période de validité\s*:\s*(\d+\s*[^\s,;]+)/i);
+        // Période : « Valide du A jusqu'au B », ou « Valide jusqu'au B », ou seulement la durée (calculée depuis la date du document).
+        let from = isoDate(get(/Valide du\s+(\d{1,2}\.\d{1,2}\.\d{4})/i)), to = isoDate(get(/jusqu'au\s+(\d{1,2}\.\d{1,2}\.\d{4})/i));
+        const years = +(/(\d+)\s*ann/i.exec(validity) || [])[1] || 0, months = +(/(\d+)\s*mois/i.exec(validity) || [])[1] || 0;
+        const shift = (d, sign) => { const x = new Date(d + 'T00:00:00Z'); x.setUTCFullYear(x.getUTCFullYear() + sign * years); x.setUTCMonth(x.getUTCMonth() + sign * months); x.setUTCDate(x.getUTCDate() - sign); return x.toISOString().slice(0, 10); };
+        if (!from && to && (years || months)) from = shift(to, -1);
+        if (!from && !to && date && (years || months)) { from = date; to = shift(date, 1); }
+        const label = [it.desc, seats && `${seats} poste${+seats > 1 ? 's' : ''}`, validity].filter(Boolean).join(' – ');
+        return { label, detail: [type && `Type d'achat : ${type}`, sku && `SKU ${sku}`, `réf. MGK ${it.ref}`].filter(Boolean).join(' · '),
+          key: sku ? 'sku:' + sku.toLowerCase() : 'ref:' + it.ref + ':' + keyOf(it.desc),
+          domain: '', hint: it.hint, ref: it.ref, qty: it.qty, unit: it.unit, total: it.total, from, to };
+      });
+      return { supplier: 'MGK', number, date, totalExcl: totalM ? num(totalM[1]) : null, lines };
+    }
+  };
+
+  const READERS = [ovh, mgk];
 
   // Lit un PDF : { reader, invoice } ou { reader: null } si aucun lecteur ne reconnaît le fournisseur.
   async function read(buffer, fileName) {
@@ -149,5 +203,23 @@ const Fournisseurs = (() => {
     return { rows, reader, invoice };
   }
 
-  return { read, readRows, domains, keyOf, readers: () => READERS.map(r => ({ id: r.id, name: r.name })) };
+  // Affiche les pages du PDF en images (canvas) dans el : marche aussi sur téléphone, sans lecteur PDF.
+  async function render(buffer, el, maxPages = 10) {
+    await load();
+    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+    const n = Math.min(pdf.numPages, maxPages);
+    for (let p = 1; p <= n; p++) {
+      const page = await pdf.getPage(p);
+      const w = Math.max(el.clientWidth, 320) * (window.devicePixelRatio || 1);
+      const vp = page.getViewport({ scale: w / page.getViewport({ scale: 1 }).width });
+      const c = document.createElement('canvas');
+      c.width = vp.width; c.height = vp.height;
+      c.style.cssText = 'width:100%;display:block;margin-bottom:8px;border:1px solid var(--line);border-radius:6px;background:#fff';
+      el.appendChild(c);
+      await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+    }
+    return { pages: pdf.numPages, shown: n };
+  }
+
+  return { read, readRows, render, domains, keyOf, readers: () => READERS.map(r => ({ id: r.id, name: r.name })) };
 })();

@@ -31,7 +31,8 @@ const Achats = (() => {
       };
     });
   }
-  const empty = () => ({ invoices: [], lines: [], mapping: [], suppliers: [], files: [], published: {}, lastSync: 0 });
+  // hints : contact (ou autre texte de la facture) → client, pour les fournisseurs sans domaine (ex. MGK).
+  const empty = () => ({ invoices: [], lines: [], mapping: [], suppliers: [], hints: [], files: [], published: {}, lastSync: 0 });
   async function load() {
     if (!A) A = { ...empty(), ...(await idb('readonly', s => s.get('data')) || {}) };
     for (const s of SUPPLIERS_SEED) if (!A.suppliers.some(x => x.id === s.id)) A.suppliers.push({ ...s, updatedAt: 0 });
@@ -58,6 +59,11 @@ const Achats = (() => {
   const supplierOf = name => alive(A.suppliers).find(s => fold(s.name) === fold(name));
   const clientByDomain = d => !d ? null
     : state.clients.find(c => !c.deleted && (c.domains || []).some(x => d === x || d.endsWith('.' + x))) || null;
+  const hintKey = s => fold(s).replace(/\s+/g, ' ').trim();
+  const hintOf = (supplier, hint) => hint ? alive(A.hints).find(h => h.supplier === supplier && h.text === hintKey(hint)) : null;
+  const clientByHint = (supplier, hint) => { const h = hintOf(supplier, hint); const c = h && state.clients.find(x => x.id === h.clientId && !x.deleted); return c || null; };
+  const clientFor = l => clientByDomain(l.domain) || clientByHint(l.supplier, l.hint);
+  const whereOf = l => l.domain || l.hint || '';          // domaine (OVH) ou contact (MGK)
   const isSet = v => v !== '' && v != null;
   const round2 = n => Math.round(n * 100) / 100;
   // Marge appliquée (%) : celle de l'article, sinon celle du fournisseur.
@@ -112,15 +118,15 @@ const Achats = (() => {
   function assignClients() {
     let ch = false;
     for (const l of alive(A.lines)) {
-      if (l.clientId || l.status === 'billed' || !l.domain) continue;
-      const c = clientByDomain(l.domain);
+      if (l.clientId || l.status === 'billed' || (!l.domain && !l.hint)) continue;
+      const c = clientFor(l);
       if (c) { l.clientId = c.id; touch(l); ch = true; }
     }
     return ch;
   }
 
   // --- synchronisation OneDrive ---
-  const KINDS = ['invoices', 'lines', 'mapping', 'suppliers', 'files'];
+  const KINDS = ['invoices', 'lines', 'mapping', 'suppliers', 'hints', 'files'];
   function merge(remote) {
     const before = JSON.stringify(KINDS.map(k => A[k]));
     const m = (a = [], b = []) => {
@@ -213,7 +219,8 @@ const Achats = (() => {
       return `${name} : ${problem}`;
     }
     const year = (i.date || today()).slice(0, 4);
-    if (fromInbox) await OneDrive.move(`${path.inbox()}/${name}`, path.done(year));
+    let stored = name;                               // nom dans Traités (OneDrive peut le renommer s'il existe déjà)
+    if (fromInbox) stored = await OneDrive.move(`${path.inbox()}/${name}`, path.done(year)) || name;
     else {
       const up = await OneDrive.put(`${path.done(year)}/${name}`, buffer, { type: 'application/pdf' });
       if (!up.ok && up.status !== 412) throw new Error(`OneDrive (${up.status}) : copie de ${name} dans Traités impossible.`);
@@ -222,13 +229,13 @@ const Achats = (() => {
     const sum = i.lines.reduce((s, l) => s + l.total, 0);
     const kept = i.lines.filter(l => l.total || l.unit);           // articles à 0 € : pas pris en compte
     const invoice = touch({ id: uid('ai'), supplier: i.supplier, number: i.number, date: i.date, totalExcl: i.totalExcl,
-      file: `${path.done(year)}/${name}`, importedAt: Date.now(), skipped: i.lines.length - kept.length,
+      file: `${path.done(year)}/${stored}`, importedAt: Date.now(), skipped: i.lines.length - kept.length,
       warn: i.totalExcl != null && Math.abs(sum - i.totalExcl) > 0.02 ? `Total des lignes ${eur(sum)} ≠ total HTVA de la facture ${eur(i.totalExcl)}.` : '' });
     A.invoices.push(invoice);
     for (const l of kept) {
-      const m = findMap(i.supplier, l.key), c = clientByDomain(l.domain);
+      const m = findMap(i.supplier, l.key), c = clientFor({ ...l, supplier: i.supplier });
       A.lines.push(touch({ id: uid('al'), invoiceId: invoice.id, supplier: i.supplier, key: l.key, label: l.label, detail: l.detail,
-        domain: l.domain, from: l.from || null, to: l.to || null, qty: l.qty, unit: l.unit, total: l.total,
+        domain: l.domain, hint: l.hint || '', from: l.from || null, to: l.to || null, qty: l.qty, unit: l.unit, total: l.total,
         clientId: c?.id || null, mapId: m?.id || null, status: 'open' }));
     }
     return `${i.supplier} ${i.number || name} : ${kept.length} article(s) importé(s)${invoice.skipped ? `, ${invoice.skipped} à 0 € ignoré(s)` : ''}.`;
@@ -238,13 +245,13 @@ const Achats = (() => {
   // Colonnes reprises du modèle de Fred (Classeur2.xlsx, 25/10/2026), puis des colonnes d'information.
   const D = d => { if (!d) return null; const [y, m, j] = d.split('-').map(Number); return new Date(Date.UTC(y, m - 1, j)); };
   const HEAD = ['numéro', 'nom du produit', 'fournisseur', 'nom du client', 'quantité', "prix d'achat HTVA", 'référence article dans billit',
-    'marge fournisseur', 'marge article', 'prix de vente HTVA', 'domaine', 'du', 'au', 'date facture fournisseur'];
+    'marge fournisseur', 'marge article', 'prix de vente HTVA', 'domaine / contact', 'du', 'au', 'date facture fournisseur'];
   const W = [14, 45, 13, 18, 10, 16, 24, 17, 14, 17, 20, 11, 11, 14];
   const row = l => {
     const i = inv(l.invoiceId), m = mapOf(l), s = supplierOf(l.supplier);
     return [i.number || null, l.label, l.supplier, clientName(l) || null, l.qty, l.total, m?.billitRef || null,
       s && isSet(s.margin) ? s.margin / 100 : null, isSet(m?.margin) ? m.margin / 100 : null, saleTotal(l),
-      l.domain || null, D(l.from), D(l.to), D(i.date)];
+      whereOf(l) || null, D(l.from), D(l.to), D(i.date)];
   };
   const byClient = (a, b) => (clientName(a) + inv(a.invoiceId).date).localeCompare(clientName(b) + inv(b.invoiceId).date);
   const shift = (cols, n) => cols.map(c => c + n);
@@ -290,7 +297,7 @@ const Achats = (() => {
         ${m?.billitRef ? `<span class="pill">${esc(m.billitRef)}</span>` : ''}
         ${gap && st !== 'billed' ? `<span class="pill warn">prix Billit ${eur(gap.billit)}</span>` : ''}</div>
       <div class="small">${esc(l.label)}</div>
-      <div class="small muted">${[l.supplier, l.domain, l.from && `du ${frDate(l.from)} au ${frDate(l.to)}`, `achat ${l.qty} × ${eur(l.unit)}`].filter(Boolean).map(esc).join(' · ')}</div>
+      <div class="small muted">${[l.supplier, whereOf(l), l.from && `du ${frDate(l.from)} au ${frDate(l.to)}`, `achat ${l.qty} × ${eur(l.unit)}`].filter(Boolean).map(esc).join(' · ')}</div>
     </div><div class="dur">${sale != null && st !== 'ignored' ? eur(sale) : ''}<div class="small muted" style="font-weight:400">${eur(l.total)}</div></div></li>`;
   };
   // Article facturé via l'onglet Facturer : ouvre la facture (envoi vers Billit, annulation) ; sinon, l'article.
@@ -380,15 +387,16 @@ const Achats = (() => {
     const m = mapOf(l) || findMap(l.supplier, l.key);
     const i = inv(l.invoiceId), s = supplierOf(l.supplier);
     const d = draft || { clientId: l.clientId, ref: m?.billitRef || '', margin: m?.margin ?? '', ignore: !!m?.ignore, ignoreLine: l.status === 'ignored' };
-    const domainOwner = clientByDomain(l.domain);
+    const domainOwner = clientByDomain(l.domain), hintKnown = hintOf(l.supplier, l.hint);
     const billed = l.status === 'billed';
     const dlg = $('#dlg'), f = $('#dlgForm');
     f.innerHTML = `<h2>Article ${esc(l.supplier)}</h2>
       <p class="small muted">Facture ${esc(i.number)} du ${frDate(i.date)}</p>
       <p><strong>${esc(l.label)}</strong>${l.detail ? `<br><span class="small">${esc(l.detail)}</span>` : ''}<br>
-        <span class="small muted">${[l.domain, l.from && `du ${frDate(l.from)} au ${frDate(l.to)}`, `achat ${l.qty} × ${eur(l.unit)} = ${eur(l.total)}`].filter(Boolean).map(esc).join(' · ')}</span></p>
+        <span class="small muted">${[whereOf(l), l.from && `du ${frDate(l.from)} au ${frDate(l.to)}`, `achat ${l.qty} × ${eur(l.unit)} = ${eur(l.total)}`].filter(Boolean).map(esc).join(' · ')}</span></p>
       <label>Client</label><select id="lClient" ${billed ? 'disabled' : ''}><option value="">— choisir —</option>${clientOptions(d.clientId)}</select>
       ${l.domain && !domainOwner ? `<label class="check"><input type="checkbox" id="lDom" checked> Ajouter ${esc(l.domain)} à la fiche de ce client</label>` : ''}
+      ${!l.domain && l.hint && !hintKnown ? `<label class="check"><input type="checkbox" id="lHint" checked> Retenir « ${esc(l.hint)} » pour ce client (factures ${esc(l.supplier)})</label>` : ''}
       <div class="card" style="margin:12px 0 0;padding:10px">
         <strong class="small">Pour tous les articles « ${esc(l.label)} » de ${esc(l.supplier)}</strong>
         <label>Article Billit (référence)</label>
@@ -437,8 +445,9 @@ const Achats = (() => {
       if (!billed) {
         const c = v.clientId && state.clients.find(x => x.id === v.clientId);
         if (c && $('#lDom')?.checked) { c.domains = [...(c.domains || []), l.domain]; touch(c); clientsChanged = true; }
+        if (c && $('#lHint')?.checked) A.hints.push(touch({ id: uid('ah'), supplier: l.supplier, text: hintKey(l.hint), label: l.hint, clientId: c.id }));
         Object.assign(touch(l), { clientId: v.clientId, mapId: mp?.id || null, status: v.ignoreLine ? 'ignored' : 'open' });
-        if (clientsChanged) assignClients();
+        assignClients();                     // autres lignes du même domaine / contact
       }
       dlg.close();
       await save();
@@ -489,7 +498,7 @@ const Achats = (() => {
         <p class="small muted">Achat ${eur(chosen.reduce((s, l) => s + l.total, 0))} · vente <strong>${eur(chosen.reduce((s, l) => s + saleTotal(l), 0))}</strong> HTVA</p>
         <ul class="list small">${ls.map(l => { const g = marginOf(l), gap = priceGap(l); return `<li><input type="checkbox" data-sel="${l.id}" ${sel.has(l.id) ? 'checked' : ''}>
           <div class="grow" style="flex:1;min-width:0"><strong>${esc(mapOf(l).billitRef)}</strong> ${esc(l.label)}
-            <div class="muted">${[l.domain, l.from && `du ${frDate(l.from)} au ${frDate(l.to)}`, `${l.qty} × ${eur(saleUnit(l))} (achat ${eur(l.unit)} + ${pct(g.pct)} ${g.from})`].filter(Boolean).map(esc).join(' · ')}</div>
+            <div class="muted">${[whereOf(l), l.from && `du ${frDate(l.from)} au ${frDate(l.to)}`, `${l.qty} × ${eur(saleUnit(l))} (achat ${eur(l.unit)} + ${pct(g.pct)} ${g.from})`].filter(Boolean).map(esc).join(' · ')}</div>
             ${gap ? `<div><span class="pill warn">Prix Billit ${eur(gap.billit)}</span> <button class="btn chip" data-fix="${l.id}">Mettre ${eur(gap.calc)} dans Billit</button></div>` : ''}</div>
           <div class="dur">${eur(saleTotal(l))}</div></li>`; }).join('')}</ul>
         <div class="actions"><button class="btn" value="cancel">Fermer</button>
@@ -521,18 +530,45 @@ const Achats = (() => {
     loadProducts(0).then(() => { if (dlg.open && $('#bMark')) draw(); });
   }
 
+  // PDF d'origine (rangé dans Traités/AAAA) : pages affichées en images + téléchargement. Gardé en mémoire pendant la session.
+  const pdfCache = new Map();
+  async function showPdf(i) {
+    const f = $('#dlgForm'), name = i.file.split('/').pop();
+    f.innerHTML = `<h2>${esc(i.supplier)} ${esc(i.number)}</h2><p class="small muted" id="pMsg">Chargement de ${esc(name)}…</p>
+      <div id="pPages" style="max-height:65vh;overflow:auto"></div>
+      <div class="actions"><button class="btn" id="pDl" disabled>⬇ Télécharger</button><button class="btn" id="pBack">Retour</button>
+        <button class="btn" value="cancel">Fermer</button></div>`;
+    $('#pBack').onclick = () => showInvoice(i);
+    openDlg();
+    try {
+      let buf = pdfCache.get(i.id);
+      if (!buf) {
+        const got = await OneDrive.get(i.file, 'buffer');
+        if (!got) throw new Error(`${name} introuvable dans ${i.file.split('/').slice(0, -1).join('/')} (déplacé ou renommé dans OneDrive ?).`);
+        pdfCache.set(i.id, buf = got.data);
+      }
+      if (!$('#pPages')) return;                     // dialogue fermé ou changé entre-temps
+      $('#pDl').disabled = false;
+      $('#pDl').onclick = () => download(new Blob([buf], { type: 'application/pdf' }), name);
+      const r = await Fournisseurs.render(buf.slice(0), $('#pPages'));
+      if ($('#pMsg')) $('#pMsg').textContent = `${name} · ${r.pages} page(s)${r.shown < r.pages ? ` (${r.shown} affichées : télécharge pour le reste)` : ''}`;
+    } catch (e) { if ($('#pMsg')) $('#pMsg').innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
+  }
+
   function showInvoice(i) {
     const ls = alive(A.lines).filter(l => l.invoiceId === i.id);
     const dlg = $('#dlg'), f = $('#dlgForm');
     f.innerHTML = `<h2>${esc(i.supplier)} ${esc(i.number)}</h2>
       <p class="small muted">Du ${frDate(i.date)} · total HTVA ${i.totalExcl != null ? eur(i.totalExcl) : '?'} · importée le ${frDate(isoDate(new Date(i.importedAt)))}
         ${i.skipped ? `· ${i.skipped} article(s) à 0 € ignoré(s)` : ''}<br><code>${esc(i.file)}</code></p>
+      <button class="btn" id="iPdf">📄 Voir la facture</button>
       ${i.warn ? `<p class="small"><span class="pill warn">${esc(i.warn)}</span></p>` : ''}
       <ul class="list">${ls.map(lineLi).join('')}</ul>
       <div class="actions"><button class="btn danger" id="iDel" style="margin-right:auto">Supprimer l'import</button>
         ${ls.some(l => ['todo', 'ready'].includes(lineState(l))) ? '<button class="btn" id="iDone">Déjà refacturée</button>' : ''}
         <button class="btn" value="cancel">Fermer</button></div>`;
     bindLines(f);
+    $('#iPdf').onclick = () => showPdf(i);
     // Facture déjà refacturée hors de l'app (ex. avant la mise en service du module) : tout passe en « facturé ».
     if ($('#iDone')) $('#iDone').onclick = async () => {
       const todo = ls.filter(l => ['todo', 'ready'].includes(lineState(l)));
@@ -568,6 +604,11 @@ const Achats = (() => {
         ${products ? `<ul class="list small" style="max-height:260px;overflow:auto">${products.slice().sort((a, b) => String(a.Reference).localeCompare(String(b.Reference))).map(p => `<li class="tap" data-prod="${p.ProductID}">
             <strong style="min-width:70px">${esc(p.Reference || '(sans réf.)')}</strong><div class="grow" style="flex:1;min-width:0">${esc(p.Description || '')}</div><div class="dur">${eur(productPrice(p))}</div></li>`).join('')}</ul>` : ''}
         <div class="row" style="margin-top:8px"><button class="btn chip" id="pNew" ${Billit.ready() ? '' : 'disabled'}>+ Nouvel article Billit</button></div>
+        ${alive(A.hints).length ? `<h2 style="font-size:15px;margin-top:16px">Contacts → clients (${alive(A.hints).length})</h2>
+          <p class="small muted" style="margin:0">Pour les fournisseurs sans domaine (MGK) : appris en complétant un article.</p>
+          <ul class="list">${alive(A.hints).sort((a, b) => a.label.localeCompare(b.label)).map(h => `<li style="align-items:center"><div class="grow" style="flex:1;min-width:0">
+            <strong>${esc(h.label)}</strong> → ${esc(client(h.clientId).name)}<div class="small muted">${esc(h.supplier)}</div></div>
+            <button class="btn danger chip" data-delhint="${h.id}" title="Oublier">🗑</button></li>`).join('')}</ul>` : ''}
         <h2 style="font-size:15px;margin-top:16px">Marges des fournisseurs</h2>
         <p class="small muted" style="margin:0">Utilisée quand l'article n'a pas sa propre marge. Prix de vente = achat × (1 + marge).</p>
         <ul class="list">${sups.map(s => `<li style="align-items:center"><strong class="grow" style="flex:1">${esc(s.name)}</strong>
@@ -587,6 +628,11 @@ const Achats = (() => {
         A.suppliers.push(touch({ id: uid('sup'), name, margin: m === null || m.trim() === '' ? '' : +m.replace(',', '.') }));
         await save(); scheduleSync(); draw();
       };
+      $$('[data-delhint]', f).forEach(b => b.onclick = async () => {
+        const h = A.hints.find(x => x.id === b.dataset.delhint);
+        if (!confirm(`Oublier « ${h.label} » → ${client(h.clientId).name} ? (les articles déjà attribués ne changent pas)`)) return;
+        touch(h).deleted = true; await save(); scheduleSync(); draw();
+      });
       $$('[data-map]', f).forEach(li => li.onclick = () => editMap(A.mapping.find(m => m.id === li.dataset.map)));
       $$('[data-prod]', f).forEach(li => li.onclick = () => editProduct(products.find(p => String(p.ProductID) === li.dataset.prod)));
       $('#pNew').onclick = () => createArticle({}, () => showArticles());
@@ -659,7 +705,7 @@ const Achats = (() => {
   }
 
   // --- lien avec l'onglet Facturer (app.js) : les achats prêts d'un client vont sur sa facture, avec ses interventions ---
-  const forBilling = l => ({ id: l.id, label: l.label, supplier: l.supplier, domain: l.domain, from: l.from, to: l.to,
+  const forBilling = l => ({ id: l.id, label: l.label, supplier: l.supplier, domain: whereOf(l), from: l.from, to: l.to,
     qty: l.qty, unit: lineUnit(l), total: saleTotal(l), ref: mapOf(l)?.billitRef || '' });
   // Données pas encore chargées (tout début) : liste vide, puis nouvel affichage une fois chargées.
   const ensure = () => { if (A) return true; load().then(() => render()); return false; };

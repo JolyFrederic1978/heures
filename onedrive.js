@@ -121,6 +121,7 @@ const OneDrive = (() => {
   }
 
   // Déplace un fichier dans un autre dossier (créé au besoin), en le renommant si un fichier du même nom y est déjà.
+  // Renvoie le nom final du fichier.
   async function move(path, folder) {
     await mkdir(folder);
     const name = path.split('/').pop();
@@ -129,6 +130,7 @@ const OneDrive = (() => {
       body: JSON.stringify({ parentReference: { path: '/drive/root:/' + folder.split('/').filter(Boolean).join('/') }, name })
     });
     if (!r.ok) throw new Error(`OneDrive (${r.status}) : déplacement de ${name} impossible.`);
+    try { return (await r.json()).name || name; } catch (_) { return name; }
   }
 
   return {
