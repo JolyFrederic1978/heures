@@ -93,8 +93,46 @@ const OneDrive = (() => {
     return r;
   }
 
+  // Fichiers d'un dossier : [{ name, size, modified }] ([] si le dossier n'existe pas).
+  async function list(path) {
+    let url = itemPath(path) + '/children?$top=200', out = [];
+    while (url) {
+      const r = url.startsWith('http') ? await fetch(url, { headers: { Authorization: 'Bearer ' + await accessToken() } }) : await graph(url);
+      if (r.status === 404) return [];
+      if (!r.ok) throw new Error(`OneDrive (${r.status}) : lecture du dossier ${path} impossible.`);
+      const j = await r.json();
+      out.push(...j.value.filter(x => x.file).map(x => ({ name: x.name, size: x.size, modified: x.lastModifiedDateTime })));
+      url = j['@odata.nextLink'];
+    }
+    return out;
+  }
+
+  // Crée le dossier (et ses parents) s'il n'existe pas.
+  async function mkdir(path) {
+    const parts = path.split('/').filter(Boolean);
+    for (let i = 0; i < parts.length; i++) {
+      const parent = parts.slice(0, i).join('/');
+      const r = await graph((parent ? itemPath(parent) : '/me/drive/root') + '/children', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: parts[i], folder: {}, '@microsoft.graph.conflictBehavior': 'fail' })
+      });
+      if (!r.ok && r.status !== 409) throw new Error(`OneDrive (${r.status}) : création du dossier ${parts.slice(0, i + 1).join('/')} impossible.`);
+    }
+  }
+
+  // Déplace un fichier dans un autre dossier (créé au besoin), en le renommant si un fichier du même nom y est déjà.
+  async function move(path, folder) {
+    await mkdir(folder);
+    const name = path.split('/').pop();
+    const r = await graph(itemPath(path) + '?@microsoft.graph.conflictBehavior=rename', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parentReference: { path: '/drive/root:/' + folder.split('/').filter(Boolean).join('/') }, name })
+    });
+    if (!r.ok) throw new Error(`OneDrive (${r.status}) : déplacement de ${name} impossible.`);
+  }
+
   return {
-    NeedLogin, login, logout, handleRedirect, get, put, redirectUri,
+    NeedLogin, login, logout, handleRedirect, get, put, list, mkdir, move, redirectUri,
     configure(fn) { cfg = fn; },
     configured: () => !!cfg().clientId,
     signedIn: () => !!tokens(),

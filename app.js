@@ -128,16 +128,29 @@ const xrow = e => ({ ...e, client: client(e.clientId).name });
 const prestationsName = b => `Prestations - ${b.label} ${b.date}.xlsx`;
 const prestationsFile = b => Xlsx.prestations(sortEntries(live().filter(e => e.billId === b.id)).map(xrow), b.key === 'alescom');
 
+// Achats refacturés (module Achats, achats.js) : ils peuvent être ajoutés à la facture d'un client.
+const achSum = ach => ach.reduce((s, x) => s + x.total, 0);
+const achLabel = x => `${x.ref} ${x.label}${x.domain ? ' – ' + x.domain : ''}`;
+// Objet de la facture : interventions (période) et/ou achats refacturés.
+function billTitle(b) {
+  const parts = [];
+  if (b.from) parts.push(`Interventions du ${frDate(b.from)} au ${frDate(b.to)}`);
+  if (Achats.ofBill(b.id).length) parts.push(parts.length ? 'abonnements' : 'Abonnements et services');
+  return parts.join(' et ');
+}
+
 function recapBillit(b) {
   const info = groupInfo(b.key), r = info.rates;
-  const s = sortEntries(live().filter(e => e.billId === b.id)), t = totals(s, r);
-  const lines = [`Client Billit : ${info.billitName}`, `Objet : Interventions du ${frDate(b.from)} au ${frDate(b.to)}`, ''];
+  const s = sortEntries(live().filter(e => e.billId === b.id)), t = totals(s, r), ach = Achats.ofBill(b.id);
+  const lines = [`Client Billit : ${info.billitName}`, `Objet : ${billTitle(b)}`, ''];
   if (t.h) lines.push(`${r.hLabel} : ${t.h} × ${eur(r.h)} = ${eur(t.h * r.h)}`);
   if (t.m) lines.push(`${r.mLabel} : ${t.m} × ${eur(r.m)} = ${eur(t.m * r.m)}`);
   if (t.dep) lines.push(`${r.depLabel} : ${t.dep} × ${eur(r.dep)} = ${eur(t.dep * r.dep)}`);
+  ach.forEach(x => lines.push(`${achLabel(x)} : ${x.qty} × ${eur(x.unit)} = ${eur(x.total)}`));
   const inst = s.filter(e => e.install);
   if (inst.length) lines.push('', 'Installations à ajouter :', ...inst.map(e => `- ${frDate(e.date)} ${e.install}`));
-  lines.push('', `Total HTVA (hors installations) : ${eur(t.amount)}`, `Pièce jointe : ${prestationsName(b)}`);
+  lines.push('', `Total HTVA (hors installations) : ${eur(t.amount + achSum(ach))}`);
+  if (s.length) lines.push(`Pièce jointe : ${prestationsName(b)}`);
   return lines.join('\n');
 }
 async function copy(txt) {
@@ -225,6 +238,7 @@ async function sync() {
     await DB.save(state);
     setSync('ok');
     if (changed && !$('#dlg').open) render();
+    Achats.sync();                          // gère ses propres erreurs, affichées dans l'onglet Achats
   } catch (e) {
     if (e instanceof OneDrive.NeedLogin) { setSync('login', 'Session expirée : reconnecte-toi.'); render(); }
     else setSync('err', e.message);
@@ -235,8 +249,9 @@ async function sync() {
 }
 
 // ---------- rendu ----------
-const TITLES = { today: "Aujourd'hui", list: 'Interventions', billing: 'Facturer', archive: 'Archives', settings: 'Réglages' };
-const VIEWS = () => ({ today: viewToday, list: viewList, billing: viewBilling, archive: viewArchive, settings: viewSettings });
+const TITLES = { today: "Aujourd'hui", list: 'Interventions', billing: 'Facturer', archive: 'Archives', achats: 'Achats', settings: 'Réglages' };
+// Achats : module séparé (achats.js), avec ses propres données et sa propre synchro.
+const VIEWS = () => ({ today: viewToday, list: viewList, billing: viewBilling, archive: viewArchive, achats: Achats.view, settings: viewSettings });
 function render() {
   clearInterval(tick);
   // Accès : connexion Microsoft obligatoire, puis code PIN s'il est défini.
@@ -562,39 +577,45 @@ function viewList() {
 }
 
 // ---- Facturer ----
-let billingTarget = null, billUntil = today(), excluded = new Set();
+let billingTarget = null, billUntil = today(), excluded = new Set(), excludedAch = new Set();
 function viewBilling() {
   const open = live().filter(e => !e.billId);
-  const keys = [...new Set(open.map(groupKey))];
+  // Un client sans intervention en attente apparaît aussi s'il a des achats prêts à refacturer.
+  const keys = [...new Set([...open.map(groupKey), ...Achats.readyClients().map(id => 'c:' + id)])];
   if (billingTarget && !keys.includes(billingTarget)) billingTarget = null;
   if (billingTarget) return viewBillingTarget(billingTarget, open.filter(e => groupKey(e) === billingTarget));
 
   const groups = keys.map(k => {
     const info = groupInfo(k), es = sortEntries(open.filter(e => groupKey(e) === k));
-    return { info, es, t: totals(es, info.rates) };
-  }).sort((a, b) => b.t.amount - a.t.amount);
+    const ach = k.startsWith('c:') ? Achats.readyFor(k.slice(2)) : [], t = totals(es, info.rates);
+    return { info, es, ach, t, amount: t.amount + achSum(ach) };
+  }).sort((a, b) => b.amount - a.amount);
 
   $('#view').innerHTML = `
-    <div class="kpis"><div class="kpi"><div class="v">${eur(groups.reduce((s, g) => s + g.t.amount, 0))}</div><div class="l">à facturer (HTVA estimé)</div></div>
+    <div class="kpis"><div class="kpi"><div class="v">${eur(groups.reduce((s, g) => s + g.amount, 0))}</div><div class="l">à facturer (HTVA estimé)</div></div>
       <div class="kpi"><div class="v">${open.length}</div><div class="l">interventions en attente</div></div></div>
     <div class="card"><h2>En attente de facturation</h2>
       ${groups.length ? `<ul class="list">${groups.map(g => `
         <li class="tap" data-target="${g.info.key}"><div class="grow"><strong>${esc(g.info.label)}</strong>
           ${g.info.partner ? '<span class="pill warn">partenaire</span>' : ''}
-          <div class="small muted">${g.es.length} interv. · ${fmtDur(g.t.minutes)} · du ${frDate(g.es[0].date)} au ${frDate(g.es[g.es.length - 1].date)}</div></div>
-          <div class="dur">${eur(g.t.amount)}</div></li>`).join('')}</ul>`
+          <div class="small muted">${[g.es.length && `${g.es.length} interv. · ${fmtDur(g.t.minutes)} · du ${frDate(g.es[0].date)} au ${frDate(g.es[g.es.length - 1].date)}`,
+            g.ach.length && `${g.ach.length} achat(s) à refacturer`].filter(Boolean).join(' · ')}</div></div>
+          <div class="dur">${eur(g.amount)}</div></li>`).join('')}</ul>`
       : '<div class="empty">Tout est facturé 🎉</div>'}
     </div>`;
-  $$('[data-target]').forEach(li => li.onclick = () => { billingTarget = li.dataset.target; billUntil = today(); excluded = new Set(); render(); });
+  $$('[data-target]').forEach(li => li.onclick = () => { billingTarget = li.dataset.target; billUntil = today(); excluded = new Set(); excludedAch = new Set(); render(); });
 }
 
-function totalsTable(t, r) {
+// ach : achats refacturés sur la même facture (facultatif).
+function totalsTable(t, r, ach = []) {
+  const interv = t.h || t.m || t.dep || !ach.length;
   return `<table class="tot">
-    <tr><td>${esc(r.hLabel)}<br><span class="small muted">${t.h} × ${eur(r.h)}</span></td><td>${eur(t.h * r.h)}</td></tr>
+    ${interv ? `<tr><td>${esc(r.hLabel)}<br><span class="small muted">${t.h} × ${eur(r.h)}</span></td><td>${eur(t.h * r.h)}</td></tr>
     <tr><td>${esc(r.mLabel)}<br><span class="small muted">${t.m} × ${eur(r.m)}</span></td><td>${eur(t.m * r.m)}</td></tr>
-    <tr><td>${esc(r.depLabel)}<br><span class="small muted">${t.dep} × ${eur(r.dep)}</span></td><td>${eur(t.dep * r.dep)}</td></tr>
-    <tr class="sum"><td>Total HTVA</td><td>${eur(t.amount)}</td></tr>
-    <tr><td class="muted">TVAC (21 %)</td><td class="muted">${eur(t.amount * 1.21)}</td></tr></table>`;
+    <tr><td>${esc(r.depLabel)}<br><span class="small muted">${t.dep} × ${eur(r.dep)}</span></td><td>${eur(t.dep * r.dep)}</td></tr>` : ''}
+    ${ach.map(x => `<tr><td>${esc(achLabel(x))}<br><span class="small muted">${x.qty} × ${eur(x.unit)}${x.from ? ` · du ${frDate(x.from)} au ${frDate(x.to)}` : ''}</span></td><td>${eur(x.total)}</td></tr>`).join('')}
+    <tr class="sum"><td>Total HTVA</td><td>${eur(t.amount + achSum(ach))}</td></tr>
+    <tr><td class="muted">TVAC (21 %)</td><td class="muted">${eur((t.amount + achSum(ach)) * 1.21)}</td></tr></table>`;
 }
 
 function viewBillingTarget(key, all) {
@@ -602,34 +623,46 @@ function viewBillingTarget(key, all) {
   const es = sortEntries(all.filter(e => e.date <= billUntil));
   const sel = es.filter(e => !excluded.has(e.id));
   const t = totals(sel, r);
+  const ach = key.startsWith('c:') ? Achats.readyFor(key.slice(2)) : [];
+  const selA = ach.filter(x => !excludedAch.has(x.id));
+  const what = [sel.length && `${sel.length} intervention(s)`, selA.length && `${selA.length} achat(s)`].filter(Boolean).join(' + ');
 
   $('#view').innerHTML = `
     <button class="link" id="back">← Retour</button>
     <div class="card" style="margin-top:8px"><h2>${esc(info.label)} <span class="small muted">→ Billit : ${esc(info.billitName)}</span></h2>
-      <label>Inclure jusqu'au</label><input type="date" id="until" value="${billUntil}">
-      <div style="margin-top:12px">${totalsTable(t, r)}</div>
+      ${es.length ? `<label>Inclure jusqu'au</label><input type="date" id="until" value="${billUntil}">` : ''}
+      <div style="margin-top:12px">${totalsTable(t, r, selA)}</div>
       ${sel.some(e => e.install) ? '<p class="small"><span class="pill warn">Contient des installations : article à ajouter dans Billit.</span></p>' : ''}
-      <button class="btn primary big" id="doBill" style="margin-top:12px" ${sel.length ? '' : 'disabled'}>Facturer ${sel.length} intervention(s)</button>
-      <p class="small muted">Crée « Prestations - ${esc(info.label)} ${today()}.xlsx » dans OneDrive/A facturer et déplace ces interventions vers l'archive.</p>
+      <button class="btn primary big" id="doBill" style="margin-top:12px" ${what ? '' : 'disabled'}>Facturer ${what || '…'}</button>
+      <p class="small muted">${sel.length ? `Crée « Prestations - ${esc(info.label)} ${today()}.xlsx » dans OneDrive/A facturer et déplace ces interventions vers l'archive.` : ''}
+        ${selA.length ? 'Les achats passent dans l\'archive des achats.' : ''}</p>
     </div>
-    <div class="card"><h2>Interventions (${sel.length}/${es.length})</h2>
+    ${es.length ? `<div class="card"><h2>Interventions (${sel.length}/${es.length})</h2>
       <ul class="list">${es.map(e => `<li><input type="checkbox" data-inc="${e.id}" ${excluded.has(e.id) ? '' : 'checked'}>
         <div class="grow tap" data-edit="${e.id}"><div><strong>${frDate(e.date)}</strong> ${e.forfait ? 'forfait' : `${e.start}–${e.end}`}
           ${info.partner ? '· ' + esc(client(e.clientId).name) : ''} ${e.onSite ? '<span class="pill">sur site</span>' : ''}</div>
           <div class="small muted">${esc(e.description)}${e.install ? ' · ' + esc(e.install) : ''}</div></div>
-        <div class="dur">${fmtDur(e.minutes)}</div></li>`).join('')}</ul></div>`;
+        <div class="dur">${fmtDur(e.minutes)}</div></li>`).join('')}</ul></div>` : ''}
+    ${ach.length ? `<div class="card"><h2>Achats à refacturer (${selA.length}/${ach.length})</h2>
+      <ul class="list">${ach.map(x => `<li><input type="checkbox" data-inca="${x.id}" ${excludedAch.has(x.id) ? '' : 'checked'}>
+        <div class="grow"><div><strong>${esc(x.ref)}</strong> ${esc(x.label)}</div>
+          <div class="small muted">${[x.supplier, x.domain, x.from && `du ${frDate(x.from)} au ${frDate(x.to)}`, `${x.qty} × ${eur(x.unit)}`].filter(Boolean).map(esc).join(' · ')}</div></div>
+        <div class="dur">${eur(x.total)}</div></li>`).join('')}</ul></div>` : ''}`;
 
   $('#back').onclick = () => { billingTarget = null; render(); };
-  $('#until').onchange = ev => { billUntil = ev.target.value || today(); render(); };
+  if ($('#until')) $('#until').onchange = ev => { billUntil = ev.target.value || today(); render(); };
   $$('[data-inc]').forEach(c => c.onchange = () => { c.checked ? excluded.delete(c.dataset.inc) : excluded.add(c.dataset.inc); render(); });
+  $$('[data-inca]').forEach(c => c.onchange = () => { c.checked ? excludedAch.delete(c.dataset.inca) : excludedAch.add(c.dataset.inca); render(); });
   bindEdits();
   $('#doBill').onclick = async () => {
-    const ref = prompt(`Facturer ${sel.length} intervention(s) de ${info.label} pour ${eur(t.amount)} HTVA.\n\nN° de facture Billit (optionnel, modifiable plus tard dans Archives) :`, '');
+    const total = t.amount + achSum(selA);
+    const ref = prompt(`Facturer ${what} de ${info.label} pour ${eur(total)} HTVA.\n\nN° de facture Billit (optionnel, modifiable plus tard dans Archives) :`, '');
     if (ref === null) return;
     const b = touch({ id: uid('b'), key, label: info.label, date: today(), ref: ref.trim(), entryIds: sel.map(e => e.id),
-      from: sel[0].date, to: sel[sel.length - 1].date, amount: t.amount });
+      from: sel[0]?.date || null, to: sel[sel.length - 1]?.date || null, amount: total });
     state.bills.push(b);
     sel.forEach(e => { e.billId = b.id; touch(e); });
+    await Achats.attach(selA.map(x => x.id), b);
     billingTarget = null;
     await persist();
     showBill(b, true);
@@ -640,23 +673,23 @@ function viewBillingTarget(key, all) {
 async function showBill(b, justCreated = false) {
   const info = groupInfo(b.key);
   const es = sortEntries(live().filter(e => e.billId === b.id));
-  const t = totals(es, info.rates);
+  const t = totals(es, info.rates), ach = Achats.ofBill(b.id);
   const dlg = $('#dlg'), f = $('#dlgForm');
   f.innerHTML = `<h2>${justCreated ? 'Facturé : ' : ''}${esc(b.label)}</h2>
-    <p class="small muted">Facturé le ${frDate(b.date)} · ${es.length} interv. · du ${frDate(b.from)} au ${frDate(b.to)}</p>
-    <p class="small" id="bFile">${justCreated ? 'Envoi du fichier Prestations vers OneDrive…' : ''}</p>
+    <p class="small muted">Facturé le ${frDate(b.date)} · ${[es.length && `${es.length} interv. · du ${frDate(b.from)} au ${frDate(b.to)}`, ach.length && `${ach.length} achat(s)`].filter(Boolean).join(' · ')}</p>
+    <p class="small" id="bFile">${justCreated && es.length ? 'Envoi du fichier Prestations vers OneDrive…' : ''}</p>
     <div class="card" style="margin:10px 0;padding:10px">
       <div class="row"><strong class="grow">Billit</strong>
         <button class="btn ${b.billit ? '' : 'primary'}" id="bSend">📤 ${b.billit ? 'Renvoyer' : 'Envoyer'} vers Billit (${Billit.mode() === 'live' ? 'réel' : 'test'})</button></div>
       <div class="small" id="bBillitMsg" style="margin-top:6px">${billitStatus(b)}</div>
     </div>
     <label>N° de facture Billit</label><input id="bRef" value="${esc(b.ref)}">
-    ${totalsTable(t, info.rates)}
+    ${totalsTable(t, info.rates, ach)}
     <pre class="recap">${esc(recapBillit(b))}</pre>
     <ul class="list small" style="margin-top:8px">${es.map(e => entryLi(e, { showDate: true, showBill: false })).join('')}</ul>
     <div class="actions">
       <button class="btn danger" id="bUndo" style="margin-right:auto">Annuler la facturation</button>
-      <button class="btn" id="bDl">⬇ Prestations</button>
+      ${es.length ? '<button class="btn" id="bDl">⬇ Prestations</button>' : ''}
       <button class="btn" id="bCopy">Copier récap</button>
       <button class="btn primary" id="bOk">Fermer</button>
     </div>`;
@@ -664,17 +697,18 @@ async function showBill(b, justCreated = false) {
   $('#bOk').onclick = async ev => { ev.preventDefault(); await saveRef(); dlg.close(); };
   $('#bCopy').onclick = () => copy(recapBillit(b));
   $('#bSend').onclick = async () => { const btn = $('#bSend'); btn.disabled = true; try { await sendToBillit(b); } finally { if (btn.isConnected) btn.disabled = false; } };
-  $('#bDl').onclick = async () => { try { download(await prestationsFile(b), prestationsName(b)); } catch (e) { alert(e.message); } };
+  if ($('#bDl')) $('#bDl').onclick = async () => { try { download(await prestationsFile(b), prestationsName(b)); } catch (e) { alert(e.message); } };
   $('#bUndo').onclick = async () => {
-    if (!confirm('Remettre ces interventions dans « à facturer » ? (le fichier Prestations déjà créé n\'est pas supprimé)')) return;
+    if (!confirm(`Remettre ${[es.length && 'ces interventions', ach.length && 'ces achats'].filter(Boolean).join(' et ')} dans « à facturer » ? (le fichier Prestations déjà créé n'est pas supprimé)`)) return;
     es.forEach(e => { e.billId = null; touch(e); });
+    await Achats.detach(b.id);
     b.deleted = true; touch(b);
     dlg.close(); await persist(); toast('Facturation annulée');
   };
   $$('[data-edit]', f).forEach(li => li.onclick = null);
-  dlg.showModal();
+  if (!dlg.open) dlg.showModal();
 
-  if (justCreated) {
+  if (justCreated && es.length) {
     const el = $('#bFile');
     try {
       if (!OneDrive.signedIn()) throw new Error('OneDrive non connecté');
@@ -752,6 +786,9 @@ function billitLines(b, info, products) {
   if (t.h) lines.push(line(t.h, r.hRef, r.hLabel, r.h));
   if (t.m) lines.push(line(t.m, r.mRef, r.mLabel, r.m));
   if (t.dep) lines.push(line(t.dep, r.depRef, r.depLabel, r.dep));
+  // Achats refacturés : prix calculé par le module Achats (achat + marge).
+  const ach = Achats.orderLines(b.id, products);
+  lines.push(...ach.lines); missing.push(...ach.missing);
   return { lines, missing };
 }
 
@@ -783,9 +820,10 @@ async function sendToBillit(b) {
       // Draft = « Projet » dans Billit (sans ce statut, la facture est numérotée tout de suite).
       OrderType: 'Invoice', OrderDirection: 'Income', OrderStatus: 'Draft', Currency: 'EUR',
       OrderDate: today(), ExpiryDate: isoDate(due), CustomerID: +customerId || customerId,
-      OrderTitle: `Interventions du ${frDate(b.from)} au ${frDate(b.to)}`,
+      OrderTitle: billTitle(b),
       OrderLines: lines,
-      Attachments: [{ FileName: prestationsName(b), FileContent: await toBase64(await prestationsFile(b)), MimeType: Xlsx.MIME }]
+      // Fichier Prestations seulement s'il y a des interventions (une facture peut ne contenir que des achats).
+      ...(b.from ? { Attachments: [{ FileName: prestationsName(b), FileContent: await toBase64(await prestationsFile(b)), MimeType: Xlsx.MIME }] } : {})
     };
     const summary = lines.map(l => `- ${l.Reference} ${l.Description} : ${l.Quantity} × ${eur(l.UnitPriceExcl)}`).join('\n');
     if (!confirm(`${m === 'live' ? '⚠ MODE RÉEL – vraie comptabilité' : 'Mode TEST (sandbox)'}\n\nFacture pour ${info.billitName}\n${order.OrderTitle}\n${summary}\nTotal HTVA : ${eur(total)}`
@@ -859,9 +897,9 @@ function viewSettings() {
     <div class="card"><div class="row"><h2 class="grow" style="margin:0">Clients (${state.clients.filter(c => !c.deleted).length})</h2><button class="btn" id="addClient">+ Ajouter</button></div>
       <input type="search" id="cSearch" placeholder="Rechercher un client…" style="margin-top:10px">
       <ul class="list" style="margin-top:8px;max-height:420px;overflow:auto">${state.clients.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name)).map(c => `
-        <li data-name="${esc(fold(c.name + ' ' + (c.billitName || '')))}">
+        <li data-name="${esc(fold(c.name + ' ' + (c.billitName || '') + ' ' + (c.domains || []).join(' ')))}">
           <div class="grow tap" data-client="${c.id}"><strong>${esc(c.name)}</strong> ${c.archived ? '<span class="pill">archivé</span>' : ''}
-            <div class="small muted">Billit : ${esc(c.billitName || '—')}${c.near ? ' · proche (zone 1)' : ''}${c.server ? ` · ${serverCount(c)} serveur(s)` : ''}${c.defaultAlescom ? ' · alescom' : ''}</div></div>
+            <div class="small muted">Billit : ${esc(c.billitName || '—')}${c.near ? ' · proche (zone 1)' : ''}${c.server ? ` · ${serverCount(c)} serveur(s)` : ''}${c.defaultAlescom ? ' · alescom' : ''}${c.domains?.length ? ' · ' + esc(c.domains.join(', ')) : ''}</div></div>
           <button class="btn danger chip" data-delclient="${c.id}" title="Supprimer">🗑</button></li>`).join('')}</ul>
       <label>Nom Billit du commanditaire alescom</label><input id="alesBillit" value="${esc(s.alescomBillit)}">
     </div>
@@ -1025,6 +1063,8 @@ function editClient(c) {
   f.innerHTML = `<h2>${c ? 'Modifier' : 'Nouveau'} client</h2>
     <label>Nom</label><input id="cName" value="${esc(c?.name)}" placeholder="ex. Vedi">
     <label>Nom du client dans Billit</label><input id="cBillit" value="${esc(c?.billitName)}" placeholder="ex. V.T.S. SA">
+    <label>Nom(s) de domaine <span class="small">(séparés par une virgule, sert à attribuer les achats OVH…)</span></label>
+    <input id="cDomains" value="${esc((c?.domains || []).join(', '))}" placeholder="ex. vedi.be, vts-sa.com" autocapitalize="off">
     <label class="check"><input type="checkbox" id="cNear" ${c?.near ? 'checked' : ''}> Client proche (déplacement zone 1, dep-003)</label>
     <label class="check"><input type="checkbox" id="cAles" ${c?.defaultAlescom ? 'checked' : ''}> alescom par défaut</label>
     <div class="row">
@@ -1045,7 +1085,11 @@ function editClient(c) {
     if (/\b(remote|distance)\b/i.test(name)) return alert('Retire « remote » / « distance » du nom : utilise la case « Sur site ».');
     if (state.clients.some(x => x !== c && !x.deleted && x.name.toLowerCase() === name.toLowerCase())) return alert('Ce client existe déjà.');
     const server = $('#cServer').checked, servers = Math.max(1, parseInt($('#cServers').value, 10) || 1);
-    const data = { name, billitName: $('#cBillit').value.trim(), near: $('#cNear').checked, defaultAlescom: $('#cAles').checked, archived: !!$('#cArch')?.checked,
+    const domains = [...new Set($('#cDomains').value.toLowerCase().split(/[\s,;]+/)
+      .map(d => d.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '')).filter(d => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d)))];
+    const taken = domains.map(d => [d, state.clients.find(x => x !== c && !x.deleted && (x.domains || []).includes(d))]).find(([, x]) => x);
+    if (taken) return alert(`Le domaine ${taken[0]} est déjà attribué à ${taken[1].name}.`);
+    const data = { name, billitName: $('#cBillit').value.trim(), domains, near: $('#cNear').checked, defaultAlescom: $('#cAles').checked, archived: !!$('#cArch')?.checked,
       server, servers: server ? servers : 0 };
     if (c) Object.assign(touch(c), data); else state.clients.push(touch({ id: uid('c'), ...data }));
     dlg.close(); await persist();
@@ -1113,6 +1157,7 @@ async function pinHash(pin, salt) {
 // Déconnexion : on oublie le jeton et la copie locale (les données restent dans OneDrive).
 async function signOut() {
   OneDrive.logout();
+  await Achats.reset();
   const od = state.onedrive;
   state = DB.defaults(); state.onedrive = od;
   await DB.save(state);
@@ -1141,9 +1186,10 @@ function viewLogin() {
     <div class="card" style="text-align:center;margin-top:24px">
       <img src="icons/icon-192.png" alt="" width="72" height="72" style="border-radius:16px">
       <h2 style="font-size:18px;margin:12px 0 4px">One Level UP · Heures</h2>
-      <p class="muted">Connecte-toi avec ton compte Microsoft 365 pour accéder à tes interventions.</p>
+      <p class="muted">Outil interne de pointage de One Level UP.</p>
       <button class="btn primary big" id="loginBtn" ${OneDrive.configured() ? '' : 'disabled'}>Se connecter avec Microsoft 365</button>
       ${OneDrive.configured() ? '' : '<p class="small"><span class="pill warn">ID d\'application manquant dans la configuration.</span></p>'}
+      <p class="small muted" style="margin-bottom:0">Connexion sur la page officielle de Microsoft : le mot de passe n'est jamais saisi ici.</p>
     </div>`;
   $('#loginBtn').onclick = () => OneDrive.login().catch(e => alert(e.message));
 }

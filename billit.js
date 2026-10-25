@@ -50,6 +50,9 @@ const Billit = (() => {
       return all.filter(o => String(o.CounterParty?.PartyID ?? o.CustomerID ?? o.Customer?.PartyID) === String(customerId));
     },
     createOrder: order => call('/v1/orders', { method: 'POST', body: JSON.stringify(order) }),
+    // Crée un article, ou le met à jour si ProductID est fourni (champs : Reference, Description, AmountExcl, VAT, BuyExcl…).
+    // Corps = un seul objet (pas { Items: [...] } comme dans le guide Billit : l'article est alors créé vide). Réponse = ProductID.
+    saveProduct: item => call('/v1/products', { method: 'POST', body: JSON.stringify(item) }),
     getOrder: id => call('/v1/orders/' + id)
   };
 })();

@@ -20,7 +20,7 @@ const Xlsx = (() => {
   // Forfaits (maintenance / mise à jour serveur) : pas d'heures, cellule vide.
   const time = hm => { if (!hm) return null; const [h, m] = hm.split(':').map(Number); return new Date(Date.UTC(1899, 11, 30, h, m)); };
 
-  async function build(head, rows, { dateCols = [], timeCols = [], widths = [], total = null, filter = false } = {}) {
+  async function build(head, rows, { dateCols = [], timeCols = [], pctCols = [], moneyCols = [], widths = [], total = null, filter = false } = {}) {
     await load();
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Feuil1');
@@ -32,6 +32,8 @@ const Xlsx = (() => {
     }));
     dateCols.forEach(i => ws.getColumn(i + 1).numFmt = 'dd/mm/yyyy');
     timeCols.forEach(i => ws.getColumn(i + 1).numFmt = 'hh:mm');
+    pctCols.forEach(i => ws.getColumn(i + 1).numFmt = '0%');
+    moneyCols.forEach(i => ws.getColumn(i + 1).numFmt = '#,##0.00 €');
     widths.forEach((w, i) => ws.getColumn(i + 1).width = w);
     ws.views = [{ state: 'frozen', ySplit: 1 }];
     if (filter) ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: head.length } };
@@ -116,5 +118,5 @@ const Xlsx = (() => {
     return out;
   }
 
-  return { openList, archive, prestations, readArchiveTemplate, MIME };
+  return { openList, archive, prestations, readArchiveTemplate, build, MIME };
 })();
