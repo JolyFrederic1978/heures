@@ -171,24 +171,103 @@ const Fournisseurs = (() => {
       const lines = items.map(it => {
         const info = it.info.join(' ');
         const get = re => (re.exec(info) || [])[1]?.trim() || '';
-        const sku = get(/SKU Code\s*:\s*(\S+)/i), seats = get(/Nombre de postes\s*:\s*(\d+)/i);
-        const type = get(/Type d'achat\s*:\s*(\w+)/i), validity = get(/Période de validité\s*:\s*(\d+\s*[^\s,;]+)/i);
-        // Période : « Valide du A jusqu'au B », ou « Valide jusqu'au B », ou seulement la durée (calculée depuis la date du document).
-        let from = isoDate(get(/Valide du\s+(\d{1,2}\.\d{1,2}\.\d{4})/i)), to = isoDate(get(/jusqu'au\s+(\d{1,2}\.\d{1,2}\.\d{4})/i));
-        const years = +(/(\d+)\s*ann/i.exec(validity) || [])[1] || 0, months = +(/(\d+)\s*mois/i.exec(validity) || [])[1] || 0;
-        const shift = (d, sign) => { const x = new Date(d + 'T00:00:00Z'); x.setUTCFullYear(x.getUTCFullYear() + sign * years); x.setUTCMonth(x.getUTCMonth() + sign * months); x.setUTCDate(x.getUTCDate() - sign); return x.toISOString().slice(0, 10); };
-        if (!from && to && (years || months)) from = shift(to, -1);
-        if (!from && !to && date && (years || months)) { from = date; to = shift(date, 1); }
-        const label = [it.desc, seats && `${seats} poste${+seats > 1 ? 's' : ''}`, validity].filter(Boolean).join(' – ');
-        return { label, detail: [type && `Type d'achat : ${type}`, sku && `SKU ${sku}`, `réf. MGK ${it.ref}`].filter(Boolean).join(' · '),
-          key: sku ? 'sku:' + sku.toLowerCase() : 'ref:' + it.ref + ':' + keyOf(it.desc),
-          domain: '', hint: it.hint, ref: it.ref, qty: it.qty, unit: it.unit, total: it.total, from, to };
+        return mgkLine(it, date, { sku: get(/SKU Code\s*:\s*(\S+)/i), seats: get(/Nombre de postes\s*:\s*(\d+)/i),
+          type: get(/Type d'achat\s*:\s*(\w+)/i), validity: get(/Période de validité\s*:\s*(\d+\s*[^\s,;]+)/i),
+          from: isoDate(get(/Valide du\s+(\d{1,2}\.\d{1,2}\.\d{4})/i)), to: isoDate(get(/jusqu'au\s+(\d{1,2}\.\d{1,2}\.\d{4})/i)) });
       });
       return { supplier: 'MGK', number, date, totalExcl: totalM ? num(totalM[1]) : null, lines };
     }
   };
+  // Ligne MGK (commune au PDF et à l'e-facture UBL). Période : « du A jusqu'au B », ou « jusqu'au B »,
+  // ou seulement la durée (calculée depuis la date du document).
+  function mgkLine(it, date, x) {
+    let { from, to } = x;
+    const years = +(/(\d+)\s*ann/i.exec(x.validity) || [])[1] || 0, months = +(/(\d+)\s*mois/i.exec(x.validity) || [])[1] || 0;
+    const shift = (d, sign) => { const t = new Date(d + 'T00:00:00Z'); t.setUTCFullYear(t.getUTCFullYear() + sign * years); t.setUTCMonth(t.getUTCMonth() + sign * months); t.setUTCDate(t.getUTCDate() - sign); return t.toISOString().slice(0, 10); };
+    if (!from && to && (years || months)) from = shift(to, -1);
+    if (!from && !to && date && (years || months)) { from = date; to = shift(date, 1); }
+    const label = [it.desc, x.seats && `${x.seats} poste${+x.seats > 1 ? 's' : ''}`, x.validity].filter(Boolean).join(' – ');
+    return { label, detail: [x.type && `Type d'achat : ${x.type}`, x.sku && `SKU ${x.sku}`, it.ref && `réf. MGK ${it.ref}`].filter(Boolean).join(' · '),
+      key: x.sku ? 'sku:' + x.sku.toLowerCase() : 'ref:' + it.ref + ':' + keyOf(it.desc),
+      domain: '', hint: it.hint, ref: it.ref, qty: it.qty, unit: it.unit, total: it.total, from: from || null, to: to || null };
+  }
 
-  const READERS = [ovh, mgk];
+  // lisam.cloud (vérifié sur 11 factures 2025-2026, reçues par Peppol dans Billit) :
+  //   FACTURE 2026#34049 / Date : 2026-07-27
+  //   Nom du produit | Quantité | Prix HT | Total | Tva                  ← en-tête
+  //   remote.jmd.be | 12 Mois | 4,50 | 54,00 | 21                        ← domaine (ou « C1513 - JMD.BE ») et durée
+  //   Certificat SSL de domaine avec gestion de votre CSR (2026-07-01 -> 2027-06-30)
+  //   NOS COORDONNEES BANCAIRE | TOTAUX DE CETTE FACTURE … Montant HT | 54,00
+  // Une ligne = 1 article au prix total (la durée fait partie du nom).
+  const lisam = {
+    id: 'lisam', name: 'lisam.cloud',
+    detect: rows => rows.some(r => /LISAM\.CLOUD/i.test(r.text)),
+    parse(rows) {
+      const number = find(rows, /FACTURE\s+(\d{4}#\d+)/i)?.[1] || '';
+      const date = find(rows, /^Date\s*:\s*(\d{4}-\d{2}-\d{2})/i)?.[1] || null;
+      const totalM = find(rows, /Montant HT\s+(-?[\d .  ]+[.,]\d{2})/i);
+      const lines = [];
+      let inTable = false;
+      for (const r of rows) {
+        const t = r.text;
+        if (/^Nom du produit/i.test(t)) { inTable = true; continue; }
+        if (!inTable) continue;
+        if (/^NOS COORDONNEES|TOTAUX DE CETTE FACTURE/i.test(t)) { inTable = false; continue; }
+        const c = r.cells, n = c.length;
+        if (n >= 4 && /^\d+(?:[.,]\d+)?$/.test(c[n - 1]) && isAmount(c[n - 2]) && isAmount(c[n - 3])) {
+          const dur = n >= 5 ? c[n - 4] : '';
+          lines.push({ what: c.slice(0, n >= 5 ? n - 4 : n - 3).join(' '), dur, total: num(c[n - 2]), desc: [] });
+        } else if (lines.length) lines[lines.length - 1].desc.push(t);
+      }
+      return { supplier: 'lisam.cloud', number, date, totalExcl: totalM ? num(totalM[1]) : null, lines: lines.map(l => {
+        const desc = l.desc.join(' '), per = /(\d{4}-\d{2}-\d{2})[^>]*->\s*(\d{4}-\d{2}-\d{2})/.exec(desc);
+        const label = [desc.replace(/\([^)]*->[^)]*\)/, '').replace(/\s+/g, ' ').trim() || l.what, plain(l.dur).replace(/\s+/g, ' ')].filter(Boolean).join(' – ');
+        return { label, detail: [l.what, l.dur].filter(Boolean).join(' · '), key: keyOf(label), domain: domains(l.what)[0] || domains(desc)[0] || '',
+          ref: l.what, qty: 1, unit: l.total, total: l.total, from: per?.[1] || null, to: per?.[2] || null };
+      }) };
+    }
+  };
+
+  const READERS = [ovh, mgk, lisam];
+
+  // --- e-facture UBL (Peppol, reçue dans Billit) ---
+  const ublDoc = xml => new DOMParser().parseFromString(xml, 'application/xml');
+  const kids = (el, name) => el ? [...el.children].filter(x => x.localName === name) : [];
+  const kid = (el, ...names) => names.reduce((e, n) => kids(e, n)[0], el);
+  const txt = el => el?.textContent?.trim() || '';
+  // PDF joints à l'e-facture (souvent le PDF d'origine du fournisseur) : [{ name, buffer }].
+  function ublPdfs(xml) {
+    const d = ublDoc(xml);
+    return [...d.getElementsByTagNameNS('*', 'EmbeddedDocumentBinaryObject')]
+      .filter(e => /pdf/i.test(e.getAttribute('mimeCode') || '') || /\.pdf$/i.test(e.getAttribute('filename') || ''))
+      .map(e => ({ name: e.getAttribute('filename') || 'facture.pdf', buffer: Uint8Array.from(atob(e.textContent.replace(/\s/g, '')), c => c.charCodeAt(0)).buffer }));
+  }
+  // Facture lue directement dans l'e-facture, quand aucun PDF lisible n'est disponible (PDF fabriqué par Billit).
+  // supplier : nom du lecteur (« MGK », « OVH », « lisam.cloud ») ; MGK : la note de la ligne contient le contact, la durée, les postes et le SKU.
+  function fromUbl(xml, supplier) {
+    const d = ublDoc(xml).documentElement;
+    if (!d || d.localName === 'parsererror') return { error: 'E-facture illisible.' };
+    const date = txt(kid(d, 'IssueDate')) || null;
+    const lines = [...kids(d, 'InvoiceLine'), ...kids(d, 'CreditNoteLine')].map(l => {
+      const note = txt(kid(l, 'Note')), name = txt(kid(l, 'Item', 'Name')) || note.split('\n')[0];
+      const qty = parseFloat(txt(kid(l, 'InvoicedQuantity')) || txt(kid(l, 'CreditedQuantity')) || '1') || 1;
+      const total = parseFloat(txt(kid(l, 'LineExtensionAmount'))) || 0, unit = parseFloat(txt(kid(l, 'Price', 'PriceAmount'))) || round(total / qty);
+      const p = kid(l, 'InvoicePeriod');
+      const from = txt(kid(p, 'StartDate')) || null, to = txt(kid(p, 'EndDate')) || null;
+      if (supplier === 'MGK') {
+        const get = re => (re.exec(note) || [])[1]?.trim() || '';
+        return mgkLine({ desc: name, hint: note.split(/\r?\n/)[0].trim(), ref: txt(kid(l, 'Item', 'SellersItemIdentification', 'ID')), qty, unit, total }, date,
+          { sku: get(/SKU Code\s*:\s*(\S+)/i), seats: get(/(?:Number of stations|Nombre de postes)\s*:\s*(\d+)/i),
+            type: get(/(?:Purchase type|Type d'achat)\s*:\s*(\w+)/i), validity: get(/(?:Validity period|Période de validité)\s*:\s*(\d+\s*[^\s,;]+)/i), from, to });
+      }
+      const label = name || note;
+      return { label, detail: note, key: keyOf(label), domain: domains(name + ' ' + note)[0] || '', ref: '', qty, unit, total, from, to };
+    });
+    const totalExcl = parseFloat(txt(kid(d, 'LegalMonetaryTotal', 'TaxExclusiveAmount')));
+    if (!lines.length) return { error: 'E-facture sans ligne.' };
+    return { reader: { id: 'ubl', name: supplier }, invoice: { supplier, number: txt(kid(d, 'ID')), date, totalExcl: isNaN(totalExcl) ? null : totalExcl, lines } };
+  }
+  const round = n => Math.round(n * 100) / 100;
 
   // Lit un PDF : { reader, invoice } ou { reader: null } si aucun lecteur ne reconnaît le fournisseur.
   async function read(buffer, fileName) {
@@ -220,5 +299,5 @@ const Fournisseurs = (() => {
     return { pages: pdf.numPages, shown: n };
   }
 
-  return { read, readRows, render, domains, keyOf, readers: () => READERS.map(r => ({ id: r.id, name: r.name })) };
+  return { read, readRows, render, domains, keyOf, ublPdfs, fromUbl, readers: () => READERS.map(r => ({ id: r.id, name: r.name })) };
 })();

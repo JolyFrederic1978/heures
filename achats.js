@@ -33,9 +33,10 @@ const Achats = (() => {
     });
   }
   // hints : contact (ou autre texte de la facture) → client, pour les fournisseurs sans domaine (ex. MGK).
-  const empty = () => ({ invoices: [], lines: [], mapping: [], suppliers: [], hints: [], files: [], published: {}, lastSync: 0 });
+  const empty = () => ({ invoices: [], lines: [], mapping: [], suppliers: [], hints: [], files: [], bdocs: [], published: {}, lastSync: 0 });
   async function load() {
     if (!A) A = { ...empty(), ...(await idb('readonly', s => s.get('data')) || {}) };
+    A.bdocs ||= [];
     for (const s of SUPPLIERS_SEED) if (!A.suppliers.some(x => x.id === s.id)) A.suppliers.push({ ...s, updatedAt: 0 });
     return A;
   }
@@ -130,7 +131,7 @@ const Achats = (() => {
   }
 
   // --- synchronisation OneDrive ---
-  const KINDS = ['invoices', 'lines', 'mapping', 'suppliers', 'hints', 'files'];
+  const KINDS = ['invoices', 'lines', 'mapping', 'suppliers', 'hints', 'files', 'bdocs'];
   function merge(remote) {
     const before = JSON.stringify(KINDS.map(k => A[k]));
     const m = (a = [], b = []) => {
@@ -169,7 +170,12 @@ const Achats = (() => {
       let ch = false, cur = await OneDrive.get(path.data());
       if (cur) ch = merge(JSON.parse(cur.data));
       ch = assignClients() || ch;
-      if (force || Date.now() - lastCheck > CHECK_EVERY) { lastCheck = Date.now(); ch = (await checkInbox()) || ch; }
+      let billitErr = '';
+      if (force || Date.now() - lastCheck > CHECK_EVERY) {
+        lastCheck = Date.now(); ch = (await checkInbox()) || ch;
+        // Une erreur Billit n'empêche pas d'enregistrer le reste dans OneDrive.
+        try { ch = (await checkBillit()) || ch; } catch (e) { billitErr = 'Billit : ' + e.message; }
+      }
       for (let i = 0; i < 3; i++) {
         const body = payload();
         if (cur && hash(cur.data) === hash(body)) break;           // rien de neuf à écrire
@@ -180,7 +186,7 @@ const Achats = (() => {
         if (cur) ch = merge(JSON.parse(cur.data)) || ch;
       }
       await publishExcel();
-      A.lastSync = Date.now(); msg = '';
+      A.lastSync = Date.now(); msg = billitErr;
       await save();
       redraw = ch || force;
     } catch (e) {
@@ -210,11 +216,67 @@ const Achats = (() => {
     return ch;
   }
 
+  // --- factures reçues dans Billit (Peppol) ---
+  // Réglage synchronisé (Réglages de l'app) : désactivé tant que Fred n'a pas choisi la date de départ.
+  const bset = () => state.settings.achatsBillit || { on: false, since: '' };
+  // Fournisseur Billit (nom de la société) → nom du lecteur.
+  const BILLIT_SUP = [[/\bovh\b/i, 'OVH'], [/\bmgk\b/i, 'MGK'], [/lisam/i, 'lisam.cloud']];
+  async function checkBillit() {
+    const s = bset();
+    if (!s.on || !s.since || !Billit.ready()) return false;
+    let ch = false;
+    for (const o of await Billit.costInvoices(s.since)) {
+      const sup = BILLIT_SUP.find(([re]) => re.test(o.CounterParty?.DisplayName || ''))?.[1];
+      if (!sup || (o.OrderDate || '').slice(0, 10) < s.since) continue;
+      const id = `bd_${Billit.mode()}_${o.OrderID}`;           // même id sur tous les appareils : pas d'import en double
+      let rec = A.bdocs.find(x => x.id === id);
+      // Déjà traitée ; une erreur est réessayée seulement sur « Réessayer » ou quand un lecteur a été ajouté.
+      if (rec && !rec.deleted && rec.status !== 'retry' && !(rec.status === 'error' && rec.readers !== readersSig())) continue;
+      if (!rec) A.bdocs.push(rec = { id, orderId: o.OrderID, mode: Billit.mode() });
+      Object.assign(rec, { deleted: false, supplier: sup, number: o.OrderNumber || '', date: (o.OrderDate || '').slice(0, 10), total: o.TotalExcl ?? null });
+      let res;
+      try { res = await importBillit(o, sup); } catch (e) { res = { status: 'error', msg: e.message }; }
+      Object.assign(touch(rec), { text: '', ...res, readers: readersSig() });
+      ch = true;
+    }
+    return ch;
+  }
+  // Une facture Billit : PDF de la facture, sinon PDF d'origine joint à l'e-facture, sinon lignes de l'e-facture.
+  async function importBillit(o, sup) {
+    const ok = r => r && !r.error && r.invoice?.supplier === sup;
+    const tryPdf = async (buffer, name) => { try { return await Fournisseurs.read(buffer.slice(0), name); } catch (e) { return { error: e.message, rows: [] }; } };
+    let pdf = null, r = null;
+    if (o.OrderPDF?.FileID) { const f = await Billit.file(o.OrderPDF.FileID); pdf = f.buffer; r = await tryPdf(pdf, f.FileName); }
+    const firstErr = r;
+    if (!ok(r)) {
+      const xmlAtt = ((await Billit.getOrder(o.OrderID))?.Attachments || []).find(a => /\.xml$/i.test(a.FileName || '') || /xml/i.test(a.MimeType || ''));
+      const xml = xmlAtt ? new TextDecoder().decode((await Billit.file(xmlAtt.FileID)).buffer) : '';
+      for (const e of xml ? Fournisseurs.ublPdfs(xml) : []) {
+        const x = await tryPdf(e.buffer, e.name);
+        if (ok(x)) { r = x; pdf = e.buffer; break; }
+      }
+      if (!ok(r) && xml && pdf) { const x = Fournisseurs.fromUbl(xml, sup); if (ok(x)) r = x; }
+    }
+    if (!ok(r)) return { status: 'error', msg: (r?.error || firstErr?.error || 'Facture non reconnue.') + ' (facture reçue dans Billit)',
+      text: (firstErr?.rows || []).map(x => x.cells.join(' | ')).join('\n').slice(0, 30000) };
+    const i = r.invoice;
+    if (!i.lines.length) return { status: 'error', msg: `Facture ${sup} lue, mais aucun article trouvé.` };
+    const dup = alive(A.invoices).find(x => x.supplier === sup && ((i.number && x.number === i.number) || x.billitOrderId === o.OrderID));
+    if (dup) return { status: 'known', msg: `déjà importée (${dup.number || 'sans n°'})` };
+    const before = A.invoices.length;
+    const name = `Facture_${String(i.number || o.OrderNumber || o.OrderID).replace(/[#\\/:*?"<>|]/g, '-')}.pdf`;
+    const m = await importPdf(pdf, name, pdf.byteLength, false, { ...r, billitTotal: o.TotalExcl ?? null });
+    if (A.invoices.length === before) return { status: 'error', msg: m };
+    Object.assign(touch(A.invoices[A.invoices.length - 1]), { billitOrderId: o.OrderID, via: r.reader?.id === 'ubl' ? 'billit-ubl' : 'billit' });
+    return { status: 'imported', msg: m };
+  }
+
   // Lit un PDF et crée la facture et ses lignes. fromInbox : le PDF est dans Entrant (on le range dans Traités),
   // sinon il vient de l'appareil (on en dépose une copie dans Traités). Renvoie un message pour l'utilisateur.
-  async function importPdf(buffer, name, size, fromInbox) {
-    let r;
-    try { r = await Fournisseurs.read(buffer.slice(0), name); } catch (e) { r = { error: 'Lecture du PDF impossible : ' + e.message, rows: [] }; }
+  // pre : facture déjà lue (import depuis Billit) ; le PDF n'est alors pas relu.
+  async function importPdf(buffer, name, size, fromInbox, pre) {
+    let r = pre;
+    if (!r) try { r = await Fournisseurs.read(buffer.slice(0), name); } catch (e) { r = { error: 'Lecture du PDF impossible : ' + e.message, rows: [] }; }
     const i = r.invoice;
     const dup = !r.error && i.number && alive(A.invoices).find(x => x.supplier === i.supplier && x.number === i.number);
     const problem = r.error || (dup && `Facture ${i.number} déjà importée le ${frDate(isoDate(new Date(dup.importedAt)))}.`);
@@ -235,11 +297,9 @@ const Achats = (() => {
       if (!up.ok && up.status !== 412) throw new Error(`OneDrive (${up.status}) : copie de ${name} dans Traités impossible.`);
     }
     if (rec) { rec.deleted = true; touch(rec); }
-    const sum = i.lines.reduce((s, l) => s + l.total, 0);
     const kept = i.lines.filter(l => l.total || l.unit);           // articles à 0 € : pas pris en compte
     const invoice = touch({ id: uid('ai'), supplier: i.supplier, number: i.number, date: i.date, totalExcl: i.totalExcl,
-      file: `${path.done(year)}/${stored}`, importedAt: Date.now(), skipped: i.lines.length - kept.length,
-      warn: i.totalExcl != null && Math.abs(sum - i.totalExcl) > 0.02 ? `Total des lignes ${eur(sum)} ≠ total HTVA de la facture ${eur(i.totalExcl)}.` : '' });
+      file: `${path.done(year)}/${stored}`, importedAt: Date.now(), skipped: i.lines.length - kept.length, warn: totalWarn(i, r.billitTotal) });
     A.invoices.push(invoice);
     for (const l of kept) {
       const m = findMap(i.supplier, l.key), c = clientFor({ ...l, supplier: i.supplier });
@@ -247,8 +307,20 @@ const Achats = (() => {
         domain: l.domain, hint: l.hint || '', from: l.from || null, to: l.to || null, qty: l.qty, unit: l.unit, total: l.total,
         clientId: c?.id || null, mapId: m?.id || null, status: 'open' }));
     }
-    return `${i.supplier} ${i.number || name} : ${kept.length} article(s) importé(s)${invoice.skipped ? `, ${invoice.skipped} à 0 € ignoré(s)` : ''}.`;
+    return `${i.supplier} ${i.number || name} : ${kept.length} article(s) importé(s)${invoice.skipped ? `, ${invoice.skipped} à 0 € ignoré(s)` : ''}.`
+      + (invoice.warn ? ` ⚠ ${invoice.warn}` : '');
   }
+  // Contrôle à l'import : total des articles lus (0 € compris) = total HTVA de la facture, et = total connu par Billit pour une facture reçue dans Billit.
+  // Renvoie '' si tout correspond, sinon le problème (la facture est alors signalée « Total à vérifier »).
+  function totalWarn(i, billitTotal) {
+    const sum = round2(i.lines.reduce((s, l) => s + (l.total || 0), 0));
+    const off = t => t != null && !isNaN(t) && Math.abs(sum - t) > 0.02;
+    if (i.totalExcl == null && billitTotal == null) return `Total HTVA de la facture introuvable : vérifie que les articles (${eur(sum)}) sont complets.`;
+    if (off(i.totalExcl)) return `Total des articles ${eur(sum)} ≠ total HTVA de la facture ${eur(i.totalExcl)} (écart ${eur(round2(sum - i.totalExcl))}).`;
+    if (off(billitTotal)) return `Total des articles ${eur(sum)} ≠ total HTVA dans Billit ${eur(billitTotal)} (écart ${eur(round2(sum - billitTotal))}).`;
+    return '';
+  }
+  const toCheck = i => i.warn && !i.warnOk;
 
   // --- fichiers Excel (lecture seule : tout se modifie dans l'app) ---
   // Colonnes reprises du modèle de Fred (Classeur2.xlsx, 25/10/2026), puis des colonnes d'information.
@@ -328,7 +400,8 @@ const Achats = (() => {
     // Texte cherché : n°, fournisseur, date, montant, clients, domaines / contacts et noms des articles.
     const findText = i => fold([i.supplier, i.number, frDate(i.date), i.totalExcl != null ? eur(i.totalExcl) : '', i.totalExcl,
       ...alive(A.lines).filter(l => l.invoiceId === i.id).flatMap(l => [clientName(l), whereOf(l), l.label])].join(' '));
-    const problems = alive(A.files);
+    const problems = alive(A.files), checks = invoices.filter(toCheck);
+    const bs = bset(), bdone = alive(A.bdocs).filter(b => b.mode === Billit.mode()), bErr = bdone.filter(b => b.status === 'error');
     const gaps = ready.filter(l => priceGap(l)).length;
     $('#view').innerHTML = `
       <div class="kpis"><div class="kpi"><div class="v">${eur(ready.reduce((s, l) => s + saleTotal(l), 0))}</div><div class="l">${ready.length} article(s) prêt(s) à refacturer (HTVA)</div></div>
@@ -337,8 +410,24 @@ const Achats = (() => {
         <p class="small muted" style="margin-top:0">Dépose les PDF dans OneDrive <code>${esc(path.inbox())}</code> : ils sont lus automatiquement à la synchro
           puis rangés dans <code>${esc(base())}/Traités</code>. Les articles à 0 € sont ignorés.${A.lastSync ? ` Dernière vérification : ${new Date(lastCheck || A.lastSync).toLocaleTimeString('fr-BE', { hour: '2-digit', minute: '2-digit' })}.` : ''}</p>
         ${msg ? `<p class="small"><span class="pill warn">${esc(msg)}</span></p>` : ''}
+        ${checks.length ? `<p class="small" style="margin:0 0 4px"><strong style="color:var(--warn)">⚠ ${checks.length} facture(s) dont le total des articles ne correspond pas au total de la facture :</strong>
+            ouvre-la, compare avec le PDF, puis corrige ou confirme.</p>
+          <ul class="list" style="margin-bottom:10px">${checks.map(i => `<li class="tap" data-inv="${i.id}"><div class="grow" style="flex:1;min-width:0">${supPill(i.supplier)} <strong>${esc(i.number)}</strong>
+            <div class="small" style="color:var(--warn)">${esc(i.warn)}</div></div></li>`).join('')}</ul>` : ''}
         <div class="row"><button class="btn primary" id="aCheck" ${busy ? 'disabled' : ''}>🔄 Vérifier maintenant</button>
           <button class="btn" id="aPick">📄 Importer un PDF…</button><input type="file" id="aFile" accept="application/pdf,.pdf" multiple hidden></div>
+        <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
+          <label class="check" style="margin:0"><input type="checkbox" id="bOn" ${bs.on ? 'checked' : ''} ${Billit.ready() ? '' : 'disabled'}>
+            Récupérer aussi les factures OVH, MGK et lisam.cloud reçues dans Billit</label>
+          <div class="row small" style="margin-top:6px"><span class="muted">Factures datées à partir du</span>
+            <input type="date" id="bSince" value="${esc(bs.since)}" style="width:auto;padding:5px 8px"></div>
+          <p class="small muted" style="margin:6px 0 0">${!Billit.ready() ? 'Clé API Billit absente (Réglages).'
+            : `Billit ${Billit.mode() === 'live' ? 'réel' : 'test'}, lecture seule. Les factures déjà importées (même n°) ne sont pas reprises.`}
+            ${bdone.length ? ` ${bdone.filter(b => b.status === 'imported').length} importée(s) depuis Billit, ${bdone.filter(b => b.status === 'known').length} déjà présente(s).` : ''}</p>
+        </div>
+        ${bErr.length ? `<ul class="list" style="margin-top:10px">${bErr.map(b => `<li><div class="grow" style="flex:1;min-width:0">${supPill(b.supplier)} <strong>${esc(b.number || 'sans n°')}</strong> <span class="small muted">${frDate(b.date)} · Billit</span>
+            <div class="small"><span class="pill warn">non lu</span> ${esc(b.msg)}</div></div>
+            ${b.text ? `<button class="btn chip" data-btext="${b.id}">Texte</button>` : ''}<button class="btn chip" data-bretry="${b.id}">Réessayer</button></li>`).join('')}</ul>` : ''}
         ${problems.length ? `<ul class="list" style="margin-top:10px">${problems.map(p => `<li><div class="grow" style="flex:1;min-width:0"><strong>${esc(p.name)}</strong>
             <div class="small"><span class="pill warn">${p.status === 'duplicate' ? 'doublon' : 'non lu'}</span> ${esc(p.msg)}</div></div>
             <button class="btn chip" data-ptext="${p.id}">Texte</button>${p.status === 'error' ? `<button class="btn chip" data-pretry="${p.id}">Réessayer</button>` : ''}</li>`).join('')}</ul>
@@ -359,7 +448,7 @@ const Achats = (() => {
         ${invoices.length ? `<input type="search" id="iFind" placeholder="Rechercher : n°, fournisseur, client, domaine, montant" value="${esc(invFind)}">
           <div class="row" style="margin:8px 0">${['', ...sups].map(s => `<button class="btn chip ${s === invSup ? 'active' : ''}" data-isup="${esc(s)}">${s ? esc(s) : 'Tous'}</button>`).join('')}</div>
           <ul class="list" id="iList">${invoices.map(i => `<li class="tap sup ${supCls(i.supplier)}" data-inv="${i.id}" data-sup="${esc(i.supplier)}" data-find="${esc(findText(i))}"><div class="grow" style="flex:1;min-width:0">${supPill(i.supplier)} <strong>${esc(i.number)}</strong>
-            ${i.warn ? '<span class="pill warn">à vérifier</span>' : ''}
+            ${toCheck(i) ? '<span class="pill warn">⚠ total à vérifier</span>' : ''}
             <div class="small muted">${[frDate(i.date), `${alive(A.lines).filter(l => l.invoiceId === i.id).length} article(s)`, i.skipped && `${i.skipped} à 0 € ignoré(s)`,
               [...new Set(alive(A.lines).filter(l => l.invoiceId === i.id).map(l => clientName(l) || whereOf(l)).filter(Boolean))].join(', ')].filter(Boolean).map(esc).join(' · ')}</div></div>
             <div class="dur">${i.totalExcl != null ? eur(i.totalExcl) : ''}</div>
@@ -382,6 +471,19 @@ const Achats = (() => {
       await changed(); alert(out.join('\n'));
     };
     $$('[data-ptext]').forEach(b => b.onclick = () => showText(A.files.find(p => p.id === b.dataset.ptext)));
+    // Factures Billit : réglage (synchronisé avec les Réglages de l'app), erreurs à réessayer.
+    const saveBset = async v => {
+      state.settings.achatsBillit = { ...bset(), ...v }; state.settingsAt = Date.now();
+      await DB.save(state); lastCheck = 0; scheduleSync();
+    };
+    $('#bOn').onchange = async ev => {
+      if (ev.target.checked && !$('#bSince').value) { ev.target.checked = false; return alert('Choisis d\'abord la date des premières factures à récupérer.'); }
+      await saveBset({ on: ev.target.checked, since: $('#bSince').value });
+      toast(ev.target.checked ? 'Récupération Billit activée' : 'Récupération Billit désactivée');
+    };
+    $('#bSince').onchange = ev => saveBset({ since: ev.target.value });
+    $$('[data-btext]').forEach(b => b.onclick = () => { const d = A.bdocs.find(x => x.id === b.dataset.btext); showText({ name: `${d.supplier} ${d.number}`, text: d.text }); });
+    $$('[data-bretry]').forEach(b => b.onclick = async () => { const d = A.bdocs.find(x => x.id === b.dataset.bretry); d.status = 'retry'; touch(d); await save(); sync(true); });
     $$('[data-pretry]').forEach(b => b.onclick = async () => { const p = A.files.find(x => x.id === b.dataset.pretry); p.status = 'retry'; touch(p); await save(); sync(true); });
     $$('[data-aclient]').forEach(li => li.onclick = () => billClient(li.dataset.aclient));
     $$('[data-inv]').forEach(li => li.onclick = () => showInvoice(inv(li.dataset.inv)));
@@ -625,13 +727,19 @@ const Achats = (() => {
       <p class="small muted">Du ${frDate(i.date)} · total HTVA ${i.totalExcl != null ? eur(i.totalExcl) : '?'} · importée le ${frDate(isoDate(new Date(i.importedAt)))}
         ${i.skipped ? `· ${i.skipped} article(s) à 0 € ignoré(s)` : ''}<br><code>${esc(i.file)}</code></p>
       ${i.file ? '<button class="btn" id="iPdf">📄 Voir la facture</button>' : ''}
-      ${i.warn ? `<p class="small"><span class="pill warn">${esc(i.warn)}</span></p>` : ''}
+      ${toCheck(i) ? `<p class="small"><span class="pill warn">⚠ ${esc(i.warn)}</span></p>
+          <p class="small muted" style="margin-top:0">Compare avec le PDF. Si un article manque, supprime l'import et signale-le pour ajuster le lecteur ;
+            si le total est bon (remise, frais…), confirme-le.</p>
+          <button class="btn chip" id="iWarnOk">✓ Total vérifié, c'est correct</button>`
+        : i.warn ? `<p class="small muted">Total vérifié${i.warnOk ? ` le ${frDate(i.warnOk)}` : ''} (${esc(i.warn)})</p>`
+        : `<p class="small"><span class="pill ok">✓ total des articles = total de la facture</span></p>`}
       <ul class="list">${ls.map(lineLi).join('')}</ul>
       <div class="actions"><button class="btn danger" id="iDel" style="margin-right:auto">Supprimer l'import</button>
         ${ls.some(l => ['todo', 'ready'].includes(lineState(l))) ? '<button class="btn" id="iDone">Déjà refacturée</button>' : ''}
         <button class="btn" value="cancel">Fermer</button></div>`;
     bindLines(f);
     if ($('#iPdf')) $('#iPdf').onclick = () => showPdf(i);
+    if ($('#iWarnOk')) $('#iWarnOk').onclick = async ev => { ev.preventDefault(); touch(i).warnOk = today(); dlg.close(); await changed(); toast('Total marqué comme vérifié'); };
     // Facture déjà refacturée hors de l'app (ex. avant la mise en service du module) : tout passe en « facturé ».
     if ($('#iDone')) $('#iDone').onclick = async () => {
       const todo = ls.filter(l => ['todo', 'ready'].includes(lineState(l)));

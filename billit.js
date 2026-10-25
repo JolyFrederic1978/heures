@@ -53,6 +53,22 @@ const Billit = (() => {
     // Crée un article, ou le met à jour si ProductID est fourni (champs : Reference, Description, AmountExcl, VAT, BuyExcl…).
     // Corps = un seul objet (pas { Items: [...] } comme dans le guide Billit : l'article est alors créé vide). Réponse = ProductID.
     saveProduct: item => call('/v1/products', { method: 'POST', body: JSON.stringify(item) }),
-    getOrder: id => call('/v1/orders/' + id)
+    getOrder: id => call('/v1/orders/' + id),
+    // Factures d'achat (OrderDirection Cost) modifiées depuis la date « AAAA-MM-JJ » ; toutes les pages (120 par page).
+    async costInvoices(since) {
+      let path = '/v1/orders' + odata(`OrderType eq 'Invoice' and OrderDirection eq 'Cost' and LastModified ge DateTime'${since}'`), all = [];
+      for (let i = 0; path && i < 50; i++) {
+        const d = await call(path);
+        all.push(...items(d));
+        const next = d?.NextPageLink;
+        path = !next ? null : next.startsWith('http') ? next.replace(/^https?:\/\/[^/]+/, '') : next.startsWith('/') ? next : '/v1/' + next;
+      }
+      return all;
+    },
+    // Fichier (PDF de la facture, e-facture XML…) : { FileName, MimeType, buffer }.
+    async file(id) {
+      const f = await call('/v1/files/' + encodeURIComponent(id));
+      return { FileName: f.FileName, MimeType: f.MimeType, buffer: Uint8Array.from(atob(f.FileContent || ''), c => c.charCodeAt(0)).buffer };
+    }
   };
 })();
