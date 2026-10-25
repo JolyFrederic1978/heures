@@ -1,6 +1,6 @@
 // Module Achats : refacturation des articles des factures fournisseurs (PDF), séparé du pointage.
-// - Les PDF sont déposés dans OneDrive Compta/Achats/Entrant (à la main pour l'instant). L'app les lit à chaque synchro
-//   (au plus toutes les 5 min) ou sur demande, puis les range dans Compta/Achats/Traités/AAAA.
+// - Les PDF sont déposés dans OneDrive Compta/Achats/Entrant ou arrivent dans Billit (Peppol). L'app les lit à l'ouverture,
+//   puis au plus toutes les heures, ou sur demande, et les range dans Compta/Achats/Traités/AAAA.
 // - Données : TimeSheet/App/achats-data.json, avec sa propre synchro (celle du pointage n'y touche pas).
 // - Les articles à 0 € ne sont pas importés.
 // - Client : trouvé par le nom de domaine (fiche client). Article Billit : table de correspondance, apprise au fil des imports.
@@ -232,6 +232,8 @@ const Achats = (() => {
   // Fournisseur Billit (nom de la société) → nom du lecteur.
   const BILLIT_SUP = [[/\bovh\b/i, 'OVH'], [/\bmgk\b/i, 'MGK'], [/lisam/i, 'lisam.cloud'], [/alescom/i, 'Alescom']];
   const supOf = o => BILLIT_SUP.find(([re]) => re.test(o.CounterParty?.DisplayName || ''))?.[1];
+  // Date « AAAA-MM-JJ » d'un champ Billit (tout autre contenu est ignoré : il est affiché dans l'app).
+  const dayOf = s => /^\d{4}-\d{2}-\d{2}/.exec(String(s || ''))?.[0] || '';
   async function checkBillit() {
     if (!Billit.ready()) return false;
     const mode = Billit.mode(), from = billitFrom(), bid = o => `bd_${mode}_${o.OrderID}`;   // même id sur tous les appareils
@@ -242,7 +244,7 @@ const Achats = (() => {
     if (todo.length) {
       for (const o of await Billit.costInvoices('2000-01-01')) {
         if (todo.includes(supOf(o)) && !A.bdocs.some(x => x.id === bid(o)))
-          A.bdocs.push(touch({ id: bid(o), orderId: o.OrderID, mode, supplier: supOf(o), number: o.OrderNumber || '', date: (o.OrderDate || '').slice(0, 10), status: 'old' }));
+          A.bdocs.push(touch({ id: bid(o), orderId: o.OrderID, mode, supplier: supOf(o), number: o.OrderNumber || '', date: dayOf(o.OrderDate), status: 'old' }));
       }
       state.settings.achatsBillitFrom = { ...state.settings.achatsBillitFrom, [mode]: from || today() };
       state.settings.achatsBillitSups = { ...state.settings.achatsBillitSups, [mode]: [...done, ...todo] };
@@ -259,7 +261,7 @@ const Achats = (() => {
       // Déjà traitée ; une erreur est réessayée seulement sur « Réessayer » ou quand un lecteur a été ajouté.
       if (rec && rec.status !== 'retry' && !(rec.status === 'error' && rec.readers !== readersSig())) continue;
       if (!rec) A.bdocs.push(rec = { id, orderId: o.OrderID, mode });
-      Object.assign(rec, { supplier: sup, number: o.OrderNumber || '', date: (o.OrderDate || '').slice(0, 10), total: o.TotalExcl ?? null });
+      Object.assign(rec, { supplier: sup, number: o.OrderNumber || '', date: dayOf(o.OrderDate), total: o.TotalExcl ?? null });
       let res;
       try { res = await importBillit(o, sup); } catch (e) { res = { status: 'error', msg: e.message }; }
       Object.assign(touch(rec), { text: '', ...res, readers: readersSig() });
@@ -440,30 +442,6 @@ const Achats = (() => {
     $('#view').innerHTML = `
       <div class="kpis"><div class="kpi"><div class="v">${eur(ready.reduce((s, l) => s + saleTotal(l), 0))}</div><div class="l">${ready.length} article(s) prêt(s) à refacturer (HTVA)</div></div>
         <div class="kpi"><div class="v">${todo.length}</div><div class="l">article(s) à compléter</div></div></div>
-      <div class="card"><h2>Factures fournisseurs</h2>
-        <p class="small muted" style="margin-top:0">À l'ouverture de l'app, puis toutes les heures et sur « Vérifier maintenant », l'app lit :</p>
-        <ul class="small muted" style="margin:0 0 8px;padding-left:18px">
-          <li>les PDF déposés dans OneDrive <code>${esc(path.inbox())}</code> ;</li>
-          <li>${Billit.ready() ? `les nouvelles factures OVH, MGK et lisam.cloud reçues dans Billit${billitFrom() ? ` depuis le ${frDate(billitFrom())}` : ''}
-            (${Billit.mode() === 'live' ? 'réel' : 'test'}, lecture seule ; les anciennes ne sont pas reprises)${bdone.length
-              ? ` : ${bdone.filter(b => b.status === 'imported').length} importée(s), ${bdone.filter(b => b.status === 'known').length} déjà présente(s)` : ''}.`
-            : 'les factures reçues dans Billit : clé API Billit absente (Réglages).'}</li></ul>
-        <p class="small muted">Les factures sont rangées dans <code>${esc(base())}/Traités</code>. Les articles à 0 € sont ignorés.${A.lastSync ? ` Dernière vérification : ${new Date(lastCheck || A.lastSync).toLocaleTimeString('fr-BE', { hour: '2-digit', minute: '2-digit' })}.` : ''}</p>
-        ${msg ? `<p class="small"><span class="pill warn">${esc(msg)}</span></p>` : ''}
-        ${checks.length ? `<p class="small" style="margin:0 0 4px"><strong style="color:var(--warn)">⚠ ${checks.length} facture(s) dont le total des articles ne correspond pas au total de la facture :</strong>
-            ouvre-la, compare avec le PDF, puis corrige ou confirme.</p>
-          <ul class="list" style="margin-bottom:10px">${checks.map(i => `<li class="tap" data-inv="${i.id}"><div class="grow" style="flex:1;min-width:0">${supPill(i.supplier)} <strong>${esc(i.number)}</strong>
-            <div class="small" style="color:var(--warn)">${esc(i.warn)}</div></div></li>`).join('')}</ul>` : ''}
-        <div class="row"><button class="btn primary" id="aCheck" ${busy ? 'disabled' : ''}>🔄 Vérifier maintenant</button>
-          <button class="btn" id="aPick">📄 Importer un PDF…</button><input type="file" id="aFile" accept="application/pdf,.pdf" multiple hidden></div>
-        ${bErr.length ? `<ul class="list" style="margin-top:10px">${bErr.map(b => `<li><div class="grow" style="flex:1;min-width:0">${supPill(b.supplier)} <strong>${esc(b.number || 'sans n°')}</strong> <span class="small muted">${frDate(b.date)} · Billit</span>
-            <div class="small"><span class="pill warn">non lu</span> ${esc(b.msg)}</div></div>
-            ${b.text ? `<button class="btn chip" data-btext="${b.id}">Texte</button>` : ''}<button class="btn chip" data-bretry="${b.id}">Réessayer</button></li>`).join('')}</ul>` : ''}
-        ${problems.length ? `<ul class="list" style="margin-top:10px">${problems.map(p => `<li><div class="grow" style="flex:1;min-width:0"><strong>${esc(p.name)}</strong>
-            <div class="small"><span class="pill warn">${p.status === 'duplicate' ? 'doublon' : 'non lu'}</span> ${esc(p.msg)}</div></div>
-            <button class="btn chip" data-ptext="${p.id}">Texte</button>${p.status === 'error' ? `<button class="btn chip" data-pretry="${p.id}">Réessayer</button>` : ''}</li>`).join('')}</ul>
-          <p class="small muted">Retire du dossier Entrant les fichiers qui ne sont pas à traiter : ils disparaîtront de cette liste.</p>` : ''}
-      </div>
       ${works.length ? `<div class="card"><h2>Interventions à ajouter au pointage (${works.length})</h2>
         <p class="small muted" style="margin-top:0">Lues sur les factures Alescom (lignes « Intervention ») : elles ne sont pas refacturées comme achats.
           « Ajouter » ouvre l'intervention préremplie ; vérifie-la puis enregistre.</p>
@@ -492,7 +470,31 @@ const Achats = (() => {
       <div class="card"><div class="row"><h2 class="grow" style="margin:0">Articles et marges</h2>
         <button class="btn" id="aArts">Ouvrir</button></div>
         <p class="small muted">Correspondance article fournisseur → article Billit (${alive(A.mapping).length}), marges des fournisseurs
-          (${alive(A.suppliers).map(s => `${esc(s.name)} ${isSet(s.margin) ? pct(s.margin) : '?'}`).join(', ')}), création d'articles Billit.</p></div>`;
+          (${alive(A.suppliers).map(s => `${esc(s.name)} ${isSet(s.margin) ? pct(s.margin) : '?'}`).join(', ')}), création d'articles Billit.</p></div>
+      <div class="card"><h2>Factures fournisseurs</h2>
+        <p class="small muted" style="margin-top:0">À l'ouverture de l'app, puis toutes les heures et sur « Vérifier maintenant », l'app lit :</p>
+        <ul class="small muted" style="margin:0 0 8px;padding-left:18px">
+          <li>les PDF déposés dans OneDrive <code>${esc(path.inbox())}</code> ;</li>
+          <li>${Billit.ready() ? `les nouvelles factures ${BILLIT_SUP.map(x => x[1]).join(', ').replace(/, ([^,]+)$/, ' et $1')} reçues dans Billit${billitFrom() ? ` depuis le ${frDate(billitFrom())}` : ''}
+            (${Billit.mode() === 'live' ? 'réel' : 'test'}, lecture seule ; les anciennes ne sont pas reprises)${bdone.length
+              ? ` : ${bdone.filter(b => b.status === 'imported').length} importée(s), ${bdone.filter(b => b.status === 'known').length} déjà présente(s)` : ''}.`
+            : 'les factures reçues dans Billit : clé API Billit absente (Réglages).'}</li></ul>
+        <p class="small muted">Les factures sont rangées dans <code>${esc(base())}/Traités</code>. Les articles à 0 € sont ignorés.${A.lastSync ? ` Dernière vérification : ${new Date(lastCheck || A.lastSync).toLocaleTimeString('fr-BE', { hour: '2-digit', minute: '2-digit' })}.` : ''}</p>
+        ${msg ? `<p class="small"><span class="pill warn">${esc(msg)}</span></p>` : ''}
+        ${checks.length ? `<p class="small" style="margin:0 0 4px"><strong style="color:var(--warn)">⚠ ${checks.length} facture(s) dont le total des articles ne correspond pas au total de la facture :</strong>
+            ouvre-la, compare avec le PDF, puis corrige ou confirme.</p>
+          <ul class="list" style="margin-bottom:10px">${checks.map(i => `<li class="tap" data-inv="${i.id}"><div class="grow" style="flex:1;min-width:0">${supPill(i.supplier)} <strong>${esc(i.number)}</strong>
+            <div class="small" style="color:var(--warn)">${esc(i.warn)}</div></div></li>`).join('')}</ul>` : ''}
+        <div class="row"><button class="btn primary" id="aCheck" ${busy ? 'disabled' : ''}>🔄 Vérifier maintenant</button>
+          <button class="btn" id="aPick">📄 Importer un PDF…</button><input type="file" id="aFile" accept="application/pdf,.pdf" multiple hidden></div>
+        ${bErr.length ? `<ul class="list" style="margin-top:10px">${bErr.map(b => `<li><div class="grow" style="flex:1;min-width:0">${supPill(b.supplier)} <strong>${esc(b.number || 'sans n°')}</strong> <span class="small muted">${frDate(b.date)} · Billit</span>
+            <div class="small"><span class="pill warn">non lu</span> ${esc(b.msg)}</div></div>
+            ${b.text ? `<button class="btn chip" data-btext="${b.id}">Texte</button>` : ''}<button class="btn chip" data-bretry="${b.id}">Réessayer</button></li>`).join('')}</ul>` : ''}
+        ${problems.length ? `<ul class="list" style="margin-top:10px">${problems.map(p => `<li><div class="grow" style="flex:1;min-width:0"><strong>${esc(p.name)}</strong>
+            <div class="small"><span class="pill warn">${p.status === 'duplicate' ? 'doublon' : 'non lu'}</span> ${esc(p.msg)}</div></div>
+            <button class="btn chip" data-ptext="${p.id}">Texte</button>${p.status === 'error' ? `<button class="btn chip" data-pretry="${p.id}">Réessayer</button>` : ''}</li>`).join('')}</ul>
+          <p class="small muted">Retire du dossier Entrant les fichiers qui ne sont pas à traiter : ils disparaîtront de cette liste.</p>` : ''}
+      </div>`;
 
     $('#aCheck').onclick = () => { msg = ''; const p = sync(true); render(); p.then(() => toast('Vérification terminée')); };
     $('#aPick').onclick = () => $('#aFile').click();
@@ -1009,12 +1011,12 @@ const Achats = (() => {
     return { lines, missing };
   }
 
-  // Déconnexion : on oublie la copie locale (les données restent dans OneDrive).
   // App ouverte mais pas touchée : la vérification horaire se fait quand même (seulement si l'app est visible et déverrouillée).
   setInterval(() => {
     if (document.visibilityState === 'visible' && !locked && OneDrive.signedIn() && Date.now() - lastCheck > CHECK_EVERY) sync();
   }, 5 * 60000);
 
+  // Déconnexion : on oublie la copie locale (les données restent dans OneDrive).
   async function reset() { A = null; products = null; productsErr = ''; lastCheck = 0; msg = ''; await idb('readwrite', s => s.delete('data')); }
 
   return { view, sync, reset, readyClients, readyFor, ofBill, attach, detach, orderLines };

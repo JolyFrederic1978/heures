@@ -326,13 +326,15 @@ const Fournisseurs = (() => {
   function fromUbl(xml, supplier) {
     const d = ublDoc(xml).documentElement;
     if (!d || d.localName === 'parsererror') return { error: 'E-facture illisible.' };
-    const date = txt(kid(d, 'IssueDate')) || null;
+    // Dates de l'e-facture : seulement « AAAA-MM-JJ » (le contenu vient du fournisseur et est affiché dans l'app).
+    const day = s => /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+    const date = day(txt(kid(d, 'IssueDate')));
     const lines = [...kids(d, 'InvoiceLine'), ...kids(d, 'CreditNoteLine')].map(l => {
       const note = txt(kid(l, 'Note')), name = txt(kid(l, 'Item', 'Name')) || note.split('\n')[0];
       const qty = parseFloat(txt(kid(l, 'InvoicedQuantity')) || txt(kid(l, 'CreditedQuantity')) || '1') || 1;
       const total = parseFloat(txt(kid(l, 'LineExtensionAmount'))) || 0, unit = parseFloat(txt(kid(l, 'Price', 'PriceAmount'))) || round(total / qty);
       const p = kid(l, 'InvoicePeriod');
-      const from = txt(kid(p, 'StartDate')) || null, to = txt(kid(p, 'EndDate')) || null;
+      const from = day(txt(kid(p, 'StartDate'))), to = day(txt(kid(p, 'EndDate')));
       if (supplier === 'MGK') {
         const get = re => (re.exec(note) || [])[1]?.trim() || '';
         return mgkLine({ desc: name, hint: note.split(/\r?\n/)[0].trim(), ref: txt(kid(l, 'Item', 'SellersItemIdentification', 'ID')), qty, unit, total }, date,

@@ -220,8 +220,8 @@ async function sync() {
   if (syncing) { syncAgain = true; return; }
   syncing = true; setSync('busy');
   try {
-    let changed = false;
-    for (let i = 0; i < 3; i++) {
+    let changed = false, written = false;
+    for (let i = 0; i < 3 && !written; i++) {
       const cur = await OneDrive.get(P.data());
       if (cur && !state.lastSync) { adoptRemote(JSON.parse(cur.data)); changed = true; }
       else if (cur) changed = mergeRemote(JSON.parse(cur.data)) || changed;
@@ -232,8 +232,10 @@ async function sync() {
       const r = await OneDrive.put(P.data(), payload, { etag: cur?.etag, type: 'application/json' });
       if (r.status === 412) continue;                       // modifié par un autre appareil : on refusionne
       if (!r.ok) throw new Error(`OneDrive (${r.status}) : écriture des données impossible.`);
-      break;
+      written = true;
     }
+    // Trois refus de suite (autre appareil en train d'écrire) : pas « synchronisé », nouvel essai à la prochaine synchro.
+    if (!written) throw new Error('heures-data.json est modifié en même temps par un autre appareil : réessai à la prochaine synchro.');
     await publishExcel();
     state.lastSync = Date.now();
     await DB.save(state);
@@ -279,8 +281,11 @@ function entryLi(e, { showDate = false, showBill = true } = {}) {
 function bindEdits(root = document) {
   $$('[data-edit]', root).forEach(li => li.onclick = () => openEntry(state.entries.find(e => e.id === li.dataset.edit)));
 }
+// Le client choisi reste dans la liste même s'il est archivé ou supprimé : sinon le menu prendrait un autre client à l'enregistrement.
 function clientOptions(sel) {
-  return activeClients().map(c => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+  const list = activeClients(), cur = sel && !list.some(c => c.id === sel) && state.clients.find(c => c.id === sel);
+  return (cur ? `<option value="${cur.id}" selected>${esc(cur.name)} (${cur.deleted ? 'supprimé' : 'archivé'})</option>` : '')
+    + list.map(c => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
 }
 const flags = (site, ales, p) => `
   <div class="row">
@@ -702,7 +707,8 @@ async function showBill(b, justCreated = false) {
   $('#bSend').onclick = async () => { const btn = $('#bSend'); btn.disabled = true; try { await sendToBillit(b); } finally { if (btn.isConnected) btn.disabled = false; } };
   if ($('#bDl')) $('#bDl').onclick = async () => { try { download(await prestationsFile(b), prestationsName(b)); } catch (e) { alert(e.message); } };
   $('#bUndo').onclick = async () => {
-    if (!confirm(`Remettre ${[es.length && 'ces interventions', ach.length && 'ces achats'].filter(Boolean).join(' et ')} dans « à facturer » ? (le fichier Prestations déjà créé n'est pas supprimé)`)) return;
+    if (!confirm(`Remettre ${[es.length && 'ces interventions', ach.length && 'ces achats'].filter(Boolean).join(' et ')} dans « à facturer » ? (le fichier Prestations déjà créé n'est pas supprimé)`
+      + (b.billit ? `\n\n⚠ La facture créée dans Billit (${billitModeLabel(b.billit.mode)}${b.billit.number ? ', n° ' + b.billit.number : ''}) n'est PAS supprimée : supprime-la toi-même dans Billit.` : ''))) return;
     es.forEach(e => { e.billId = null; touch(e); });
     await Achats.detach(b.id);
     b.deleted = true; touch(b);
@@ -997,7 +1003,8 @@ function viewSettings() {
   $$('[data-bk]').forEach(inp => inp.onchange = () => {
     const [k, fld] = inp.dataset.bk.split('.');
     s.billit[k][fld] = inp.value.trim(); saveSettings();
-  });  $('#bTest').onclick = async () => {
+  });
+  $('#bTest').onclick = async () => {
     const out = $('#bTestRes'); out.textContent = 'Connexion…';
     try {
       const a = await Billit.account();
