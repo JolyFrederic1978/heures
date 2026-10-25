@@ -32,6 +32,9 @@ body.locked .tabs, body.locked #syncPill { display: none; }
 .tabs .ico { font-size: 20px; line-height: 1; }
 .tabs button.active { color: var(--accent); font-weight: 600; }
 
+.daybar { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px;
+  background: var(--accent); color: #fff; border-radius: 10px; padding: 10px 14px; font-weight: 600; }
+@media (prefers-color-scheme: dark) { .daybar { background: #173a54; } }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 14px; margin-bottom: 12px; }
 .card h2 { font-size: 17px; margin: 0 0 12px; color: var(--accent); padding-bottom: 8px; border-bottom: 2px solid var(--accent-soft); }

@@ -273,7 +273,7 @@ function entryLi(e, { showDate = false, showBill = true } = {}) {
       <div><strong>${esc(client(e.clientId).name)}</strong> ${e.onSite ? '<span class="pill">sur site</span>' : '<span class="pill">à distance</span>'}
         ${e.alescom ? '<span class="pill warn">alescom</span>' : ''}
         ${showBill && b ? `<span class="pill ok">facturé ${frDate(b.date)}${b.ref ? ' · ' + esc(b.ref) : ''}</span>` : ''}</div>
-      <div class="small muted">${showDate ? frDate(e.date) + ' · ' : ''}${e.forfait ? 'forfait' : `${e.start}–${e.end}`}${e.pauseMin ? ` · pause ${fmtDur(e.pauseMin)}` : ''}${e.install ? ' · ' + esc(e.install) : ''}</div>
+      <div class="small muted">${showDate ? frDate(e.date) + ' · ' : ''}${e.forfait || !e.start ? 'forfait' : `${e.start}–${e.end}`}${e.pauseMin ? ` · pause ${fmtDur(e.pauseMin)}` : ''}${e.install ? ' · ' + esc(e.install) : ''}</div>
       ${e.description ? `<div class="small">${esc(e.description)}</div>` : ''}
     </div>
     <div class="dur">${fmtDur(e.minutes)}</div></li>`;
@@ -315,7 +315,10 @@ function viewToday() {
   const open = live().filter(e => !e.billId);
   const lastC = state.clients.find(c => c.id === state.lastClientId && !c.deleted) || activeClients()[0];
 
+  // Bandeau du jour (ex. « dim. 25/10 »).
+  const dayLabel = new Date().toLocaleDateString('fr-BE', { weekday: 'short', day: '2-digit', month: '2-digit' });
   $('#view').innerHTML = `
+    <div class="daybar"><span>Aujourd'hui</span><span>${esc(dayLabel)}</span></div>
     <div class="card timer">
       ${t ? `
         <div><strong>${esc(client(t.clientId).name)}</strong> ${t.pausedAt ? '<span class="pill warn">en pause</span>' : ''}</div>
@@ -420,6 +423,8 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null) {
   };
   if (!e.clientId) return alert("Ajoute d'abord un client dans Réglages.");
   const b = e.billId && bill(e.billId);
+  // Forfait : seule la durée facturée est encodée (pas d'heure de début / fin). Intervention existante sans heures = forfait.
+  const flat0 = entry ? !entry.start && !entry.end : preset.start === '' && preset.end === '' && preset.minutes > 0;
   const dlg = $('#dlg'), f = $('#dlgForm');
   f.innerHTML = `
     <h2>${entry ? 'Modifier' : fromTimer ? 'Fin du chrono' : 'Nouvelle'} intervention</h2>
@@ -431,7 +436,8 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null) {
       <div><label>Date</label><input type="date" id="fDate" value="${e.date}" required></div>
       <div><label>Durée facturée (H:MM)</label><input id="fDur" value="${fmtDur(e.minutes)}"></div>
     </div>
-    <div class="grid3">
+    ${fromTimer ? '' : `<label class="check"><input type="checkbox" id="fFlat" ${flat0 ? 'checked' : ''}> Forfait (seulement la durée facturée, sans heure de début ni de fin)</label>`}
+    <div class="grid3" id="fTimes">
       <div><label>Début</label><input type="time" id="fStart" value="${e.start}"></div>
       <div><label>Fin</label><input type="time" id="fEnd" value="${e.end}"></div>
       <div><label>Pause</label><input id="fPause" value="${e.pauseMin ? fmtDur(e.pauseMin) : ''}" placeholder="0:00"></div>
@@ -446,13 +452,21 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null) {
     </div>`;
 
   if ($('#fBill')) $('#fBill').onclick = () => { dlg.close(); showBill(b); };
-  const pause = () => parseDur($('#fPause').value) || 0;
+  const flat = () => !!$('#fFlat')?.checked;
+  const pause = () => flat() ? 0 : parseDur($('#fPause').value) || 0;
   const upDur = () => $('#fDur').value = fmtDur(Math.max(0, diffMin($('#fStart').value, $('#fEnd').value) - pause()));
   $('#fStart').oninput = upDur; $('#fEnd').oninput = upDur; $('#fPause').onchange = upDur;
   $('#fDur').onchange = () => {
     const m = parseDur($('#fDur').value);
-    if (!isNaN(m)) { $('#fDur').value = fmtDur(m); $('#fEnd').value = fromMin(toMin($('#fStart').value) + m + pause()); }
+    if (!isNaN(m)) { $('#fDur').value = fmtDur(m); if (!flat()) $('#fEnd').value = fromMin(toMin($('#fStart').value) + m + pause()); }
   };
+  // Forfait : début, fin et pause grisés (et vidés à l'enregistrement) ; décoché, les heures reviennent.
+  const setFlat = () => {
+    ['#fStart', '#fEnd', '#fPause'].forEach(s => $(s).disabled = flat());
+    $('#fTimes').style.opacity = flat() ? .45 : '';
+    if (!flat() && !$('#fStart').value) { $('#fEnd').value = hhmm(new Date()); $('#fStart').value = fromMin(toMin($('#fEnd').value) - (parseDur($('#fDur').value) || 60)); }
+  };
+  if ($('#fFlat')) { $('#fFlat').onchange = setFlat; setFlat(); }
   $('#fClient').onchange = ev => {
     if (ev.target.value === '__new') {
       const name = (prompt('Nom du nouveau client :') || '').trim();
@@ -474,7 +488,7 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null) {
     if (isNaN(minutes) || minutes <= 0) return alert('Durée invalide (ex. 1:30).');
     if (minutes > 12 * 60 && !confirm(`Durée de ${fmtDur(minutes)} : oubli de dépointage ?\nEnregistrer quand même ?`)) return;
     const data = {
-      clientId, date: $('#fDate').value, start: $('#fStart').value, end: $('#fEnd').value, minutes, pauseMin,
+      clientId, date: $('#fDate').value, start: flat() ? '' : $('#fStart').value, end: flat() ? '' : $('#fEnd').value, minutes, pauseMin,
       description: $('#fDesc').value.trim(), onSite: $('#fSite').checked, alescom: $('#fAles').checked, install: $('#fInst').value.trim()
     };
     if (b && !confirm('Cette intervention est déjà facturée. Modifier quand même l\'archive ?')) return;
@@ -648,7 +662,7 @@ function viewBillingTarget(key, all) {
     </div>
     ${es.length ? `<div class="card"><h2>Interventions (${sel.length}/${es.length})</h2>
       <ul class="list">${es.map(e => `<li><input type="checkbox" data-inc="${e.id}" ${excluded.has(e.id) ? '' : 'checked'}>
-        <div class="grow tap" data-edit="${e.id}"><div><strong>${frDate(e.date)}</strong> ${e.forfait ? 'forfait' : `${e.start}–${e.end}`}
+        <div class="grow tap" data-edit="${e.id}"><div><strong>${frDate(e.date)}</strong> ${e.forfait || !e.start ? 'forfait' : `${e.start}–${e.end}`}
           ${info.partner ? '· ' + esc(client(e.clientId).name) : ''} ${e.onSite ? '<span class="pill">sur site</span>' : ''}</div>
           <div class="small muted">${esc(e.description)}${e.install ? ' · ' + esc(e.install) : ''}</div></div>
         <div class="dur">${fmtDur(e.minutes)}</div></li>`).join('')}</ul></div>` : ''}
