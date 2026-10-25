@@ -959,6 +959,7 @@ function viewSettings() {
       <input type="file" id="fileAT" accept=".xlsx" class="hidden">
       <input type="file" id="fileHT" accept=".csv,text/csv" class="hidden">
       <p class="small muted" id="persistInfo"></p>
+      <p class="small muted" id="appVersion"></p>
     </div>`;
 
   if (installPrompt) $('#install').onclick = async () => { installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; render(); };
@@ -1041,6 +1042,11 @@ function viewSettings() {
     const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
     try { importRows(await Xlsx.readArchiveTemplate(await f.arrayBuffer()), 'ArchiveTemplate.xlsx', false); } catch (e) { alert(e.message); }
   };
+  // Version installée (nom du cache du service worker, ex. heures-v23) : pour vérifier qu'une publication est bien arrivée.
+  window.caches?.keys().then(ks => {
+    const v = ks.filter(k => /^heures-v\d+$/.test(k)).sort((a, b) => +b.slice(8) - +a.slice(8))[0];
+    if ($('#appVersion')) $('#appVersion').textContent = `Version : ${v || 'inconnue (pas de cache)'}`;
+  }).catch(() => {});
   navigator.storage?.persisted?.().then(p => {
     const el = $('#persistInfo');
     if (el) el.textContent = p ? 'Cache local persistant.' : 'Installe l\'app pour que le navigateur ne vide pas le cache local.';

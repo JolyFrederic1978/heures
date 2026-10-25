@@ -187,6 +187,8 @@ const Achats = (() => {
   }
 
   // --- import des PDF ---
+  // Lecteurs disponibles (ex. « ovh,mgk ») : un PDF « non reconnu » est relu quand un lecteur a été ajouté depuis.
+  const readersSig = () => Fournisseurs.readers().map(r => r.id).join(',');
   async function checkInbox() {
     const files = (await OneDrive.list(path.inbox())).filter(f => /\.pdf$/i.test(f.name));
     let ch = false;
@@ -194,7 +196,8 @@ const Achats = (() => {
     for (const rec of alive(A.files)) if (!files.some(f => f.name === rec.name)) { rec.deleted = true; touch(rec); ch = true; }
     for (const f of files) {
       const rec = alive(A.files).find(x => x.name === f.name && x.size === f.size);
-      if (rec && rec.status !== 'retry') continue;                 // déjà signalé (illisible, doublon…)
+      // Déjà signalé (illisible, doublon…) : pas relu, sauf « Réessayer » ou nouveau lecteur depuis l'échec.
+      if (rec && rec.status !== 'retry' && !(rec.status === 'error' && rec.readers !== readersSig())) continue;
       const got = await OneDrive.get(`${path.inbox()}/${f.name}`, 'buffer');
       if (!got) continue;
       await importPdf(got.data, f.name, f.size, true);
@@ -215,7 +218,7 @@ const Achats = (() => {
     if (problem) {
       if (!fromInbox) return `${name} : ${problem}`;
       rec ||= (A.files.push(rec = { id: uid('af'), name, size }), rec);
-      Object.assign(touch(rec), { status: dup ? 'duplicate' : 'error', msg: problem, text: (r.rows || []).map(x => x.cells.join(' | ')).join('\n').slice(0, 30000) });
+      Object.assign(touch(rec), { status: dup ? 'duplicate' : 'error', msg: problem, readers: readersSig(), text: (r.rows || []).map(x => x.cells.join(' | ')).join('\n').slice(0, 30000) });
       return `${name} : ${problem}`;
     }
     const year = (i.date || today()).slice(0, 4);
