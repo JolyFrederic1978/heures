@@ -1,6 +1,6 @@
 ﻿// Cache-first : l'app fonctionne hors ligne. Les appels Microsoft / OneDrive ne sont jamais mis en cache.
-// Incrémenter CACHE à chaque mise à jour publiée.
-const CACHE = 'heures-v27';
+// Incrémenter CACHE à chaque mise à jour publiée (même nom = le navigateur garde l'ancienne copie).
+const CACHE = 'heures-v28';
 const LOCAL = [
   './', 'index.html', 'styles.css', 'db.js', 'csv.js', 'xlsx.js', 'onedrive.js', 'billit.js', 'pdf-fournisseurs.js', 'achats.js', 'app.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
@@ -10,7 +10,8 @@ const LOCAL = [
 self.addEventListener('install', e => {
   e.waitUntil((async () => {
     const c = await caches.open(CACHE);
-    await c.addAll(LOCAL);
+    // cache: 'reload' : fichiers relus sur le site, pas dans le cache HTTP du navigateur (GitHub Pages le garde 10 min).
+    await c.addAll(LOCAL.map(u => new Request(u, { cache: 'reload' })));
     self.skipWaiting();
   })());
 });
