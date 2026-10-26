@@ -615,7 +615,8 @@ const Achats = (() => {
       <p class="small muted">Facture ${esc(i.number)} du ${frDate(i.date)}</p>
       <p><strong>${esc(l.label)}</strong>${l.detail ? `<br><span class="small">${esc(l.detail)}</span>` : ''}<br>
         <span class="small muted">${[whereOf(l), l.from && `du ${frDate(l.from)} au ${frDate(l.to)}`, `achat ${l.qty} × ${eur(l.unit)} = ${eur(l.total)}`].filter(Boolean).map(esc).join(' · ')}</span></p>
-      <label>Client</label><select id="lClient" ${billed ? 'disabled' : ''}><option value="">— choisir —</option>${clientOptions(d.clientId)}</select>
+      <label>Client</label><select id="lClient" ${billed ? 'disabled' : ''}><option value="">— choisir —</option>${clientOptions(d.clientId)}
+        <option value="__new">+ Nouveau client…</option></select>
       ${l.domain && !domainOwner ? `<label class="check"><input type="checkbox" id="lDom" checked> Ajouter ${esc(l.domain)} à la fiche de ce client</label>` : ''}
       ${!l.domain && l.hint && !hintKnown ? `<label class="check"><input type="checkbox" id="lHint" checked> Retenir « ${esc(l.hint)} » pour ce client (factures ${esc(l.supplier)})</label>` : ''}
       <div class="card" style="margin:12px 0 0;padding:10px">
@@ -632,8 +633,16 @@ const Achats = (() => {
       <label class="check"><input type="checkbox" id="lIgnore" ${d.ignoreLine ? 'checked' : ''} ${billed ? 'disabled' : ''}> Ne pas refacturer cette ligne-ci</label>
       ${productsErr ? `<p class="small muted">${esc(productsErr)}</p>` : ''}
       <div class="actions"><button class="btn" value="cancel">Annuler</button><button class="btn primary" id="lSave">Enregistrer</button></div>`;
-    const read = () => ({ clientId: $('#lClient').value || null, ref: $('#mRef').value.trim(), margin: $('#mMargin').value.trim(),
+    const read = () => ({ clientId: ($('#lClient').value !== '__new' && $('#lClient').value) || null, ref: $('#mRef').value.trim(), margin: $('#mMargin').value.trim(),
       ignore: $('#mIgnore').checked, ignoreLine: $('#lIgnore').checked });
+    // « + Nouveau client… » : fiche client (avec choix dans les clients Billit pas encore reliés), domaine de la ligne proposé,
+    // puis retour sur cet article avec le nouveau client choisi (ou sans changement avec « Retour »).
+    $('#lClient').onchange = ev => {
+      if (ev.target.value !== '__new') return;
+      const v = { ...read(), clientId: d.clientId };
+      editClient(null, { preset: { domains: l.domain ? [l.domain] : [] },
+        onSaved: c => editLine(l, { ...v, clientId: c.id }), onCancel: () => editLine(l, v) });
+    };
     // Prix calculé et comparaison avec Billit, mis à jour pendant la saisie.
     const calc = () => {
       const v = read(), tmp = { billitRef: v.ref, margin: v.margin };

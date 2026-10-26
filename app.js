@@ -416,17 +416,18 @@ function viewToday() {
 
 // ---- dialogue intervention ----
 // onSaved(intervention) : appelé après l'enregistrement d'une nouvelle intervention (ex. intervention lue sur une facture Alescom).
-function openEntry(entry, preset = {}, fromTimer = false, onSaved = null) {
+// draft : valeurs déjà saisies à réafficher (retour de la fiche « + Nouveau client… ») ; l'intervention elle-même n'est pas modifiée avant « Enregistrer ».
+function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft = null) {
   if (entry?.forfait) return openForfait(entry);
   const c0 = state.clients.find(c => c.id === state.lastClientId && !c.deleted) || activeClients()[0];
-  const e = entry || {
+  const e = { ...(entry || {
     clientId: c0?.id, date: today(), start: hhmm(new Date(Date.now() - 3600e3)), end: hhmm(new Date()), minutes: 60, pauseMin: 0,
     description: '', install: '', onSite: false, alescom: !!c0?.defaultAlescom, ...preset
-  };
+  }), ...(draft || {}) };
   if (!e.clientId) return alert("Ajoute d'abord un client dans Réglages.");
   const b = e.billId && bill(e.billId);
   // Forfait : seule la durée facturée est encodée (pas d'heure de début / fin). Intervention existante sans heures = forfait.
-  const flat0 = entry ? !entry.start && !entry.end : preset.start === '' && preset.end === '' && preset.minutes > 0;
+  const flat0 = draft ? draft.flat : entry ? !entry.start && !entry.end : preset.start === '' && preset.end === '' && preset.minutes > 0;
   const dlg = $('#dlg'), f = $('#dlgForm');
   f.innerHTML = `
     <h2>${entry ? 'Modifier' : fromTimer ? 'Fin du chrono' : 'Nouvelle'} intervention</h2>
@@ -471,10 +472,12 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null) {
   if ($('#fFlat')) { $('#fFlat').onchange = setFlat; setFlat(); }
   $('#fClient').onchange = ev => {
     if (ev.target.value === '__new') {
-      const name = (prompt('Nom du nouveau client :') || '').trim();
-      let c = name && state.clients.find(x => !x.deleted && x.name.toLowerCase() === name.toLowerCase());
-      if (name && !c) state.clients.push(c = touch({ id: uid('c'), name, billitName: '', defaultOnSite: false, defaultAlescom: false }));
-      ev.target.innerHTML = clientOptions(c?.id || e.clientId) + '<option value="__new">+ Nouveau client…</option>';
+      // Fiche client complète (avec la liste des clients Billit pas encore reliés), puis retour au formulaire avec ce qui était saisi.
+      const d = { clientId: e.clientId, date: $('#fDate').value, minutes: parseDur($('#fDur').value) || e.minutes, start: $('#fStart').value, end: $('#fEnd').value,
+        pauseMin: parseDur($('#fPause').value) || 0, description: $('#fDesc').value, onSite: $('#fSite').checked, alescom: $('#fAles').checked,
+        install: $('#fInst').value, flat: flat() };
+      const back = x => openEntry(entry, preset, fromTimer, onSaved, x);
+      editClient(null, { onSaved: c => back({ ...d, clientId: c.id, alescom: entry ? d.alescom : !!c.defaultAlescom }), onCancel: () => back(d) });
     } else if (!entry) $('#fAles').checked = !!client(ev.target.value).defaultAlescom;
   };
   if ($('#fDel')) $('#fDel').onclick = async () => {
@@ -502,7 +505,7 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null) {
     if (!entry && onSaved) await onSaved(saved);
     dlg.close(); await persist(); toast('Enregistré');
   };
-  dlg.showModal();
+  if (!dlg.open) dlg.showModal();
 }
 
 // ---- forfaits serveur : une date et une durée, sans heures de début / fin ----
@@ -1131,13 +1134,21 @@ async function deleteClient(c) {
   await persist(); toast('Client supprimé');
 }
 
-function editClient(c) {
-  const dlg = $('#dlg'), f = $('#dlgForm');
+// opts (création depuis un autre écran, ex. un article d'achat) : preset = valeurs proposées ({ name, domains }),
+// onSaved(client) / onCancel() = retour à cet écran au lieu de fermer la fenêtre.
+function editClient(c, opts = {}) {
+  const dlg = $('#dlg'), f = $('#dlgForm'), pre = opts.preset || {}, mode = Billit.mode();
+  // Lien Billit (choix dans la liste) : seulement si ce client n'est pas encore relié à un client Billit dans ce mode.
+  const askBillit = !c?.billitIds?.[mode];
+  let billitId = null;
   f.innerHTML = `<h2>${c ? 'Modifier' : 'Nouveau'} client</h2>
-    <label>Nom</label><input id="cName" value="${esc(c?.name)}" placeholder="ex. Vedi">
+    ${askBillit ? `<label>Client Billit (${billitModeLabel(mode)})</label>
+      <select id="cBillitPick" disabled><option value="">Chargement des clients Billit…</option></select>
+      <p class="small muted" id="cBillitInfo" style="margin:4px 0 0">Clients Billit pas encore reliés à un client de l'app.</p>` : ''}
+    <label>Nom</label><input id="cName" value="${esc(c?.name ?? pre.name ?? '')}" placeholder="ex. Vedi">
     <label>Nom du client dans Billit</label><input id="cBillit" value="${esc(c?.billitName)}" placeholder="ex. V.T.S. SA">
     <label>Nom(s) de domaine <span class="small">(séparés par une virgule, sert à attribuer les achats OVH…)</span></label>
-    <input id="cDomains" value="${esc((c?.domains || []).join(', '))}" placeholder="ex. vedi.be, vts-sa.com" autocapitalize="off">
+    <input id="cDomains" value="${esc((c?.domains || pre.domains || []).join(', '))}" placeholder="ex. vedi.be, vts-sa.com" autocapitalize="off">
     <label class="check"><input type="checkbox" id="cNear" ${c?.near ? 'checked' : ''}> Client proche (déplacement zone 1, dep-003)</label>
     <label class="check"><input type="checkbox" id="cAles" ${c?.defaultAlescom ? 'checked' : ''}> alescom par défaut</label>
     <div class="row">
@@ -1148,9 +1159,31 @@ function editClient(c) {
     ${c ? `<label class="check"><input type="checkbox" id="cArch" ${c.archived ? 'checked' : ''}> Archivé (masqué des listes)</label>` : ''}
     <div class="actions">
       ${c ? '<button class="btn danger" id="cDel" style="margin-right:auto">Supprimer</button>' : ''}
-      <button class="btn" value="cancel">Annuler</button><button class="btn primary" id="cSave">Enregistrer</button></div>`;
+      <button class="btn" ${opts.onCancel ? 'id="cCancel"' : 'value="cancel"'}>${opts.onCancel ? 'Retour' : 'Annuler'}</button><button class="btn primary" id="cSave">Enregistrer</button></div>`;
   $('#cServer').onchange = ev => $('#cServersBox').classList.toggle('hidden', !ev.target.checked);
   if ($('#cDel')) $('#cDel').onclick = () => deleteClient(c);
+  if (opts.onCancel) $('#cCancel').onclick = () => opts.onCancel();
+  if (askBillit) (async () => {
+    const sel = $('#cBillitPick'), info = $('#cBillitInfo');
+    try {
+      if (!Billit.ready()) throw new Error('clé API Billit absente (Réglages) : nom Billit à saisir à la main.');
+      // Déjà reliés : ID mémorisé dans ce mode, ou même nom Billit qu'un client de l'app.
+      const used = new Set(state.clients.filter(x => !x.deleted && x !== c).flatMap(x => [x.billitIds?.[mode] && 'id:' + x.billitIds[mode], x.billitName && 'n:' + fold(x.billitName)]).filter(Boolean));
+      const free = (await Billit.customers()).filter(p => !used.has('id:' + p.PartyID) && !used.has('n:' + fold(Billit.partyName(p))))
+        .sort((a, b) => Billit.partyName(a).localeCompare(Billit.partyName(b)));
+      if (!sel.isConnected) return;
+      sel.innerHTML = `<option value="">— aucun / saisie à la main —</option>` + free.map(p => `<option value="${esc(p.PartyID)}">${esc(Billit.partyName(p))}${p.VATNumber ? ' · ' + esc(p.VATNumber) : ''}</option>`).join('');
+      sel.disabled = false;
+      info.textContent = `${free.length} client(s) Billit pas encore relié(s) à l'app.`;
+      sel.onchange = () => {
+        const p = free.find(x => String(x.PartyID) === sel.value);
+        billitId = p ? p.PartyID : null;
+        if (!p) return;
+        $('#cBillit').value = Billit.partyName(p);
+        if (!$('#cName').value.trim()) $('#cName').value = p.CommercialName || Billit.partyName(p);
+      };
+    } catch (e) { if (sel.isConnected) { sel.innerHTML = '<option value="">—</option>'; info.textContent = 'Liste Billit indisponible : ' + e.message; } }
+  })();
   $('#cSave').onclick = async ev => {
     ev.preventDefault();
     const name = $('#cName').value.trim().replace(/\s+/g, ' ');
@@ -1164,10 +1197,14 @@ function editClient(c) {
     if (taken) return alert(`Le domaine ${taken[0]} est déjà attribué à ${taken[1].name}.`);
     const data = { name, billitName: $('#cBillit').value.trim(), domains, near: $('#cNear').checked, defaultAlescom: $('#cAles').checked, archived: !!$('#cArch')?.checked,
       server, servers: server ? servers : 0 };
-    if (c) Object.assign(touch(c), data); else state.clients.push(touch({ id: uid('c'), ...data }));
+    // Client Billit choisi dans la liste : lien mémorisé (comme au 1er envoi d'une facture), pas de recherche par le nom ensuite.
+    if (billitId) data.billitIds = { ...c?.billitIds, [mode]: billitId };
+    let saved = c;
+    if (c) Object.assign(touch(c), data); else state.clients.push(saved = touch({ id: uid('c'), ...data }));
+    if (opts.onSaved) { await persist(); opts.onSaved(saved); return; }
     dlg.close(); await persist();
   };
-  dlg.showModal();
+  if (!dlg.open) dlg.showModal();
 }
 
 // Reprise d'anciennes données (ArchiveTemplate.xlsx = à facturer ; CSV Hours Tracker = au choix).
