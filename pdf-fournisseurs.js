@@ -314,28 +314,50 @@ const Fournisseurs = (() => {
   //   Référence produit | Produit | Valeur | Total (EUR)                                         ← en-tête, puis « (EUR) »
   //   DSD270015 | Microsoft 365 Famille 6-PC/MAC 1 an | 1 | € 94,30 | € 94,30
   //   Total/per page: | € 188,60 / Sous-total HT: | € 188,60   (autoliquidation, pas de TVA)
+  // Factures aussi en anglais (962976, 26/10/2026) : « Invoice number », « Article number | Product | Quantity », « Subtotal excl. VAT ».
+  // Nom trop long : réparti sur plusieurs lignes, la ligne des prix au milieu, sans nom :
+  //   Acronis True Image Premium 1-PC/MAC + 1 TB Cloud Storage / DSD180066 | 1 | € 77,48 | € 77,48 / 1 an
   // Pas de domaine ni de contact : le client se choisit à la main. Correspondance par la référence produit DSD.
   const euro = s => String(s || '').replace(/^€\s*/, '');
   const dsd = {
-    id: 'dsd', name: 'DSD',
+    id: 'dsd', name: 'DSD', v: 2,                    // v2 (26/10) : factures en anglais, nom sur plusieurs lignes
     detect: rows => rows.some(r => /^DSD Europe\b/i.test(r.text)),
     parse(rows, fileName) {
-      const number = find(rows, /^Numéro de facture\s+(\d+)/i)?.[1] || find(rows, /^(?:Facture|Invoice)\s+(\d+)/i)?.[1] || /(\d{5,})/.exec(fileName || '')?.[1] || '';
+      const number = find(rows, /^(?:Numéro de facture|Invoice number)\s+(\d+)/i)?.[1] || find(rows, /^(?:Facture|Invoice)\s+(\d+)/i)?.[1]
+        || /(\d{5,})/.exec(fileName || '')?.[1] || '';
       const date = isoDate(find(rows, /^Date\s+(\d{1,2}\s+[A-Za-zéû]+\s+\d{4})/i)?.[1]);
-      const totalM = find(rows, /Sous-total HT:?\s+€?\s*(-?[\d .  ]+[.,]\d{2})/i);
-      const lines = [];
+      const totalM = find(rows, /(?:Sous-total HT|Subtotal excl\.? VAT):?\s+€?\s*(-?[\d .  ]+[.,]\d{2})/i);
+      // 1) lignes de prix (items) et lignes de texte entre elles (gaps[i] = texte avant l'item i ; le dernier = après le dernier item).
+      const items = [], gaps = [[]];
       let inTable = false;
       for (const r of rows) {
         const t = r.text, c = r.cells.map(euro), n = c.length;
-        if (/^Référence produit/i.test(t)) { inTable = true; continue; }
+        if (/^(Référence produit|Article number)\b/i.test(t)) { inTable = true; continue; }
         if (!inTable) continue;
-        if (/^(Total\/per page|Sous-total|Total:)/i.test(t)) { inTable = false; continue; }
+        if (/^(Total\/per page|Sous-total|Subtotal|Total:)/i.test(t)) { inTable = false; continue; }
+        if (/^\(EUR\)$/i.test(t)) continue;
         if (n >= 4 && isAmount(c[n - 1]) && isAmount(c[n - 2]) && /^\d+(?:[.,]\d+)?$/.test(c[n - 3])) {
-          const ref = n >= 5 ? c[0] : '', label = c.slice(n >= 5 ? 1 : 0, n - 3).join(' ');
-          lines.push({ label, detail: ref ? `réf. DSD ${ref}` : '', key: ref ? 'code:' + ref.toLowerCase() : keyOf(label), domain: '', ref,
+          const withRef = n >= 5 || /^[A-Z]{2,}\d{3,}$/.test(c[0]);
+          items.push({ ref: withRef ? c[0] : '', name: c.slice(withRef ? 1 : 0, n - 3).join(' '),
             qty: parseFloat(c[n - 3].replace(',', '.')), unit: num(c[n - 2]), total: num(c[n - 1]) });
-        } else if (lines.length && !/^\(EUR\)$/i.test(t)) lines[lines.length - 1].detail = [lines[lines.length - 1].detail, t].filter(Boolean).join(' · ');
+          gaps.push([]);
+        } else gaps[gaps.length - 1].push(t);
       }
+      // 2) un item sans nom sur sa ligne de prix prend le texte au-dessus et en dessous (partagé à moitié avec l'item voisin) ;
+      //    un item avec nom garde le texte en dessous comme détail (ancien modèle).
+      const lines = items.map((it, i) => {
+        const before = gaps[i], after = gaps[i + 1], last = i === items.length - 1;
+        const nextNameless = !last && !items[i + 1].name;
+        const take = (g, fromEnd) => { const k = fromEnd ? Math.floor(g.length / 2) : Math.ceil(g.length / 2); return fromEnd ? g.slice(g.length - k) : g.slice(0, k); };
+        let label = it.name, detail = [];
+        if (!it.name) {
+          const pre = i === 0 ? before : take(before, true);       // 2e moitié du texte entre l'item précédent et celui-ci
+          const post = last ? after : nextNameless ? take(after, false) : after;
+          label = [...pre, ...post].join(' ').replace(/\s+/g, ' ').trim();
+        } else detail = last || !nextNameless ? after : take(after, false);
+        return { label, detail: [it.ref && `réf. DSD ${it.ref}`, ...detail].filter(Boolean).join(' · '),
+          key: it.ref ? 'code:' + it.ref.toLowerCase() : keyOf(label), domain: '', ref: it.ref, qty: it.qty, unit: it.unit, total: it.total };
+      });
       return { supplier: 'DSD', number, date, totalExcl: totalM ? num(totalM[1]) : null, lines };
     }
   };
@@ -414,5 +436,7 @@ const Fournisseurs = (() => {
     return { pages: pdf.numPages, shown: n };
   }
 
-  return { read, readRows, fromRows, render, domains, keyOf, ublPdfs, fromUbl, readers: () => READERS.map(r => ({ id: r.id, name: r.name })) };
+  // id (+ « @v » si le lecteur a été corrigé) : un PDF « non lu » est relu quand cette liste change. Monter `v` à chaque correction d'un lecteur.
+  return { read, readRows, fromRows, render, domains, keyOf, ublPdfs, fromUbl,
+    readers: () => READERS.map(r => ({ id: r.v ? `${r.id}@${r.v}` : r.id, name: r.name })) };
 })();

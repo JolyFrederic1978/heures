@@ -319,6 +319,7 @@ function viewToday() {
   const dayLabel = new Date().toLocaleDateString('fr-BE', { weekday: 'short', day: '2-digit', month: '2-digit' });
   $('#view').innerHTML = `
     <div class="daybar"><span>Aujourd'hui</span><span>${esc(dayLabel)}</span></div>
+    <div id="achNotif"></div>
     <div class="card timer">
       ${t ? `
         <div><strong>${esc(client(t.clientId).name)}</strong> ${t.pausedAt ? '<span class="pill warn">en pause</span>' : ''}</div>
@@ -364,6 +365,7 @@ function viewToday() {
   $('#addUpd').onclick = () => openForfait(null, 'update');
   $('#goBill').onclick = () => { tab = 'billing'; render(); };
   bindEdits();
+  Achats.todayBanner($('#achNotif'));         // nouvelles factures fournisseurs (module Achats)
 
   if (t) {
     const hms = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`; };
@@ -611,21 +613,33 @@ function viewBilling() {
   const groups = keys.map(k => {
     const info = groupInfo(k), es = sortEntries(open.filter(e => groupKey(e) === k));
     const ach = k.startsWith('c:') ? Achats.readyFor(k.slice(2)) : [], t = totals(es, info.rates);
-    return { info, es, ach, t, amount: t.amount + achSum(ach) };
+    // age : jours d'attente de la plus ancienne intervention (affiché « depuis n j » à partir de 20 j).
+    const age = es.length ? Math.round((new Date(today() + 'T00:00') - new Date(es[0].date + 'T00:00')) / 864e5) : 0;
+    return { info, es, ach, t, achAmount: achSum(ach), amount: t.amount + achSum(ach), age };
   }).sort((a, b) => b.amount - a.amount);
+  const sum = f => groups.reduce((s, g) => s + f(g), 0);
+  const short = d => frDate(d).slice(0, 5);
+  // Couleur de la pastille : fixe pour un client (tirée de sa clé), pas de sa place dans la liste.
+  const AV = ['#1f5f8b', '#2e7d4f', '#8a4fbf', '#b26a00', '#b3261e', '#00796b', '#5d6d7e'];
+  const avColor = key => AV[parseInt(hash(key), 36) % AV.length];
 
+  // Mise en page « cartes clients » (choisie par Fred le 26/10) : bandeau du total, puis une carte par client.
   $('#view').innerHTML = `
-    <div class="kpis"><div class="kpi"><div class="v">${eur(groups.reduce((s, g) => s + g.amount, 0))}</div><div class="l">à facturer (HTVA estimé)</div></div>
-      <div class="kpi"><div class="v">${open.length}</div><div class="l">interventions en attente</div></div></div>
-    <div class="card"><h2>En attente de facturation</h2>
-      ${groups.length ? `<ul class="list">${groups.map(g => `
-        <li class="tap" data-target="${g.info.key}"><div class="grow"><strong>${esc(g.info.label)}</strong>
-          ${g.info.partner ? '<span class="pill warn">partenaire</span>' : ''}
-          <div class="small muted">${[g.es.length && `${g.es.length} interv. · ${fmtDur(g.t.minutes)} · du ${frDate(g.es[0].date)} au ${frDate(g.es[g.es.length - 1].date)}`,
-            g.ach.length && `${g.ach.length} achat(s) à refacturer`].filter(Boolean).join(' · ')}</div></div>
-          <div class="dur">${eur(g.amount)}</div></li>`).join('')}</ul>`
-      : '<div class="empty">Tout est facturé 🎉</div>'}
-    </div>`;
+    <div class="fhead"><div class="sub">À facturer · HTVA estimé</div><div class="big">${eur(sum(g => g.amount))}</div>
+      <div class="split"><div><b>${eur(sum(g => g.t.amount))}</b>${open.length} intervention(s)</div>
+        <div><b>${eur(sum(g => g.achAmount))}</b>${sum(g => g.ach.length)} achat(s)</div>
+        <div><b>${groups.length}</b>client(s)</div></div></div>
+    ${groups.length ? `<div class="flegend"><i></i>interventions <u></u>achats</div>
+      ${groups.map(g => `
+      <div class="ccard tap" data-target="${g.info.key}">
+        <div class="av" style="background:${avColor(g.info.key)}">${esc((g.info.label.trim()[0] || '?').toUpperCase())}</div>
+        <div class="mid"><div class="nm">${esc(g.info.label)} ${g.info.partner ? '<span class="pill warn">partenaire</span>' : ''}</div>
+          <div class="meta">${[g.es.length && `${g.es.length} interv. · ${fmtDur(g.t.minutes)} · ${short(g.es[0].date)} → ${short(g.es[g.es.length - 1].date)}`,
+            g.ach.length && `${g.ach.length} achat${g.ach.length > 1 ? 's' : ''}`].filter(Boolean).join(' · ')}</div>
+          <div class="bar"><i style="width:${g.amount ? g.t.amount / g.amount * 100 : 100}%"></i><u style="width:${g.amount ? g.achAmount / g.amount * 100 : 0}%"></u></div></div>
+        <div class="amt">${eur(g.amount)}${g.age >= 20 ? `<small>depuis ${g.age} j</small>` : ''}</div><span class="chev">›</span>
+      </div>`).join('')}`
+      : '<div class="card"><div class="empty">Tout est facturé 🎉</div></div>'}`;
   $$('[data-target]').forEach(li => li.onclick = () => { billingTarget = li.dataset.target; billUntil = today(); excluded = new Set(); excludedAch = new Set(); render(); });
 }
 
@@ -905,7 +919,36 @@ function viewArchive() {
   };
   $('#aYear').onchange = e => { archYear = e.target.value; render(); };
   $('#aClient').onchange = e => { archClient = e.target.value; render(); };
-  bindEdits();
+  // Archives : consultation seulement (pas de modification d'une intervention facturée).
+  $$('[data-edit]').forEach(li => li.onclick = () => viewArchivedEntry(state.entries.find(e => e.id === li.dataset.edit)));
+}
+
+// Intervention archivée en lecture seule, pour tous les types (chrono, saisie, forfait serveur), avec accès à sa facture.
+function viewArchivedEntry(e) {
+  const b = e.billId && bill(e.billId);
+  const dlg = $('#dlg'), f = $('#dlgForm');
+  const row = (k, v) => v ? `<tr><td class="muted">${k}</td><td>${v}</td></tr>` : '';
+  const flat = e.forfait || !e.start;
+  f.innerHTML = `<h2>Intervention archivée</h2>
+    ${b ? `<p class="small"><span class="pill ok">facturée le ${frDate(b.date)}${b.ref ? ' · ' + esc(b.ref) : ''}</span></p>` : ''}
+    <table class="tot ro">
+      ${row('Client', esc(client(e.clientId).name))}
+      ${row('Date', esc(longDate(e.date)))}
+      ${row('Horaire', flat ? `forfait${e.forfait ? ' · ' + esc(FORFAITS[e.forfait] || e.forfait) : ''}` : `${e.start} – ${e.end}`)}
+      ${row('Pause', !flat && e.pauseMin ? fmtDur(e.pauseMin) : '')}
+      ${row('Durée facturée', `<strong>${fmtDur(e.minutes)}</strong>`)}
+      ${row('Lieu', e.onSite ? 'sur site' : 'à distance')}
+      ${row("Donneur d'ordre", e.alescom ? 'alescom' : '')}
+      ${row('Description', esc(e.description).replace(/\n/g, '<br>'))}
+      ${row('Installation', esc(e.install))}
+      ${row('Montant HTVA', eur(entryAmount(e)))}
+    </table>
+    <p class="small muted">Les interventions facturées ne se modifient pas. Pour corriger : « Voir la facture » → « Annuler la facturation ».</p>
+    <div class="actions">${b && b.key !== 'import' ? '<button class="btn" id="vBill">Voir la facture</button>' : ''}
+      <button class="btn primary" id="vOk">Fermer</button></div>`;
+  if ($('#vBill')) $('#vBill').onclick = () => showBill(b);
+  $('#vOk').onclick = ev => { ev.preventDefault(); dlg.close(); };
+  if (!dlg.open) dlg.showModal();
 }
 
 // ---- Réglages ----

@@ -35,6 +35,45 @@ body.locked .tabs, body.locked #syncPill { display: none; }
 .daybar { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px;
   background: var(--accent); color: #fff; border-radius: 10px; padding: 10px 14px; font-weight: 600; }
 @media (prefers-color-scheme: dark) { .daybar { background: #173a54; } }
+/* Page Facturer : bandeau du total + cartes clients (mise en page « A », 26/10) */
+.fhead { background: linear-gradient(135deg, #1f5f8b, #2f7fb5); color: #fff; border-radius: 14px; padding: 16px; margin-bottom: 12px; }
+@media (prefers-color-scheme: dark) { .fhead { background: linear-gradient(135deg, #173a54, #1f5f8b); } }
+.fhead .sub { opacity: .85; font-size: 13px; }
+.fhead .big { font-size: 30px; font-weight: 800; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+.fhead .split { display: flex; gap: 8px; margin-top: 12px; }
+.fhead .split div { flex: 1; min-width: 0; background: rgba(255,255,255,.15); border-radius: 10px; padding: 8px 10px; font-size: 12px; }
+.fhead .split b { display: block; font-size: 16px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.flegend { font-size: 11px; color: var(--muted); margin: -4px 0 10px 4px; }
+.flegend i, .flegend u { display: inline-block; width: 10px; height: 6px; border-radius: 2px; margin: 0 4px 0 8px; vertical-align: middle; }
+.flegend i, .ccard .bar i { background: var(--accent); }
+.flegend u, .ccard .bar u { background: var(--warn); }
+.ccard { display: flex; gap: 12px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  padding: 12px 14px; margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.05); }
+.ccard:hover { border-color: var(--accent); }
+.ccard .av { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; font-weight: 800; color: #fff; flex: none; }
+.ccard .mid { flex: 1; min-width: 0; }
+.ccard .nm { font-weight: 700; font-size: 16px; }
+.ccard .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.ccard .bar { display: flex; height: 5px; border-radius: 3px; overflow: hidden; background: var(--accent-soft); margin-top: 7px; }
+.ccard .amt { text-align: right; font-weight: 800; font-size: 17px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ccard .amt small { display: block; font-weight: 400; font-size: 11px; color: var(--warn); }
+.ccard .chev { color: var(--muted); font-size: 20px; }
+/* Onglet Articles : liste Billit compacte (une ligne par article) dans une zone qui défile */
+.artbox { max-height: 300px; overflow: auto; margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; }
+.list.compact li { padding: 6px 0; align-items: center; gap: 8px; font-size: 14px; }
+.list.compact .ref { min-width: 72px; white-space: nowrap; }
+.list.compact .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Fiche en lecture seule (intervention archivée) : libellé à gauche, valeur alignée à gauche */
+table.tot.ro td:first-child { width: 38%; vertical-align: top; }
+table.tot.ro td:last-child { text-align: left; }
+/* Bandeau « nouvelles factures » (page Aujourd'hui, module Achats) */
+.notifbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; padding: 10px 14px; border-radius: 10px;
+  background: color-mix(in srgb, var(--warn) 14%, var(--card)); border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); }
+.notifbar .ico { font-size: 20px; }
+.notifbar .txt { flex: 1; min-width: 0; }
+.notifbar .state { color: var(--warn); }
+.notifbar .go { font-size: 18px; color: var(--muted); }
+.notifbar .x { border: 0; background: none; font-size: 16px; color: var(--muted); cursor: pointer; padding: 4px 6px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 14px; margin-bottom: 12px; }
 .card h2 { font-size: 17px; margin: 0 0 12px; color: var(--accent); padding-bottom: 8px; border-bottom: 2px solid var(--accent-soft); }

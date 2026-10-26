@@ -202,6 +202,33 @@ const Achats = (() => {
       redraw = true;
     } finally { busy = false; }
     if (redraw && tab === 'achats' && !$('#dlg').open) render();
+    // Page Aujourd'hui : seul le bandeau est redessiné (pas toute la page, pour ne pas effacer une saisie en cours).
+    if (tab === 'today' && $('#achNotif')) todayBanner($('#achNotif'));
+  }
+
+  // --- bandeau « nouvelles factures » de la page Aujourd'hui (app.js : <div id="achNotif">) ---
+  // Factures importées pas encore vues ; toucher = onglet Achats ; ✕ = marquées vues (sur tous les appareils, via achats-data.json).
+  function todayBanner(el) {
+    if (!A) { load().then(() => el.isConnected && todayBanner(el)); return; }
+    const fresh = alive(A.invoices).filter(i => i.seen === false).sort((a, b) => (b.importedAt || 0) - (a.importedAt || 0));
+    if (!fresh.length) { el.innerHTML = ''; return; }
+    const ids = new Set(fresh.map(i => i.id));
+    const todo = alive(A.lines).filter(l => ids.has(l.invoiceId) && lineState(l) === 'todo').length;
+    const ready = alive(A.lines).filter(l => ids.has(l.invoiceId) && lineState(l) === 'ready').length;
+    const names = fresh.slice(0, 3).map(i => `${i.supplier} ${i.number || ''}`.trim()).join(', ') + (fresh.length > 3 ? ', …' : '');
+    el.innerHTML = `<div class="notifbar tap" id="achNotifGo" title="Ouvrir l'onglet Achats">
+      <span class="ico">📥</span>
+      <div class="txt"><strong>${fresh.length === 1 ? '1 nouvelle facture' : `${fresh.length} nouvelles factures`}</strong> <span class="small muted">· ${esc(names)}</span>
+        <div class="small state">${[todo && `${todo} article(s) à compléter`, ready && `${ready} prêt(s) à refacturer`].filter(Boolean).join(' · ') || 'rien à refacturer'}</div></div>
+      <span class="go">›</span>
+      <button class="x" id="achNotifX" title="Marquer comme vues">✕</button></div>`;
+    $('#achNotifGo', el).onclick = () => { tab = 'achats'; render(); };
+    $('#achNotifX', el).onclick = async ev => {
+      ev.stopPropagation();
+      fresh.forEach(i => { i.seen = true; touch(i); });
+      el.innerHTML = '';
+      await save(); scheduleSync();
+    };
   }
 
   // --- import des PDF ---
@@ -333,7 +360,8 @@ const Achats = (() => {
     const notes = [['transport', 'frais de transport non refacturé(s)'], ['intervention', "ligne(s) d'intervention → pointage"], ['deplacement', 'déplacement → pointage (sur site)']]
       .map(([k, t]) => { const x = skips.filter(l => l.skip === k); return x.length ? `${x.length} ${t} (${eur(x.reduce((s, l) => s + l.total, 0))})` : ''; }).filter(Boolean);
     const invoice = touch({ id: uid('ai'), supplier: i.supplier, number: i.number, date: i.date, totalExcl: i.totalExcl,
-      file: `${path.done(year)}/${stored}`, importedAt: Date.now(), skipped: zero, notes, warn: totalWarn(i, r.billitTotal),
+      // seen: false = signalée par le bandeau de la page Aujourd'hui jusqu'au ✕ (factures importées avant le 26/10 : pas de champ = déjà vues).
+      file: `${path.done(year)}/${stored}`, importedAt: Date.now(), seen: false, skipped: zero, notes, warn: totalWarn(i, r.billitTotal),
       interventions: (i.interventions || []).map(x => ({ id: uid('aw'), ...x, clientId: clientByName(x.client)?.id || null, entryId: null, dismissed: false })) });
     A.invoices.push(invoice);
     for (const l of kept) {
@@ -871,28 +899,30 @@ const Achats = (() => {
     const maps = alive(A.mapping).sort((a, b) => (a.supplier + a.label).localeCompare(b.supplier + b.label));
     const sups = alive(A.suppliers).sort((a, b) => a.name.localeCompare(b.name));
     const hints = alive(A.hints).sort((a, b) => a.label.localeCompare(b.label));
+    // Ordre voulu par Fred (26/10) : correspondances d'abord, puis articles Billit (liste compacte, une ligne par article, zone qui défile).
     $('#view').innerHTML = `
-      <div class="card"><div class="row"><h2 class="grow" style="margin:0;border:0;padding:0">Articles Billit (${products ? products.length : '?'})</h2>
-          <button class="btn primary" id="pNew" ${Billit.ready() && products ? '' : 'disabled'}>+ Nouvel article</button></div>
-        <p class="small muted" style="margin:6px 0 10px">Billit ${Billit.mode() === 'live' ? 'réel' : 'test (sandbox)'}. Touche un article pour le modifier (nom, prix, TVA, catégorie).</p>
-        ${productsErr ? `<p class="small"><span class="pill warn">${esc(productsErr)}</span></p>` : ''}
-        ${products ? `<input type="search" id="artFind" placeholder="Rechercher : référence, nom…" value="${esc(artFind)}">
-          <select id="artCat" style="margin-top:8px"><option value="">Toutes les catégories</option>
-            ${cats.map(g => `<option value="${g.id}" ${String(g.id) === artCat ? 'selected' : ''}>${esc(g.name)} (${g.refs.length})</option>`).join('')}
-            <option value="none" ${artCat === 'none' ? 'selected' : ''}>Sans catégorie (${prods.filter(p => !p.GroupID).length})</option></select>
-          <ul class="list" id="artList" style="margin-top:8px">${prods.map(p => `<li class="tap" data-prod="${esc(p.ProductID)}" data-cat="${esc(p.GroupID || 'none')}"
-              data-find="${esc(fold([p.Reference, p.Description, catOf(p)].join(' ')))}">
-            <div class="grow" style="flex:1;min-width:0"><strong>${esc(p.Reference || '(sans réf.)')}</strong> ${esc(p.Description || '')}
-              <div class="small muted">${catOf(p) ? esc(catOf(p)) : '<span class="pill warn">sans catégorie</span>'}${p.VAT != null ? ` · TVA ${esc(p.VAT)} %` : ''}</div></div>
-            <div class="dur">${eur(productPrice(p))}</div></li>`).join('')}</ul>
-          <p class="small muted" id="artMore"></p>` : !productsErr ? '<div class="empty">Chargement des articles Billit…</div>' : ''}
-      </div>
       <div class="card"><h2>Correspondance des articles fournisseurs (${maps.length})</h2>
         <p class="small muted" style="margin-top:0">Article d'une facture fournisseur → article Billit. Touche une ligne pour la modifier (nom, article, marge).</p>
         ${maps.length ? `<ul class="list">${maps.map(m => { const p = product(m.billitRef); return `<li class="tap" data-map="${m.id}"><div class="grow" style="flex:1;min-width:0">${supPill(m.supplier)} <strong>${esc(m.label)}</strong>
             <div class="small muted">${[m.ignore && 'non refacturé', isSet(m.margin) && `marge article ${pct(m.margin)}`, p && `Billit ${eur(productPrice(p))}`].filter(Boolean).join(' · ')}</div></div>
             <div class="dur">${esc(m.billitRef || '—')}${m.billitRef && products && !p ? '<div><span class="pill warn">inconnu</span></div>' : ''}</div></li>`; }).join('')}</ul>`
           : '<div class="empty">Vide : elle se remplit quand tu complètes les articles importés (onglet Achats).</div>'}
+      </div>
+      <div class="card"><div class="row"><h2 class="grow" style="margin:0;border:0;padding:0">Articles Billit (${products ? products.length : '?'})</h2>
+          <button class="btn primary" id="pNew" ${Billit.ready() && products ? '' : 'disabled'}>+ Nouvel article</button></div>
+        <p class="small muted" style="margin:6px 0 10px">Billit ${Billit.mode() === 'live' ? 'réel' : 'test (sandbox)'}. Touche un article pour le modifier (nom, prix, TVA, catégorie).</p>
+        ${productsErr ? `<p class="small"><span class="pill warn">${esc(productsErr)}</span></p>` : ''}
+        ${products ? `<div class="grid2"><input type="search" id="artFind" placeholder="Rechercher : référence, nom…" value="${esc(artFind)}">
+          <select id="artCat"><option value="">Toutes les catégories</option>
+            ${cats.map(g => `<option value="${g.id}" ${String(g.id) === artCat ? 'selected' : ''}>${esc(g.name)} (${g.refs.length})</option>`).join('')}
+            <option value="none" ${artCat === 'none' ? 'selected' : ''}>Sans catégorie (${prods.filter(p => !p.GroupID).length})</option></select></div>
+          <div class="artbox"><ul class="list compact" id="artList">${prods.map(p => `<li class="tap" data-prod="${esc(p.ProductID)}" data-cat="${esc(p.GroupID || 'none')}"
+              data-find="${esc(fold([p.Reference, p.Description, catOf(p)].join(' ')))}"
+              title="${esc([catOf(p) || 'sans catégorie', p.VAT != null ? `TVA ${p.VAT} %` : ''].filter(Boolean).join(' · '))}">
+            <strong class="ref">${esc(p.Reference || '(sans réf.)')}</strong>
+            <span class="name">${esc(p.Description || '')}${catOf(p) ? '' : ' <span class="pill warn">sans catégorie</span>'}</span>
+            <span class="dur">${eur(productPrice(p))}</span></li>`).join('')}</ul></div>
+          <p class="small muted" id="artMore" style="margin:6px 0 0"></p>` : !productsErr ? '<div class="empty">Chargement des articles Billit…</div>' : ''}
       </div>
       <div class="card"><h2>Marges des fournisseurs</h2>
         <p class="small muted" style="margin-top:0">Utilisée quand l'article n'a pas sa propre marge. Prix de vente = achat × (1 + marge).</p>
@@ -912,7 +942,7 @@ const Achats = (() => {
       const words = fold(artFind).split(/\s+/).filter(Boolean), all = $$('#artList > li');
       const hits = all.filter(li => (!artCat || li.dataset.cat === artCat) && words.every(w => li.dataset.find.includes(w)));
       all.forEach(li => li.classList.toggle('hidden', !hits.includes(li)));
-      if ($('#artMore')) $('#artMore').textContent = hits.length === all.length ? '' : `${hits.length} article(s) sur ${all.length}.`;
+      if ($('#artMore')) $('#artMore').textContent = hits.length === all.length ? `${all.length} article(s).` : `${hits.length} article(s) sur ${all.length}.`;
     };
     if ($('#artFind')) {
       $('#artFind').oninput = ev => { artFind = ev.target.value; filterArt(); };
@@ -1050,5 +1080,5 @@ const Achats = (() => {
   // Déconnexion : on oublie la copie locale (les données restent dans OneDrive).
   async function reset() { A = null; products = null; productsErr = ''; lastCheck = 0; msg = ''; await idb('readwrite', s => s.delete('data')); }
 
-  return { view, articles, sync, reset, readyClients, readyFor, ofBill, attach, detach, orderLines };
+  return { view, articles, sync, reset, todayBanner, readyClients, readyFor, ofBill, attach, detach, orderLines };
 })();
