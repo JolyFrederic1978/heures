@@ -255,8 +255,22 @@ async function sync() {
 const TITLES = { today: "Aujourd'hui", list: 'Interventions', billing: 'Facturer', archive: 'Archives', achats: 'Achats', articles: 'Articles', settings: 'Réglages' };
 // Achats et Articles : module séparé (achats.js), avec ses propres données et sa propre synchro.
 const VIEWS = () => ({ today: viewToday, list: viewList, billing: viewBilling, archive: viewArchive, achats: Achats.view, articles: Achats.articles, settings: viewSettings });
+// Bandeau de la version de développement, avec le dossier de données utilisé (en rouge s'il ne s'agit pas d'un dossier -DEV).
+function envBar() {
+  if (ENV === 'prod') return;
+  let bar = $('#envBar');
+  if (!bar) {
+    $('.topbar').insertAdjacentHTML('afterend', '<div id="envBar" class="envbar"></div>');
+    bar = $('#envBar'); document.body.classList.add('env-dev'); document.title = 'DEV – ' + document.title;
+  }
+  const folder = state?.onedrive?.folder || DEFAULT_FOLDER, real = !/-DEV\b/i.test(folder);
+  bar.classList.toggle('real', real);
+  bar.textContent = `DEV · données : ${folder}${real ? ' ⚠ DONNÉES RÉELLES' : ''} · Billit sandbox`;
+}
+
 function render() {
   clearInterval(tick);
+  envBar();
   // Accès : connexion Microsoft obligatoire, puis code PIN s'il est défini.
   const gate = !OneDrive.signedIn() ? 'login' : locked ? 'pin' : null;
   document.body.classList.toggle('locked', !!gate);
@@ -999,9 +1013,10 @@ function viewSettings() {
 
     <div class="card"><h2>Billit</h2>
       <div class="row">
-        <label class="check grow"><input type="radio" name="bMode" value="test" ${s.billit.mode !== 'live' ? 'checked' : ''}> Test (sandbox)</label>
-        <label class="check grow"><input type="radio" name="bMode" value="live" ${s.billit.mode === 'live' ? 'checked' : ''}> Réel</label>
+        <label class="check grow"><input type="radio" name="bMode" value="test" ${Billit.mode() !== 'live' ? 'checked' : ''}> Test (sandbox)</label>
+        <label class="check grow"><input type="radio" name="bMode" value="live" ${Billit.mode() === 'live' ? 'checked' : ''} ${ENV === 'prod' ? '' : 'disabled'}> Réel</label>
       </div>
+      ${ENV === 'prod' ? '' : '<p class="small"><span class="pill warn">Version de développement : Billit toujours en Test (sandbox), le mode Réel est bloqué.</span></p>'}
       ${['test', 'live'].map(k => `<div class="grid2">
         <div><label>Clé API (${k === 'live' ? 'réel' : 'test'})</label><input type="password" autocomplete="off" data-bk="${k}.apiKey" value="${esc(s.billit[k].apiKey)}"></div>
         <div><label>PartyID (${k === 'live' ? 'réel' : 'test'})</label><input inputmode="numeric" data-bk="${k}.partyId" value="${esc(s.billit[k].partyId)}"></div>
@@ -1048,7 +1063,7 @@ function viewSettings() {
 
   const saveOd = async () => {
     Object.assign(od, { clientId: $('#odClient').value.trim(), tenant: $('#odTenant').value.trim() || 'organizations',
-      folder: $('#odFolder').value.trim().replace(/^\/+|\/+$/g, '') || 'Compta/TimeSheet' });
+      folder: $('#odFolder').value.trim().replace(/^\/+|\/+$/g, '') || DEFAULT_FOLDER });
     state.published = {};
     await DB.save(state); render(); sync();
   };

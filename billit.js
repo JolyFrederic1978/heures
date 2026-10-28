@@ -6,7 +6,8 @@ const Billit = (() => {
   let cfg = () => ({});
 
   const keys = () => { const c = cfg(); return c[c.mode] || {}; };
-  const mode = () => cfg().mode || 'test';
+  // En développement (voir ENV dans db.js), toujours le sandbox, même si les réglages disent « Réel ».
+  const mode = () => ENV === 'prod' ? cfg().mode || 'test' : 'test';
 
   async function call(path, opts = {}) {
     const k = keys();
