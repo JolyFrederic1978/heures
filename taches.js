@@ -55,6 +55,41 @@ const Taches = (() => {
     if (id && id !== me().id) t.newFor = id; else delete t.newFor;
   }
 
+  // --- récurrence : mises à jour serveur, le 2ᵉ mercredi de chaque mois (taches.md, section 5) ---
+  // Une tâche par client avec serveur(s), assignée à Fred (administrateur), créée pour le mois en cours.
+  // ID fixe upd_<client>_<AAAA-MM> : pas de doublon entre appareils ; une tâche supprimée n'est pas recréée.
+  // Pas créée si la mise à jour du mois est déjà encodée (forfait « Mise à jour serveur »). Celles du mois suivant apparaissent le 1er.
+  const updId = (clientId, month) => `upd_${clientId}_${month}`;
+  function secondWednesday(month) {
+    const d = new Date(month + '-01T00:00');
+    d.setDate(1 + (3 - d.getDay() + 7) % 7 + 7);
+    return isoDate(d);
+  }
+  function ensureRecurring() {
+    const month = today().slice(0, 7);
+    let ch = false;
+    for (const c of activeClients().filter(x => x.server)) {
+      const id = updId(c.id, month);
+      if (task(id)) continue;
+      if (live().some(e => e.forfait === 'update' && e.clientId === c.id && e.date.startsWith(month))) continue;
+      T.tasks.push(touch({ id, kind: 'upd', recur: { every: 'month', nth: 2, weekday: 3 }, title: `Mise à jour serveur – ${c.name}`, notes: '',
+        clientId: c.id, assigneeId: ADMIN, createdBy: ADMIN, createdAt: Date.now(), due: secondWednesday(month), time: '', priority: 3,
+        status: 'open', checklist: [], comments: [], entryIds: [] }));
+      ch = true;
+    }
+    return ch;
+  }
+  // Forfait « Mise à jour serveur » enregistré (app.js) : relié à sa tâche du mois, qui est terminée.
+  async function forfaitSaved(e) {
+    await load();
+    const t = task(e.taskId) || task(updId(e.clientId, e.date.slice(0, 7)));
+    if (!t || t.deleted) return;
+    if (!(t.entryIds || []).includes(e.id)) t.entryIds = [...(t.entryIds || []), e.id];
+    if (isOpen(t)) Object.assign(t, { status: 'done', doneAt: Date.now(), doneBy: me().id });
+    if (!e.taskId) { e.taskId = t.id; touch(e); }
+    touch(t); await save(); scheduleSync();
+  }
+
   // --- synchronisation OneDrive (appelée par la synchro du pointage, app.js) ---
   function merge(remote) {
     const before = JSON.stringify(T.tasks);
@@ -71,6 +106,7 @@ const Taches = (() => {
     try {
       let cur = await OneDrive.get(dataPath());
       if (cur) redraw = merge(JSON.parse(cur.data));
+      redraw = ensureRecurring() || redraw;            // après la fusion : les tâches du mois déjà créées ailleurs sont connues
       for (let i = 0; i < 3; i++) {
         const body = JSON.stringify({ version: 1, tasks: T.tasks });
         if (cur && hash(cur.data) === hash(body)) break;            // rien de neuf à écrire
@@ -218,6 +254,8 @@ const Taches = (() => {
     f.innerHTML = `<h2>${t ? (isOpen(t) ? 'Tâche' : 'Tâche terminée') : 'Nouvelle tâche'}</h2>
       ${t ? `<p class="small muted" style="margin-top:0">Créée par ${esc(userName(t.createdBy))} le ${frDate(isoDate(new Date(t.createdAt || Date.now())))}
         ${t.doneAt ? ` · terminée le ${frDate(isoDate(new Date(t.doneAt)))} par ${esc(userName(t.doneBy))}` : ''}</p>` : ''}
+      ${t?.kind === 'upd' ? `<p class="small"><span class="pill">🔁 chaque mois, 2ᵉ mercredi</span> « Terminer » ouvre le forfait « Mise à jour serveur » du client ;
+        une fois enregistré, la tâche est terminée.</p>` : ''}
       <label>Titre</label><input id="kTitle" value="${esc(d.title)}" ${ro}>
       <label>Description</label><textarea id="kNotes" ${ro}>${esc(d.notes || '')}</textarea>
       <div class="grid2">
@@ -240,7 +278,7 @@ const Taches = (() => {
       <div class="actions" style="flex-wrap:wrap">
         ${t && edit ? '<button class="btn danger" id="kDel" style="margin-right:auto">Supprimer</button>' : ''}
         ${t && canTake(t) ? '<button class="btn" id="kTake">🙋 Me l\'attribuer</button>' : ''}
-        ${t && isOpen(t) && edit ? '<button class="btn" id="kTimer">▶ Chrono</button><button class="btn" id="kEntry">+ Intervention</button><button class="btn" id="kDone">✓ Terminer</button>' : ''}
+        ${t && isOpen(t) && edit ? (t.kind === 'upd' ? '' : '<button class="btn" id="kTimer">▶ Chrono</button><button class="btn" id="kEntry">+ Intervention</button>') + '<button class="btn" id="kDone">✓ Terminer</button>' : ''}
         ${t && !isOpen(t) && edit ? '<button class="btn" id="kReopen">↺ Rouvrir</button>' : ''}
         <button class="btn" value="cancel">${edit ? 'Annuler' : 'Fermer'}</button>
         ${edit ? '<button class="btn primary" id="kSave">Enregistrer</button>' : ''}
@@ -306,8 +344,11 @@ const Taches = (() => {
     $('#dlg').close(); tab = 'today'; persist(); toast('Chrono démarré');
   }
   // Intervention préremplie (client, description) ; le lien avec la tâche est fait à l'enregistrement (linkEntry, appelé par openEntry).
-  const addEntry = t => openEntry(null, { ...(t.clientId ? { clientId: t.clientId } : {}), description: t.title, taskId: t.id });
+  // Mise à jour serveur : forfait « Mise à jour serveur » du client (durée selon le nombre de serveurs) ; enregistré, il termine la tâche (forfaitSaved).
+  const addEntry = t => t.kind === 'upd' ? openForfait(null, 'update', { clientId: t.clientId, taskId: t.id })
+    : openEntry(null, { ...(t.clientId ? { clientId: t.clientId } : {}), description: t.title, taskId: t.id });
   async function finish(t) {
+    if (t.kind === 'upd' && !t.entryIds?.length) return addEntry(t);
     Object.assign(t, { status: 'done', doneAt: Date.now(), doneBy: me().id }); touch(t);
     await save(); scheduleSync();
     const f = $('#dlgForm');
@@ -349,5 +390,5 @@ const Taches = (() => {
 
   async function reset() { T = null; msg = ''; await idb('readwrite', s => s.delete('data')); }
 
-  return { view, sync, todayBanner, linkEntry, titleOf, open, reset, parseQuick };
+  return { view, sync, todayBanner, linkEntry, forfaitSaved, titleOf, open, reset, parseQuick };
 })();

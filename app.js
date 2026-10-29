@@ -603,7 +603,8 @@ const serverCount = c => c?.server ? Math.max(1, +c.servers || 1) : 0;
 // Mise à jour serveur : 15 min pour 1 serveur, 10 min par serveur au-delà.
 const updateMinutes = c => { const n = serverCount(c) || 1; return n === 1 ? 15 : 10 * n; };
 
-function openForfait(entry, kind) {
+// pre (module Tâches) : { clientId, taskId } = client proposé et tâche « Mise à jour serveur » à terminer.
+function openForfait(entry, kind, pre = {}) {
   kind = entry?.forfait || kind;
   const label = FORFAITS[kind];
   // Seulement les clients avec serveur(s) dont ce forfait n'a pas encore été encodé ce mois-ci
@@ -616,7 +617,7 @@ function openForfait(entry, kind) {
     return alert(n ? `${label} : déjà encodée ce mois-ci pour les ${n} client(s) avec serveur.`
       : 'Aucun client avec serveur : coche « Serveur(s) » dans la fiche client (Réglages).');
   }
-  const c0 = entry ? client(entry.clientId) : clients.find(c => c.id === state.lastClientId) || clients[0];
+  const c0 = entry ? client(entry.clientId) : clients.find(c => c.id === pre.clientId) || clients.find(c => c.id === state.lastClientId) || clients[0];
   const e = entry || { clientId: c0.id, date: today(), minutes: kind === 'update' ? updateMinutes(c0) : 0,
     description: label, onSite: false, ...newWho(c0) };
   const b = e.billId && bill(e.billId);
@@ -657,12 +658,15 @@ function openForfait(entry, kind) {
     if (b && !confirm('Cette intervention est déjà facturée. Modifier quand même l\'archive ?')) return;
     const data = { clientId: $('#kClient').value, date: $('#kDate').value, start: '', end: '', minutes, pauseMin: 0,
       description: $('#kDesc').value.trim(), onSite: $('#kSite').checked, ...readWho('k'), install: '', forfait: kind };
+    let saved = entry;
     if (entry) Object.assign(touch(entry), data);
-    else state.entries.push(touch({ id: uid('e'), billId: null, ...data }));
+    else state.entries.push(saved = touch({ id: uid('e'), billId: null, ...data, ...(pre.taskId && data.clientId === pre.clientId ? { taskId: pre.taskId } : {}) }));
     state.lastClientId = data.clientId;
+    // Mise à jour serveur : la tâche du mois de ce client (module Tâches) est reliée et terminée.
+    if (!entry && kind === 'update') await Taches.forfaitSaved(saved);
     dlg.close(); await persist(); toast('Enregistré');
   };
-  dlg.showModal();
+  if (!dlg.open) dlg.showModal();
   if (kind === 'maint' && !entry) $('#kDur').focus();
 }
 
