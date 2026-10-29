@@ -1,4 +1,4 @@
-// Environnement : production = gestion.onelevelup.be (OVH) ; toute autre adresse (dev-gestion sur GitHub, localhost) = développement.
+// Environnement : production = gestion.onelevelup.be (OVH) ; toute autre adresse (gestion-dev sur GitHub, localhost) = développement.
 // En développement : données dans Compta-DEV, Billit en sandbox uniquement, bandeau DEV.
 const ENV = location.hostname === 'gestion.onelevelup.be' ? 'prod' : 'dev';
 const DEFAULT_FOLDER = ENV === 'prod' ? 'Compta/TimeSheet' : 'Compta-DEV/TimeSheet';

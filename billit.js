@@ -5,17 +5,18 @@ const Billit = (() => {
   const WEB = { test: 'https://my.sandbox.billit.be', live: 'https://my.billit.eu' };
   let cfg = () => ({});
 
-  const keys = () => { const c = cfg(); return c[c.mode] || {}; };
   // En développement (voir ENV dans db.js), toujours le sandbox, même si les réglages disent « Réel ».
   const mode = () => ENV === 'prod' ? cfg().mode || 'test' : 'test';
+  const keys = (m = mode()) => cfg()[m] || {};
 
-  async function call(path, opts = {}) {
-    const k = keys();
-    if (!k.apiKey || (!k.partyId && !opts.noParty)) throw new Error(`Clé API / PartyID Billit (${mode() === 'live' ? 'réel' : 'test'}) manquants dans Réglages.`);
+  // m : mode du compte appelé (par défaut le mode courant). Seule readLive() appelle 'live' en développement, et uniquement en lecture.
+  async function call(path, opts = {}, m = mode()) {
+    const k = keys(m);
+    if (!k.apiKey || (!k.partyId && !opts.noParty)) throw new Error(`Clé API / PartyID Billit (${m === 'live' ? 'réel' : 'test'}) manquants dans Réglages.`);
     const headers = { ApiKey: k.apiKey, Accept: 'application/json' };
     if (k.partyId) headers.PartyID = k.partyId;
     if (opts.body) headers['Content-Type'] = 'application/json';
-    const r = await fetch(API[mode()] + path, { ...opts, headers });
+    const r = await fetch(API[m] + path, { ...opts, headers });
     const text = await r.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch (_) { data = text; }
@@ -31,6 +32,17 @@ const Billit = (() => {
   const odata = f => '?$filter=' + encodeURIComponent(f);
 
   const partyName = p => p.Name || p.CommercialName || p.DisplayName || '';
+  // Toutes les pages d'une liste (120 par page, lien NextPageLink).
+  async function pages(path, m) {
+    const all = [];
+    for (let i = 0; path && i < 50; i++) {
+      const d = await call(path, {}, m);
+      all.push(...items(d));
+      const next = d?.NextPageLink;
+      path = !next ? null : next.startsWith('http') ? next.replace(/^https?:\/\/[^/]+/, '') : next.startsWith('/') ? next : '/v1/' + next;
+    }
+    return all;
+  }
 
   return {
     configure(fn) { cfg = fn; },
@@ -56,20 +68,26 @@ const Billit = (() => {
     saveProduct: item => call('/v1/products', { method: 'POST', body: JSON.stringify(item) }),
     getOrder: id => call('/v1/orders/' + id),
     // Factures d'achat (OrderDirection Cost) modifiées depuis la date « AAAA-MM-JJ » ; toutes les pages (120 par page).
-    async costInvoices(since) {
-      let path = '/v1/orders' + odata(`OrderType eq 'Invoice' and OrderDirection eq 'Cost' and LastModified ge DateTime'${since}'`), all = [];
-      for (let i = 0; path && i < 50; i++) {
-        const d = await call(path);
-        all.push(...items(d));
-        const next = d?.NextPageLink;
-        path = !next ? null : next.startsWith('http') ? next.replace(/^https?:\/\/[^/]+/, '') : next.startsWith('/') ? next : '/v1/' + next;
-      }
-      return all;
-    },
+    costInvoices: since => pages('/v1/orders' + odata(`OrderType eq 'Invoice' and OrderDirection eq 'Cost' and LastModified ge DateTime'${since}'`)),
     // Fichier (PDF de la facture, e-facture XML…) : { FileName, MimeType, buffer }.
     async file(id) {
       const f = await call('/v1/files/' + encodeURIComponent(id));
       return { FileName: f.FileName, MimeType: f.MimeType, buffer: Uint8Array.from(atob(f.FileContent || ''), c => c.charCodeAt(0)).buffer };
+    },
+
+    // ---- Copie Billit réel → sandbox (version de développement seulement, voir copie-billit.js) ----
+    odata,
+    // Sandbox (mode courant en dev) : listes complètes et création de clients / fournisseurs (réponse = PartyID).
+    list: path => pages(path),
+    saveParty: party => call('/v1/parties', { method: 'POST', body: JSON.stringify(party) }),
+    fileRaw: id => call('/v1/files/' + encodeURIComponent(id)),
+    // Billit réel en LECTURE SEULE : requêtes GET uniquement (aucune option transmise), pour copier vers le sandbox.
+    live: {
+      ready: () => !!keys('live').apiKey,
+      account: () => call('/v1/account/accountInformation', { noParty: true }, 'live'),
+      setPartyId(id) { keys('live').partyId = String(id); },
+      get: path => call(path, {}, 'live'),
+      list: path => pages(path, 'live')
     }
   };
 })();

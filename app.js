@@ -1022,6 +1022,12 @@ function viewSettings() {
         <div><label>PartyID (${k === 'live' ? 'réel' : 'test'})</label><input inputmode="numeric" data-bk="${k}.partyId" value="${esc(s.billit[k].partyId)}"></div>
       </div>`).join('')}
       <div class="row" style="margin-top:10px"><button class="btn" id="bTest">Tester la connexion</button><span class="small" id="bTestRes"></span></div>
+      ${ENV === 'prod' ? '' : `<h3 style="margin:16px 0 4px">Copier Billit réel → sandbox</h3>
+      <p class="small muted">Clients, articles (catégories par leur nom) et factures de vente et d'achat des 3 derniers mois, avec leurs fournisseurs.
+        Le Billit réel est seulement lu (clé « réel » ci-dessus). Ventes copiées en Projet ; clients et fournisseurs sans e-mail ni Peppol.
+        Relancer ne crée pas de doublon. Pour que l'onglet Achats importe les factures d'achat copiées, ouvre-le une fois <em>avant</em> la copie.</p>
+      <button class="btn" id="cpGo">Préparer la copie</button>
+      <pre class="recap hidden" id="cpLog"></pre>`}
       <p class="small muted">Clé API : dans Billit, menu de ton profil → API. Laisse le PartyID vide puis clique « Tester la connexion » : il est retrouvé automatiquement. Ils sont enregistrés dans tes données OneDrive
         (protégées par ta connexion Microsoft et ton code PIN), jamais sur GitHub. La clé donne accès à tout ton Billit : tu peux la révoquer à tout moment dans Billit.</p>
     </div>
@@ -1101,6 +1107,17 @@ function viewSettings() {
       const co = companies.find(c => String(c.PartyID) === String(k.partyId)) || companies[0];
       out.innerHTML = `<span class="pill ok">✓ Connecté (${esc(billitModeLabel(Billit.mode()))}) : ${esc(co?.Name || a?.Email || 'OK')} · PartyID ${esc(k.partyId)}</span>`;
     } catch (e) { out.innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
+  };
+  if ($('#cpGo')) $('#cpGo').onclick = async () => {
+    const out = $('#cpLog'), btn = $('#cpGo'), log = t => { out.textContent += t + '\n'; out.scrollTop = out.scrollHeight; };
+    out.textContent = ''; out.classList.remove('hidden'); btn.disabled = true;
+    try {
+      const plan = await CopieBillit.prepare(3, log);
+      log(CopieBillit.summary(plan));
+      if (!confirm(CopieBillit.summary(plan) + '\n\nLancer la copie vers le sandbox ?')) return log('Copie annulée.');
+      await CopieBillit.run(plan, log);
+    } catch (e) { log('Erreur : ' + e.message); }
+    finally { btn.disabled = false; }
   };
   $('#pinSet').onclick = () => editPin();
   if ($('#pinDel')) $('#pinDel').onclick = async () => {

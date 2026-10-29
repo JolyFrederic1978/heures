@@ -1,8 +1,8 @@
 ﻿// Cache-first : l'app fonctionne hors ligne. Les appels Microsoft / OneDrive ne sont jamais mis en cache.
 // Incrémenter CACHE à chaque mise à jour publiée (même nom = le navigateur garde l'ancienne copie).
-const CACHE = 'heures-v36';
+const CACHE = 'heures-v37';
 const LOCAL = [
-  './', 'index.html', 'styles.css', 'db.js', 'csv.js', 'xlsx.js', 'onedrive.js', 'billit.js', 'pdf-fournisseurs.js', 'achats.js', 'app.js',
+  './', 'index.html', 'styles.css', 'db.js', 'csv.js', 'xlsx.js', 'onedrive.js', 'billit.js', 'copie-billit.js', 'pdf-fournisseurs.js', 'achats.js', 'app.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
   'lib/pdf.min.mjs', 'lib/pdf.worker.min.mjs', 'lib/exceljs.min.js'
 ];
