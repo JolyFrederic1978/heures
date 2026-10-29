@@ -298,6 +298,7 @@ async function sync() {
     setSync('ok');
     if (changed && !$('#dlg').open) render();
     Achats.sync();                          // gère ses propres erreurs, affichées dans l'onglet Achats
+    Taches.sync();                          // idem, onglet Tâches
   } catch (e) {
     if (e instanceof OneDrive.NeedLogin) { setSync('login', 'Session expirée : reconnecte-toi.'); render(); }
     else setSync('err', e.message);
@@ -308,9 +309,9 @@ async function sync() {
 }
 
 // ---------- rendu ----------
-const TITLES = { today: "Aujourd'hui", list: 'Interventions', billing: 'Facturer', archive: 'Archives', achats: 'Achats', articles: 'Articles', admin: 'Administration', settings: 'Réglages' };
-// Achats et Articles : module séparé (achats.js), avec ses propres données et sa propre synchro.
-const VIEWS = () => ({ today: viewToday, list: viewList, billing: viewBilling, archive: viewArchive, achats: Achats.view, articles: Achats.articles, admin: viewAdmin, settings: viewSettings });
+const TITLES = { today: "Aujourd'hui", taches: 'Tâches', list: 'Interventions', billing: 'Facturer', archive: 'Archives', achats: 'Achats', articles: 'Articles', admin: 'Administration', settings: 'Réglages' };
+// Achats et Articles (achats.js), Tâches (taches.js) : modules séparés, avec leurs propres données et leur propre synchro.
+const VIEWS = () => ({ today: viewToday, taches: Taches.view, list: viewList, billing: viewBilling, archive: viewArchive, achats: Achats.view, articles: Achats.articles, admin: viewAdmin, settings: viewSettings });
 // Bandeau de la version de développement, avec le dossier de données utilisé (en rouge s'il ne s'agit pas d'un dossier -DEV).
 function envBar() {
   if (ENV === 'prod') return;
@@ -346,6 +347,7 @@ function entryLi(e, { showDate = false, showBill = true } = {}) {
       <div><strong>${esc(client(e.clientId).name)}</strong> ${e.onSite ? '<span class="pill">sur site</span>' : '<span class="pill">à distance</span>'}
         ${cmdOf(e) !== HOME ? `<span class="pill warn">${esc(soc(cmdOf(e)).name)}</span>` : ''}
         ${techOf(e) !== me().id ? `<span class="pill">👤 ${esc(user(techOf(e)).name)}</span>` : ''}
+        ${e.taskId ? '<span class="pill" title="Faite pour une tâche">📋</span>' : ''}
         ${showBill && b ? `<span class="pill ok">facturé ${frDate(b.date)}${b.ref ? ' · ' + esc(b.ref) : ''}</span>` : ''}</div>
       <div class="small muted">${showDate ? frDate(e.date) + ' · ' : ''}${e.forfait || !e.start ? 'forfait' : `${e.start}–${e.end}`}${e.pauseMin ? ` · pause ${fmtDur(e.pauseMin)}` : ''}${e.install ? ' · ' + esc(e.install) : ''}</div>
       ${e.description ? `<div class="small">${esc(e.description)}</div>` : ''}
@@ -399,6 +401,7 @@ function viewToday() {
   const dayLabel = new Date().toLocaleDateString('fr-BE', { weekday: 'short', day: '2-digit', month: '2-digit' });
   $('#view').innerHTML = `
     <div class="daybar"><span>Aujourd'hui</span><span>${esc(dayLabel)}</span></div>
+    <div id="tkNotif"></div>
     <div id="achNotif"></div>
     <div class="card timer">
       ${t ? `
@@ -446,6 +449,7 @@ function viewToday() {
   $('#goBill').onclick = () => { tab = 'billing'; render(); };
   bindEdits();
   Achats.todayBanner($('#achNotif'));         // nouvelles factures fournisseurs (module Achats)
+  Taches.todayBanner($('#tkNotif'));          // tâches du jour, en retard, à prendre (module Tâches)
 
   if (t) {
     const hms = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`; };
@@ -478,7 +482,7 @@ function viewToday() {
       openEntry(null, {
         clientId: t.clientId, date: isoDate(start), start: hhmm(start), end: hhmm(end), pauseMin,
         minutes: Math.max(1, Math.round(timerElapsed(t) / 60000)), description: t.description,
-        onSite: t.onSite, cmdId: cmdOf(t), techId: techOf(t), alescom: cmdOf(t) === 'alescom'
+        onSite: t.onSite, cmdId: cmdOf(t), techId: techOf(t), alescom: cmdOf(t) === 'alescom', ...(t.taskId ? { taskId: t.taskId } : {})
       }, true);
     };
   } else if ($('#tStart')) {
@@ -499,7 +503,9 @@ function viewToday() {
 // draft : valeurs déjà saisies à réafficher (retour de la fiche « + Nouveau client… ») ; l'intervention elle-même n'est pas modifiée avant « Enregistrer ».
 function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft = null) {
   if (entry?.forfait) return openForfait(entry);
-  const c0 = state.clients.find(c => c.id === state.lastClientId && !c.deleted) || activeClients()[0];
+  // Client proposé : celui du preset (tâche, facture Alescom…), sinon le dernier utilisé ; le commanditaire suit ce client.
+  const c0 = (preset.clientId && state.clients.find(c => c.id === preset.clientId && !c.deleted))
+    || state.clients.find(c => c.id === state.lastClientId && !c.deleted) || activeClients()[0];
   const e = { ...(entry || {
     clientId: c0?.id, date: today(), start: hhmm(new Date(Date.now() - 3600e3)), end: hhmm(new Date()), minutes: 60, pauseMin: 0,
     description: '', install: '', onSite: false, ...newWho(c0), ...preset
@@ -513,6 +519,7 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft 
     <h2>${entry ? 'Modifier' : fromTimer ? 'Fin du chrono' : 'Nouvelle'} intervention</h2>
     ${b ? `<p class="small"><span class="pill ok">facturée le ${frDate(b.date)}${b.ref ? ' · ' + esc(b.ref) : ''}</span>
       ${b.key !== 'import' ? '<button class="link" id="fBill">Voir la facture</button>' : ''}</p>` : ''}
+    ${e.taskId ? `<p class="small">📋 Tâche : <button class="link" id="fTask">${esc(Taches.titleOf(e.taskId) || "voir la tâche d'origine")}</button></p>` : ''}
     <label>Client</label>
     <select id="fClient">${clientOptions(e.clientId)}<option value="__new">+ Nouveau client…</option></select>
     <div class="grid2">
@@ -535,6 +542,7 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft 
     </div>`;
 
   if ($('#fBill')) $('#fBill').onclick = () => { dlg.close(); showBill(b); };
+  if ($('#fTask')) $('#fTask').onclick = () => Taches.open(e.taskId);
   const flat = () => !!$('#fFlat')?.checked;
   const pause = () => flat() ? 0 : parseDur($('#fPause').value) || 0;
   const upDur = () => $('#fDur').value = fmtDur(Math.max(0, diffMin($('#fStart').value, $('#fEnd').value) - pause()));
@@ -579,9 +587,10 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft 
     if (b && !confirm('Cette intervention est déjà facturée. Modifier quand même l\'archive ?')) return;
     let saved = entry;
     if (entry) Object.assign(touch(entry), data);
-    else state.entries.push(saved = touch({ id: uid('e'), billId: null, ...data }));
+    else state.entries.push(saved = touch({ id: uid('e'), billId: null, ...data, ...(e.taskId ? { taskId: e.taskId } : {}) }));
     state.lastClientId = clientId;
     if (fromTimer) setTimer(null);
+    if (!entry && e.taskId) await Taches.linkEntry(e.taskId, saved.id);     // intervention faite pour une tâche (module Tâches)
     if (!entry && onSaved) await onSaved(saved);
     dlg.close(); await persist(); toast('Enregistré');
   };
@@ -1033,9 +1042,10 @@ function viewArchivedEntry(e) {
       ${row('Montant HTVA', eur(entryAmount(e)))}
     </table>
     <p class="small muted">Les interventions facturées ne se modifient pas. Pour corriger : « Voir la facture » → « Annuler la facturation ».</p>
-    <div class="actions">${b && b.key !== 'import' ? '<button class="btn" id="vBill">Voir la facture</button>' : ''}
+    <div class="actions">${e.taskId ? '<button class="btn" id="vTask">📋 Tâche d\'origine</button>' : ''}${b && b.key !== 'import' ? '<button class="btn" id="vBill">Voir la facture</button>' : ''}
       <button class="btn primary" id="vOk">Fermer</button></div>`;
   if ($('#vBill')) $('#vBill').onclick = () => showBill(b);
+  if ($('#vTask')) $('#vTask').onclick = () => Taches.open(e.taskId);
   $('#vOk').onclick = ev => { ev.preventDefault(); dlg.close(); };
   if (!dlg.open) dlg.showModal();
 }
@@ -1509,6 +1519,7 @@ async function pinHash(pin, salt) {
 async function signOut() {
   OneDrive.logout();
   await Achats.reset();
+  await Taches.reset();
   const od = state.onedrive;
   state = DB.defaults(); state.onedrive = od;
   await DB.save(state);

@@ -39,6 +39,19 @@ body.locked .tabs, body.locked #syncPill { display: none; }
 /* 8 onglets (avec Admin) : texte plus petit sur téléphone pour qu'il tienne. */
 .tabs button { min-width: 0; overflow: hidden; white-space: nowrap; }
 @media (max-width: 440px) { .tabs button { font-size: 9px; letter-spacing: -.2px; } }
+/* Libellés courts (Auj., Interv.) sur téléphone : 9 onglets avec Tâches et Admin. */
+.tabs .sh { display: none; }
+@media (max-width: 520px) { .tabs .lg { display: none; } .tabs .sh { display: inline; } }
+
+/* Module Tâches : rond de la case « terminer » coloré selon la priorité. */
+.tklist li.tk { align-items: center; }
+.tkdone { flex: none; width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--muted); background: none; color: #fff;
+  font-size: 12px; line-height: 1; cursor: pointer; padding: 0; }
+.tk.p1 .tkdone { border-color: #d1453b; } .tk.p2 .tkdone { border-color: #eb8909; } .tk.p3 .tkdone { border-color: #246fe0; }
+.tk.done .tkdone { background: var(--ok, #2e7d4f); border-color: var(--ok, #2e7d4f); }
+.tk.done strong { text-decoration: line-through; color: var(--muted); }
+.tk .late { color: var(--danger); font-weight: 600; }
+.tk .now { color: var(--accent); font-weight: 600; }
 
 .daybar { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px;
   background: var(--accent); color: #fff; border-radius: 10px; padding: 10px 14px; font-weight: 600; }
