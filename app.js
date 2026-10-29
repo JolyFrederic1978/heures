@@ -41,6 +41,35 @@ function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.remove('hidden');
   clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.add('hidden'), 2800);
 }
+// --- dictée vocale : reconnaissance du navigateur (Chrome → Google, Edge → Microsoft ; absente de Firefox : pas de bouton) ---
+// mic(id) : bouton 🎤 qui ajoute le texte dicté au champ id ; submit = envoie ensuite le formulaire du champ (ajout rapide des tâches).
+const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+const mic = (id, submit) => Speech ? `<button type="button" class="btn chip mic" data-mic="${id}" ${submit ? 'data-mic-submit' : ''} title="Dicter">🎤</button>` : '';
+const lblMic = (text, id) => `<div class="lblmic"><label>${text}</label>${mic(id)}</div>`;
+let dictation = null;
+document.addEventListener('click', ev => {
+  const b = ev.target.closest('[data-mic]'); if (!b) return;
+  ev.preventDefault(); ev.stopPropagation();
+  if (dictation) { dictation.stop(); return; }
+  const el = document.getElementById(b.dataset.mic); if (!el || el.disabled) return;
+  const r = new Speech(); r.lang = 'fr-BE'; r.interimResults = true; r.continuous = false;
+  const base = el.value.replace(/\s+$/, ''), cap = !base || /[.!?]$/.test(base);
+  let heard = '';
+  r.onresult = e => {
+    heard = [...e.results].map(x => x[0].transcript).join('').trim();
+    if (cap) heard = heard.charAt(0).toUpperCase() + heard.slice(1);
+    el.value = base + (base && heard ? ' ' : '') + heard;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  r.onerror = e => toast(e.error === 'not-allowed' ? 'Micro refusé : autorise-le dans le navigateur.' : e.error === 'no-speech' ? 'Rien entendu.' : 'Dictée impossible (' + e.error + ').');
+  r.onend = () => {
+    dictation = null; b.classList.remove('on');
+    if (!heard) return;
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    if (b.hasAttribute('data-mic-submit')) el.form?.requestSubmit();
+  };
+  dictation = r; b.classList.add('on'); r.start();
+}, true);
 function download(blob, name) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = name;
@@ -331,6 +360,7 @@ function render() {
   // Accès : connexion Microsoft obligatoire, puis code PIN s'il est défini.
   const gate = !OneDrive.signedIn() ? 'login' : locked ? 'pin' : null;
   document.body.classList.toggle('locked', !!gate);
+  document.body.classList.toggle('dashwide', !gate && tab === 'today' && wideToday());
   if (gate) { if ($('#dlg').open) $('#dlg').close(); $('#viewTitle').textContent = 'OLU Gestion'; return gate === 'login' ? viewLogin() : viewPin(); }
   // Onglet Administration : administrateurs seulement.
   $('.tabs [data-tab="admin"]').classList.toggle('hidden', !isAdmin());
@@ -388,6 +418,38 @@ const timerPausedMs = t => (t.pausedMs || 0);
 const timerElapsed = t => Math.max(0, timerNow(t) - new Date(t.start) - timerPausedMs(t));
 
 // ---- Aujourd'hui ----
+// Tableau de bord à partir de 1100 px de large (PC) ; en dessous, la page d'origine.
+const WIDE = window.matchMedia('(min-width: 1100px)');
+const wideToday = () => WIDE.matches;
+WIDE.addEventListener('change', () => { if (tab === 'today' && !$('#dlg').open && OneDrive.signedIn() && !locked) render(); });
+
+// Barre latérale du tableau de bord : heures, à facturer, mises à jour serveur du mois, achats.
+function dashSide(todays, week, sum) {
+  const d = today(), month = d.slice(0, 7), day = +d.slice(8);
+  const pm = new Date(d + 'T00:00'); pm.setDate(1); pm.setMonth(pm.getMonth() - 1);
+  const prev = isoDate(pm).slice(0, 7), prevName = pm.toLocaleDateString('fr-BE', { month: 'short' });
+  const mine = sum(live().filter(e => e.date.startsWith(month)));
+  // Comparaison avec la même période du mois précédent (du 1er au même jour).
+  const before = sum(live().filter(e => e.date.startsWith(prev) && +e.date.slice(8) <= day));
+  const diff = before ? Math.round((mine - before) / before * 100) : null;
+  const { groups } = billingGroups(), total = groups.reduce((s, g) => s + g.amount, 0);
+  const oldest = groups.filter(g => g.age >= 20).sort((a, b) => b.age - a.age)[0];
+  const srv = activeClients().filter(c => c.server);
+  const done = srv.filter(c => live().some(e => e.forfait === 'update' && e.clientId === c.id && e.date.startsWith(month)));
+  const left = srv.filter(c => !done.includes(c));
+  const monthName = new Date(d + 'T00:00').toLocaleDateString('fr-BE', { month: 'long' });
+  return `
+    <div class="dtile"><div class="l">Heures</div>
+      <div class="dgrid"><div><b>${fmtDur(sum(todays))}</b>aujourd'hui</div><div><b>${fmtDur(sum(week))}</b>semaine</div><div><b>${fmtDur(mine)}</b>${esc(monthName)}</div></div>
+      ${diff !== null ? `<div class="small ${diff >= 0 ? 'okc' : 'muted'}">${diff >= 0 ? '+' : ''}${diff} % par rapport au début de ${esc(prevName)}</div>` : ''}</div>
+    <div class="dtile tap" data-dgo="billing"><div class="l">À facturer ›</div><div class="v">${eur(total)}</div>
+      <div class="small muted">${groups.length} client(s)${oldest ? ` · <span class="warnc">${esc(oldest.info.label)} depuis ${oldest.age} j</span>` : ''}</div></div>
+    ${srv.length ? `<div class="dtile"><div class="l">Mises à jour serveur · ${esc(monthName)}</div><div class="v">${done.length}/${srv.length}</div>
+      <div class="dbar"><i style="width:${done.length / srv.length * 100}%"></i></div>
+      <div class="small muted">${left.length ? 'Reste : ' + left.slice(0, 8).map(c => esc(c.name)).join(', ') + (left.length > 8 ? '…' : '') : 'Toutes faites ✓'}</div></div>` : ''}
+    <div class="dtile tap" data-dgo="achats" id="achTile"><div class="l">Achats ›</div><div class="small muted">Chargement…</div></div>`;
+}
+
 function viewToday() {
   const t = state.timer, d = today();
   const todays = sortEntries(live().filter(e => e.date === d));
@@ -399,10 +461,7 @@ function viewToday() {
 
   // Bandeau du jour (ex. « dim. 25/10 »).
   const dayLabel = new Date().toLocaleDateString('fr-BE', { weekday: 'short', day: '2-digit', month: '2-digit' });
-  $('#view').innerHTML = `
-    <div class="daybar"><span>Aujourd'hui</span><span>${esc(dayLabel)}</span></div>
-    <div id="tkNotif"></div>
-    <div id="achNotif"></div>
+  const timerCard = `
     <div class="card timer">
       ${t ? `
         <div><strong>${esc(client(t.clientId).name)}</strong> ${t.pausedAt ? '<span class="pill warn">en pause</span>' : ''}</div>
@@ -412,14 +471,14 @@ function viewToday() {
           <div><label>Début</label><input type="time" id="tStartAt" value="${hhmm(new Date(t.start))}"></div>
           <div><label>Pause déduite (H:MM)</label><input id="tPauseMin" value="${fmtDur(Math.round(timerPausedMs(t) / 60000))}"></div>
         </div>
-        <input id="tDesc" placeholder="Description (optionnel)" value="${esc(t.description || '')}" style="margin-top:10px">
+        <div class="row" style="margin-top:10px"><input id="tDesc" class="grow" placeholder="Description (optionnel)" value="${esc(t.description || '')}">${mic('tDesc')}</div>
         ${flags(t, 't')}
         <div class="row"><button class="btn" id="tCancel">Annuler</button>
           <button class="btn grow" id="tPause">${t.pausedAt ? '▶ Fin de pause' : '❚❚ Pause'}</button>
           <button class="btn primary grow" id="tStop">■ Arrêter</button></div>`
       : lastC ? `
         <select id="tClient">${clientOptions(lastC.id)}</select>
-        <input id="tDesc0" placeholder="Description de l'intervention" style="margin-top:10px">
+        <div class="row" style="margin-top:10px"><input id="tDesc0" class="grow" placeholder="Description de l'intervention">${mic('tDesc0')}</div>
         ${flags({ onSite: false, ...newWho(lastC) }, 't')}
         <div class="row" style="justify-content:center;margin-bottom:10px">
           <span class="small muted">Début</span>
@@ -428,28 +487,47 @@ function viewToday() {
         </div>
         <button class="btn primary big" id="tStart">▶ Démarrer le chrono</button>`
       : `<p class="muted">Commence par ajouter un client dans Réglages.</p>`}
-    </div>
+    </div>`;
+  const buttons = `
     <button class="btn big" id="addManual">+ Ajouter une intervention</button>
     <div class="grid2" style="margin-top:10px">
       <button class="btn" id="addMaint">🛠 Maintenance serveur</button>
       <button class="btn" id="addUpd">⟳ Mise à jour serveur</button>
-    </div>
+    </div>`;
+  const dayList = todays.length ? `<ul class="list">${todays.map(e => entryLi(e)).join('')}</ul>` : '<div class="empty">Rien pour l\'instant.</div>';
+
+  // Grand écran (PC) : mise en page « journée + barre latérale » (maquette B choisie par Fred le 29/10) ; téléphone : page d'origine.
+  $('#view').innerHTML = wideToday() ? `
+    <div class="daybar"><span>Aujourd'hui</span><span>${esc(dayLabel)}</span></div>
+    <div class="dash">
+      <div class="dmain">
+        <div id="tkNotif"></div><div id="achNotif"></div>
+        ${timerCard}${buttons}
+        <div class="card" style="margin-top:12px"><h2>Interventions du jour <span class="small muted" style="float:right">${fmtDur(sum(todays))}</span></h2>${dayList}</div>
+        <div class="card"><h2>Tâches du jour et en retard</h2><div id="tkDay"></div></div>
+      </div>
+      <aside class="dside">${dashSide(todays, week, sum)}</aside>
+    </div>` : `
+    <div class="daybar"><span>Aujourd'hui</span><span>${esc(dayLabel)}</span></div>
+    <div id="tkNotif"></div>
+    <div id="achNotif"></div>
+    ${timerCard}${buttons}
     <div class="kpis" style="margin-top:12px">
       <div class="kpi"><div class="v">${fmtDur(sum(todays))}</div><div class="l">aujourd'hui</div></div>
       <div class="kpi"><div class="v">${fmtDur(sum(week))}</div><div class="l">cette semaine</div></div>
       <div class="kpi tap" id="goBill"><div class="v">${eur(open.reduce((s, e) => s + entryAmount(e), 0))}</div><div class="l">à facturer (${open.length} interv.) →</div></div>
     </div>
-    <div class="card"><h2>Interventions du jour</h2>
-      ${todays.length ? `<ul class="list">${todays.map(e => entryLi(e)).join('')}</ul>` : '<div class="empty">Rien pour l\'instant.</div>'}
-    </div>`;
+    <div class="card"><h2>Interventions du jour</h2>${dayList}</div>`;
 
   $('#addManual').onclick = () => openEntry(null);
   $('#addMaint').onclick = () => openForfait(null, 'maint');
   $('#addUpd').onclick = () => openForfait(null, 'update');
-  $('#goBill').onclick = () => { tab = 'billing'; render(); };
+  $$('#goBill, [data-dgo]').forEach(b => b.onclick = () => { tab = b.dataset.dgo || 'billing'; render(); });
   bindEdits();
   Achats.todayBanner($('#achNotif'));         // nouvelles factures fournisseurs (module Achats)
   Taches.todayBanner($('#tkNotif'));          // tâches du jour, en retard, à prendre (module Tâches)
+  if ($('#tkDay')) Taches.dayList($('#tkDay'));
+  if ($('#achTile')) Achats.dashTile($('#achTile'));
 
   if (t) {
     const hms = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return `${Math.floor(s / 3600)}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`; };
@@ -532,7 +610,7 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft 
       <div><label>Fin</label><input type="time" id="fEnd" value="${e.end}"></div>
       <div><label>Pause</label><input id="fPause" value="${e.pauseMin ? fmtDur(e.pauseMin) : ''}" placeholder="0:00"></div>
     </div>
-    <label>Description</label><textarea id="fDesc">${esc(e.description)}</textarea>
+    ${lblMic('Description', 'fDesc')}<textarea id="fDesc">${esc(e.description)}</textarea>
     ${flags(e, 'f')}
     <label>Installation / réinstallation (optionnel)</label><input id="fInst" value="${esc(e.install)}" placeholder="ex. Réinstallation PC">
     <div class="actions">
@@ -634,7 +712,7 @@ function openForfait(entry, kind, pre = {}) {
       <div><label>Durée (H:MM)</label><input id="kDur" value="${e.minutes ? fmtDur(e.minutes) : ''}" placeholder="ex. 1:30"></div>
     </div>
     <p class="small muted" id="kHint">${esc(hint(client(e.clientId)))}</p>
-    <label>Description</label><textarea id="kDesc">${esc(e.description)}</textarea>
+    ${lblMic('Description', 'kDesc')}<textarea id="kDesc">${esc(e.description)}</textarea>
     ${flags(e, 'k')}
     <div class="actions">
       ${entry && !b ? '<button class="btn danger" id="kDel" style="margin-right:auto">Supprimer</button>' : ''}
@@ -699,14 +777,12 @@ function viewList() {
 
 // ---- Facturer ----
 let billingTarget = null, billUntil = today(), excluded = new Set(), excludedAch = new Set();
-function viewBilling() {
+// À facturer, par client / commanditaire (onglet Facturer et tableau de bord).
+function billingGroups() {
   // Seulement ce que One Level UP facture (pas le travail d'un autre technicien pour un autre commanditaire).
   const open = live().filter(e => !e.billId && billable(e));
   // Un client sans intervention en attente apparaît aussi s'il a des achats prêts à refacturer.
   const keys = [...new Set([...open.map(groupKey), ...Achats.readyClients().map(id => 'c:' + id)])];
-  if (billingTarget && !keys.includes(billingTarget)) billingTarget = null;
-  if (billingTarget) return viewBillingTarget(billingTarget, open.filter(e => groupKey(e) === billingTarget));
-
   const groups = keys.map(k => {
     const info = groupInfo(k), es = sortEntries(open.filter(e => groupKey(e) === k));
     const ach = k.startsWith('c:') ? Achats.readyFor(k.slice(2)) : [], t = totals(es, info.rates);
@@ -714,6 +790,14 @@ function viewBilling() {
     const age = es.length ? Math.round((new Date(today() + 'T00:00') - new Date(es[0].date + 'T00:00')) / 864e5) : 0;
     return { info, es, ach, t, achAmount: achSum(ach), amount: t.amount + achSum(ach), age };
   }).sort((a, b) => b.amount - a.amount);
+  return { open, keys, groups };
+}
+
+function viewBilling() {
+  const { open, keys, groups } = billingGroups();
+  if (billingTarget && !keys.includes(billingTarget)) billingTarget = null;
+  if (billingTarget) return viewBillingTarget(billingTarget, open.filter(e => groupKey(e) === billingTarget));
+
   const sum = f => groups.reduce((s, g) => s + f(g), 0);
   const short = d => frDate(d).slice(0, 5);
   // Couleur de la pastille : fixe pour un client (tirée de sa clé), pas de sa place dans la liste.

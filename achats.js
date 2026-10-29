@@ -204,6 +204,19 @@ const Achats = (() => {
     if (redraw && tab === 'achats' && !$('#dlg').open) render();
     // Page Aujourd'hui : seul le bandeau est redessiné (pas toute la page, pour ne pas effacer une saisie en cours).
     if (tab === 'today' && $('#achNotif')) todayBanner($('#achNotif'));
+    if (tab === 'today' && $('#achTile')) dashTile($('#achTile'));
+  }
+
+  // --- tuile du tableau de bord PC (app.js : <div id="achTile">) : nouvelles factures, articles à compléter, prêts à refacturer ---
+  function dashTile(el) {
+    if (!A) { load().then(() => el.isConnected && dashTile(el)); return; }
+    const fresh = alive(A.invoices).filter(i => i.seen === false).length;
+    const todo = alive(A.lines).filter(l => lineState(l) === 'todo').length;
+    const ready = alive(A.lines).filter(l => lineState(l) === 'ready');
+    el.innerHTML = `<div class="l">Achats ›</div>
+      <div class="v">${fresh ? `${fresh} nouv.` : ready.length ? `${ready.length} prêt(s)` : '—'}</div>
+      <div class="small muted">${[todo && `<span class="warnc">${todo} à compléter</span>`, `${ready.length} prêt(s) à refacturer`,
+        ready.length && eur(ready.reduce((s, l) => s + (forBilling(l).total || 0), 0))].filter(Boolean).join(' · ')}</div>`;
   }
 
   // --- bandeau « nouvelles factures » de la page Aujourd'hui (app.js : <div id="achNotif">) ---
@@ -1106,5 +1119,5 @@ const Achats = (() => {
   // Déconnexion : on oublie la copie locale (les données restent dans OneDrive).
   async function reset() { A = null; products = null; productsErr = ''; lastCheck = 0; msg = ''; await idb('readwrite', s => s.delete('data')); }
 
-  return { view, articles, sync, reset, todayBanner, readyClients, readyFor, ofBill, attach, detach, orderLines };
+  return { view, articles, sync, reset, todayBanner, dashTile, readyClients, readyFor, ofBill, attach, detach, orderLines };
 })();

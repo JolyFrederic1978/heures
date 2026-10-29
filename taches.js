@@ -32,15 +32,19 @@ const Taches = (() => {
   const task = id => T.tasks.find(t => t.id === id);
   const socOfUser = id => state.users.find(u => u.id === id)?.societeId;
   const isResp = () => (me().roles || []).includes('resp');
+  // Privée (sans client) : seulement sa personne (créateur et technicien assigné), même pour un administrateur, et jamais « à prendre ».
+  const isPrivate = t => !t.clientId;
   // Visible : assignée à moi, créée par moi, à prendre sur un de mes clients ; responsable : tout ce qui touche sa société ; administrateur : tout.
   function visible(t) {
     const u = me();
-    if (isAdmin() || t.assigneeId === u.id || t.createdBy === u.id) return true;
+    if (t.assigneeId === u.id || t.createdBy === u.id) return true;
+    if (isPrivate(t)) return false;
+    if (isAdmin()) return true;
     if (!t.assigneeId && canTakeClient(t)) return true;
     return isResp() && [socOfUser(t.assigneeId), socOfUser(t.createdBy), t.clientId && clientSoc(client(t.clientId))].includes(u.societeId);
   }
-  const canTakeClient = t => !t.clientId || canSee(client(t.clientId));
-  const canEdit = t => isAdmin() || t.assigneeId === me().id || t.createdBy === me().id;
+  const canTakeClient = t => !isPrivate(t) && canSee(client(t.clientId));
+  const canEdit = t => (isAdmin() && !isPrivate(t)) || t.assigneeId === me().id || t.createdBy === me().id;
   const canTake = t => !t.assigneeId && t.status !== 'done' && canTakeClient(t);
   const isOpen = t => t.status !== 'done';
   const overdue = t => isOpen(t) && t.due && t.due < today();
@@ -124,6 +128,7 @@ const Taches = (() => {
     } finally { busy = false; }
     if (redraw && tab === 'taches' && !$('#dlg').open) render();
     if (tab === 'today' && $('#tkNotif')) todayBanner($('#tkNotif'));
+    if (tab === 'today' && $('#tkDay')) dayList($('#tkDay'));
   }
 
   // --- ajout rapide : « Réinstaller PC accueil Vedi demain 14h p1 @Geoffrey » ---
@@ -186,8 +191,8 @@ const Taches = (() => {
   function taskLi(t) {
     const cl = t.checklist || [], done = cl.filter(x => x.done).length;
     const meta = [
-      t.clientId && esc(client(t.clientId).name),
-      t.assigneeId ? `👤 ${esc(userName(t.assigneeId))}` : '<span class="pill warn">à prendre</span>',
+      t.clientId ? esc(client(t.clientId).name) : '🔒 privé',
+      t.assigneeId ?`👤 ${esc(userName(t.assigneeId))}` : '<span class="pill warn">à prendre</span>',
       t.due && `<span class="${overdue(t) ? 'late' : dueToday(t) ? 'now' : ''}">📅 ${esc(dueLabel(t))}</span>`,
       cl.length && `☑ ${done}/${cl.length}`,
       t.comments?.length && `💬 ${t.comments.length}`,
@@ -217,7 +222,7 @@ const Taches = (() => {
     $('#view').innerHTML = `
       <div class="card">
         <form id="tkQuick" class="row" style="margin:0"><input id="tkQ" class="grow" style="flex:1" placeholder="Nouvelle tâche : « Réinstaller PC Vedi demain 14h p1 @Geoffrey »" autocomplete="off">
-          <button class="btn primary" type="submit">+ Ajouter</button></form>
+          ${mic('tkQ', true)}<button class="btn primary" type="submit">+ Ajouter</button></form>
         <p class="small muted" style="margin:6px 0 0">Reconnu : date (demain, lundi, 12/11…), heure (14h), p1 à p4, @technicien, #client. Tu vérifies avant d'enregistrer.</p>
       </div>
       <div class="row" style="flex-wrap:wrap;margin-bottom:8px">${Object.entries(FILTERS).map(([k, [l]]) =>
@@ -257,9 +262,9 @@ const Taches = (() => {
       ${t?.kind === 'upd' ? `<p class="small"><span class="pill">🔁 chaque mois, 2ᵉ mercredi</span> « Terminer » ouvre le forfait « Mise à jour serveur » du client ;
         une fois enregistré, la tâche est terminée.</p>` : ''}
       <label>Titre</label><input id="kTitle" value="${esc(d.title)}" ${ro}>
-      <label>Description</label><textarea id="kNotes" ${ro}>${esc(d.notes || '')}</textarea>
+      ${edit ? lblMic('Description', 'kNotes') : '<label>Description</label>'}<textarea id="kNotes" ${ro}>${esc(d.notes || '')}</textarea>
       <div class="grid2">
-        <div><label>Client</label><select id="kCl" ${ro}><option value="">— aucun —</option>${clientOptions(d.clientId)}</select></div>
+        <div><label>Client</label><select id="kCl" ${ro}><option value="">🔒 Privé (sans client)</option>${clientOptions(d.clientId)}</select></div>
         <div><label>Technicien</label><select id="kAs" ${ro}><option value="">— à prendre —</option>
           ${liveUsers().filter(x => x.active !== false || x.id === d.assigneeId).map(x => `<option value="${x.id}" ${x.id === d.assigneeId ? 'selected' : ''}>${esc(userLabel(x))}</option>`).join('')}</select></div>
       </div>
@@ -278,7 +283,7 @@ const Taches = (() => {
       <div class="actions" style="flex-wrap:wrap">
         ${t && edit ? '<button class="btn danger" id="kDel" style="margin-right:auto">Supprimer</button>' : ''}
         ${t && canTake(t) ? '<button class="btn" id="kTake">🙋 Me l\'attribuer</button>' : ''}
-        ${t && isOpen(t) && edit ? (t.kind === 'upd' ? '' : '<button class="btn" id="kTimer">▶ Chrono</button><button class="btn" id="kEntry">+ Intervention</button>') + '<button class="btn" id="kDone">✓ Terminer</button>' : ''}
+        ${t && isOpen(t) && edit ? (t.kind === 'upd' || isPrivate(t) ? '' : '<button class="btn" id="kTimer">▶ Chrono</button><button class="btn" id="kEntry">+ Intervention</button>') + '<button class="btn" id="kDone">✓ Terminer</button>' : ''}
         ${t && !isOpen(t) && edit ? '<button class="btn" id="kReopen">↺ Rouvrir</button>' : ''}
         <button class="btn" value="cancel">${edit ? 'Annuler' : 'Fermer'}</button>
         ${edit ? '<button class="btn primary" id="kSave">Enregistrer</button>' : ''}
@@ -302,6 +307,8 @@ const Taches = (() => {
       const v = read();
       if (!v.title) { alert('Titre requis.'); return null; }
       if (v.time && !v.due) v.due = today();
+      // Privée : jamais « à prendre », elle reste à son créateur si personne n'est choisi.
+      if (!v.clientId && !v.assigneeId) v.assigneeId = t?.createdBy || me().id;
       let x = t;
       if (!x) T.tasks.push(x = { id: uid('tk'), createdBy: me().id, createdAt: Date.now(), status: 'open', entryIds: [], comments: [] });
       const as = v.assigneeId; delete v.assigneeId;
@@ -351,6 +358,8 @@ const Taches = (() => {
     if (t.kind === 'upd' && !t.entryIds?.length) return addEntry(t);
     Object.assign(t, { status: 'done', doneAt: Date.now(), doneBy: me().id }); touch(t);
     await save(); scheduleSync();
+    // Tâche privée : pas d'intervention à proposer.
+    if (isPrivate(t)) { if ($('#dlg').open) $('#dlg').close(); toast('Tâche terminée'); if (tab === 'taches') view(); return; }
     const f = $('#dlgForm');
     f.innerHTML = `<h2>✓ Tâche terminée</h2><p><strong>${esc(t.title)}</strong>${t.clientId ? ` · ${esc(client(t.clientId).name)}` : ''}</p>
       <p class="small muted">${t.entryIds?.length ? `${t.entryIds.length} intervention(s) déjà liée(s). ` : ''}Ajouter l'intervention correspondante ?</p>
@@ -388,7 +397,20 @@ const Taches = (() => {
     $('.notifbar', el).onclick = () => { filter = n.now || n.late ? 'today' : n.fresh ? 'open' : 'free'; tab = 'taches'; render(); };
   }
 
+  // --- tableau de bord PC (app.js : <div id="tkDay">) : mes tâches du jour et en retard ---
+  function dayList(el) {
+    if (!T) { el.innerHTML = '<div class="empty">Chargement…</div>'; load().then(() => el.isConnected && dayList(el)); return; }
+    const u = me(), ts = alive().filter(visible);
+    const list = ts.filter(t => t.assigneeId === u.id && (overdue(t) || dueToday(t))).sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+    const free = ts.filter(canTake).length;
+    el.innerHTML = (list.length ? `<ul class="list tklist">${list.map(taskLi).join('')}</ul>` : '<div class="empty">Rien d\'urgent 👍</div>')
+      + (free ? `<p class="small" style="margin:6px 0 0"><a href="#" id="tkDayFree">${free} tâche(s) à prendre ›</a></p>` : '');
+    $$('[data-tk] .tap', el).forEach(x => x.onclick = () => editTask(task(x.closest('[data-tk]').dataset.tk)));
+    $$('[data-tkdone]', el).forEach(b => b.onclick = async ev => { ev.stopPropagation(); await finish(task(b.dataset.tkdone)); if (el.isConnected) dayList(el); });
+    if ($('#tkDayFree', el)) $('#tkDayFree', el).onclick = ev => { ev.preventDefault(); filter = 'free'; tab = 'taches'; render(); };
+  }
+
   async function reset() { T = null; msg = ''; await idb('readwrite', s => s.delete('data')); }
 
-  return { view, sync, todayBanner, linkEntry, forfaitSaved, titleOf, open, reset, parseQuick };
+  return { view, sync, todayBanner, dayList, linkEntry, forfaitSaved, titleOf, open, reset, parseQuick };
 })();

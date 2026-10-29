@@ -122,6 +122,10 @@ button.btn.danger { color: var(--danger); }
 button.btn.big { width: 100%; padding: 14px; font-size: 17px; }
 button.btn:disabled { opacity: .5; }
 button.btn.chip { padding: 6px 10px; font-size: 13px; border-radius: 99px; }
+.lblmic { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
+.lblmic button.mic { padding: 2px 8px; margin-bottom: 2px; }
+button.btn.mic.on { background: #d93025; border-color: #d93025; color: #fff; animation: micpulse 1s ease-in-out infinite; }
+@keyframes micpulse { 50% { opacity: .55; } }
 button.btn.chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
 .timer .check { margin: 8px 0; }
 code { font-size: 12px; word-break: break-all; }
@@ -143,6 +147,19 @@ button.link { border: 0; background: none; color: var(--accent); font: inherit; 
 .pill.warn { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
 .topbar .pill { background: rgba(255,255,255,.2); color: #fff; }
 
+/* Tableau de bord PC (page Aujourd'hui ≥ 1100 px) : journée à gauche, barre latérale à droite. */
+body.dashwide main { max-width: 1180px; }
+.dash { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 16px; align-items: start; }
+.dside { display: grid; gap: 10px; position: sticky; top: 12px; }
+.dtile { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
+.dtile .l { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.dtile .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; margin-bottom: 4px; }
+.dtile.tap:hover { border-color: var(--accent); }
+.dgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
+.dgrid b { display: block; font-size: 18px; color: var(--text); font-variant-numeric: tabular-nums; }
+.dbar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin: 2px 0 6px; }
+.dbar i { display: block; height: 100%; background: var(--accent); }
+.okc { color: var(--ok); } .warnc { color: var(--warn); }
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 12px; }
 .kpi { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; }
 .kpi .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
