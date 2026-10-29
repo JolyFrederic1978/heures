@@ -98,8 +98,14 @@ const activeSocs = () => liveSocs().filter(s => s.active !== false);
 const soc = id => state.societes.find(s => s.id === id) || { id, name: '(société supprimée)' };
 const liveUsers = () => state.users.filter(u => !u.deleted).sort((a, b) => a.name.localeCompare(b.name));
 const user = id => state.users.find(u => u.id === id) || { id, name: '(utilisateur supprimé)' };
-// Utilisateur connecté : reconnu par son adresse Microsoft ; sinon l'administrateur (étape 1 : seul Fred a accès aux données).
-const me = () => { const m = fold(OneDrive.user()); return liveUsers().find(u => u.email && fold(u.email) === m) || user(ADMIN); };
+// Utilisateur connecté : reconnu par son adresse Microsoft. Compte inconnu, désactivé ou supprimé : aucun droit (écran « accès refusé »).
+// Seule exception : tant que l'administrateur n'a pas d'adresse (toute 1re connexion), c'est lui (ensureSocietes la renseigne alors).
+const GUEST = { id: 'u_guest', name: 'Compte non reconnu', roles: [], clients: {} };
+const me = () => {
+  const m = fold(OneDrive.user()), u = m && state.users.find(x => x.email && fold(x.email) === m);
+  if (u) return u.deleted || u.active === false ? GUEST : u;
+  return user(ADMIN).email ? GUEST : user(ADMIN);
+};
 const isAdmin = () => (me().roles || ['admin']).includes('admin');
 const cmdOf = e => e.cmdId || (e.alescom ? 'alescom' : HOME);
 const techOf = e => e.techId || ADMIN;
@@ -358,10 +364,10 @@ function render() {
   clearInterval(tick);
   envBar();
   // Accès : connexion Microsoft obligatoire, puis code PIN s'il est défini.
-  const gate = !OneDrive.signedIn() ? 'login' : locked ? 'pin' : null;
+  const gate = !OneDrive.signedIn() ? 'login' : locked ? 'pin' : me() === GUEST ? 'denied' : null;
   document.body.classList.toggle('locked', !!gate);
   document.body.classList.toggle('dashwide', !gate && tab === 'today' && wideToday());
-  if (gate) { if ($('#dlg').open) $('#dlg').close(); $('#viewTitle').textContent = 'OLU Gestion'; return gate === 'login' ? viewLogin() : viewPin(); }
+  if (gate) { if ($('#dlg').open) $('#dlg').close(); $('#viewTitle').textContent = 'OLU Gestion'; return gate === 'login' ? viewLogin() : gate === 'pin' ? viewPin() : viewDenied(); }
   // Onglet Administration : administrateurs seulement.
   $('.tabs [data-tab="admin"]').classList.toggle('hidden', !isAdmin());
   if (tab === 'admin' && !isAdmin()) tab = 'today';
@@ -379,7 +385,7 @@ function entryLi(e, { showDate = false, showBill = true } = {}) {
         ${techOf(e) !== me().id ? `<span class="pill">👤 ${esc(user(techOf(e)).name)}</span>` : ''}
         ${e.taskId ? '<span class="pill" title="Faite pour une tâche">📋</span>' : ''}
         ${showBill && b ? `<span class="pill ok">facturé ${frDate(b.date)}${b.ref ? ' · ' + esc(b.ref) : ''}</span>` : ''}</div>
-      <div class="small muted">${showDate ? frDate(e.date) + ' · ' : ''}${e.forfait || !e.start ? 'forfait' : `${e.start}–${e.end}`}${e.pauseMin ? ` · pause ${fmtDur(e.pauseMin)}` : ''}${e.install ? ' · ' + esc(e.install) : ''}</div>
+      <div class="small muted">${showDate ? frDate(e.date) + ' · ' : ''}${e.forfait || !e.start ? 'forfait' : `${esc(e.start)}–${esc(e.end)}`}${e.pauseMin ? ` · pause ${fmtDur(e.pauseMin)}` : ''}${e.install ? ' · ' + esc(e.install) : ''}</div>
       ${e.description ? `<div class="small">${esc(e.description)}</div>` : ''}
     </div>
     <div class="dur">${fmtDur(e.minutes)}</div></li>`;
@@ -606,8 +612,8 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft 
     </div>
     ${fromTimer ? '' : `<label class="check"><input type="checkbox" id="fFlat" ${flat0 ? 'checked' : ''}> Forfait (seulement la durée facturée, sans heure de début ni de fin)</label>`}
     <div class="grid3" id="fTimes">
-      <div><label>Début</label><input type="time" id="fStart" value="${e.start}"></div>
-      <div><label>Fin</label><input type="time" id="fEnd" value="${e.end}"></div>
+      <div><label>Début</label><input type="time" id="fStart" value="${esc(e.start)}"></div>
+      <div><label>Fin</label><input type="time" id="fEnd" value="${esc(e.end)}"></div>
       <div><label>Pause</label><input id="fPause" value="${e.pauseMin ? fmtDur(e.pauseMin) : ''}" placeholder="0:00"></div>
     </div>
     ${lblMic('Description', 'fDesc')}<textarea id="fDesc">${esc(e.description)}</textarea>
@@ -857,7 +863,7 @@ function viewBillingTarget(key, all) {
     </div>
     ${es.length ? `<div class="card"><h2>Interventions (${sel.length}/${es.length})</h2>
       <ul class="list">${es.map(e => `<li><input type="checkbox" data-inc="${e.id}" ${excluded.has(e.id) ? '' : 'checked'}>
-        <div class="grow tap" data-edit="${e.id}"><div><strong>${frDate(e.date)}</strong> ${e.forfait || !e.start ? 'forfait' : `${e.start}–${e.end}`}
+        <div class="grow tap" data-edit="${e.id}"><div><strong>${frDate(e.date)}</strong> ${e.forfait || !e.start ? 'forfait' : `${esc(e.start)}–${esc(e.end)}`}
           ${info.partner ? '· ' + esc(client(e.clientId).name) : ''} ${e.onSite ? '<span class="pill">sur site</span>' : ''}
           ${techOf(e) !== me().id ? `<span class="pill">👤 ${esc(user(techOf(e)).name)}</span>` : ''}</div>
           <div class="small muted">${esc(e.description)}${e.install ? ' · ' + esc(e.install) : ''}</div></div>
@@ -951,7 +957,7 @@ function billitStatus(b) {
     : '<span class="muted">Renseigne la clé API et le PartyID Billit dans Réglages.</span>';
   return `<span class="pill ok">✓ Envoyée (${billitModeLabel(x.mode)}) le ${new Date(x.at).toLocaleString('fr-BE', { dateStyle: 'short', timeStyle: 'short' })}</span>
     ${x.number ? ` · n° ${esc(x.number)}` : ''}${x.status ? ` · statut ${esc(x.status)}` : ''}
-    · <a href="${esc(x.url)}" target="_blank" rel="noopener">Ouvrir dans Billit</a>`;
+    ${/^https:\/\//.test(x.url || '') ? `· <a href="${esc(x.url)}" target="_blank" rel="noopener">Ouvrir dans Billit</a>` : ''}`;
 }
 
 const toBase64 = blob => new Promise((resolve, reject) => {
@@ -1119,7 +1125,7 @@ function viewArchivedEntry(e) {
     <table class="tot ro">
       ${row('Client', esc(client(e.clientId).name))}
       ${row('Date', esc(longDate(e.date)))}
-      ${row('Horaire', flat ? `forfait${e.forfait ? ' · ' + esc(FORFAITS[e.forfait] || e.forfait) : ''}` : `${e.start} – ${e.end}`)}
+      ${row('Horaire', flat ? `forfait${e.forfait ? ' · ' + esc(FORFAITS[e.forfait] || e.forfait) : ''}` : `${esc(e.start)} – ${esc(e.end)}`)}
       ${row('Pause', !flat && e.pauseMin ? fmtDur(e.pauseMin) : '')}
       ${row('Durée facturée', `<strong>${fmtDur(e.minutes)}</strong>`)}
       ${row('Lieu', e.onSite ? 'sur site' : 'à distance')}
@@ -1643,6 +1649,18 @@ function viewLogin() {
       <p class="small muted" style="margin-bottom:0">Connexion sur la page officielle de Microsoft : le mot de passe n'est jamais saisi ici.</p>
     </div>`;
   $('#loginBtn').onclick = () => OneDrive.login().catch(e => alert(e.message));
+}
+
+// Compte Microsoft inconnu, désactivé ou supprimé dans Administration.
+function viewDenied() {
+  $('#view').innerHTML = `
+    <div class="card" style="text-align:center;margin-top:24px">
+      <h2 style="font-size:18px">⛔ Accès refusé</h2>
+      <p>Le compte <strong>${esc(OneDrive.user())}</strong> n'est pas autorisé dans OLU Gestion.</p>
+      <p class="small muted">Demande à l'administrateur de l'ajouter (ou de le réactiver) dans l'onglet Admin.</p>
+      <button class="btn big" id="deniedOut">Se déconnecter</button>
+    </div>`;
+  $('#deniedOut').onclick = () => signOut();
 }
 
 function viewPin() {
