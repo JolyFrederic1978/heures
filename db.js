@@ -33,6 +33,7 @@ const DB = (() => {
       clients: [{ id: 'c_vedi', name: 'Vedi', billitName: 'V.T.S. SA', defaultOnSite: true, defaultAlescom: false, updatedAt: 0 }],
       entries: [],
       bills: [],
+      societes: [], users: [],          // commanditaires et utilisateurs (module Administration)
       timer: null, timerAt: 0,
       settings: {
         alescomBillit: 'ALESCOM SRL',

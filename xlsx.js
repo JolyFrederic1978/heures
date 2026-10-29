@@ -40,11 +40,11 @@ const Xlsx = (() => {
     return new Blob([await wb.xlsx.writeBuffer()], { type: MIME });
   }
 
-  // r : { client, date, start, end, description, minutes, onSite, alescom, install }
-  const BASE = ['client', 'date', 'heure debut', 'heure de fin', 'description', 'heures', 'minutes', 'deplacement', "Donneur d'ordre", 'Installation/réinstallation'];
+  // r : { client, date, start, end, description, minutes, onSite, cmd (commanditaire, vide = One Level UP), install, tech }
+  const BASE = ['client', 'date', 'heure debut', 'heure de fin', 'description', 'heures', 'minutes', 'deplacement', 'Commanditaire', 'Installation/réinstallation', 'Technicien'];
   const base = r => [r.client, date(r.date), time(r.start), time(r.end), r.description || null,
-    Math.floor(r.minutes / 60), r.minutes % 60, r.onSite ? 1 : null, r.alescom ? 'alescom' : null, r.install || null];
-  const BASE_W = [16, 12, 11, 11, 50, 8, 8, 11, 15, 24];
+    Math.floor(r.minutes / 60), r.minutes % 60, r.onSite ? 1 : null, r.cmd || null, r.install || null, r.tech || null];
+  const BASE_W = [16, 12, 11, 11, 50, 8, 8, 11, 15, 24, 16];
 
   const openList = rows => build(BASE, rows.map(base), { dateCols: [1], timeCols: [2, 3], widths: BASE_W, filter: true });
 
@@ -53,21 +53,21 @@ const Xlsx = (() => {
     rows.map(r => [date(r.billDate), r.billRef || null, ...base(r), Math.round(r.amount * 100) / 100]),
     { dateCols: [0, 3], timeCols: [4, 5], widths: [12, 12, ...BASE_W, 13], filter: true });
 
-  // Même format que les fichiers "Prestations - Client AAAA-MM-JJ.xlsx" existants (ligne Total = sommes brutes).
+  // Même format que les fichiers "Prestations - Client AAAA-MM-JJ.xlsx" existants (ligne Total = sommes brutes), + colonne technicien (29/10).
   function prestations(rows, withClient) {
     const head = [...(withClient ? ['client'] : []), 'date', 'heure debut', 'heure de fin', 'description',
-      'heures', 'minutes', 'deplacement', 'Installaton/réinstallation'];
+      'heures', 'minutes', 'deplacement', 'Installaton/réinstallation', 'technicien'];
     let sh = 0, sm = 0, sd = 0;
     const data = rows.map(r => {
       const h = Math.floor(r.minutes / 60), m = r.minutes % 60;
       sh += h; sm += m; sd += r.onSite ? 1 : 0;
       return [...(withClient ? [r.client] : []), date(r.date), time(r.start), time(r.end), r.description || null,
-        h, m, r.onSite ? 1 : null, r.install || null];
+        h, m, r.onSite ? 1 : null, r.install || null, r.tech || null];
     });
     const off = withClient ? 1 : 0;
     const total = ['Total', ...Array(head.length - 1).fill(null)];
     total[off + 4] = sh; total[off + 5] = sm; total[off + 6] = sd;
-    return build(head, data, { dateCols: [off], timeCols: [off + 1, off + 2], widths: [...(withClient ? [16] : []), 12, 11, 11, 50, 8, 8, 11, 24], total });
+    return build(head, data, { dateCols: [off], timeCols: [off + 1, off + 2], widths: [...(withClient ? [16] : []), 12, 11, 11, 50, 8, 8, 11, 24, 16], total });
   }
 
   // --- lecture ArchiveTemplate.xlsx ---
@@ -111,7 +111,7 @@ const Xlsx = (() => {
         job, client: job.replace(/\b(à|a)\s+distance\b/i, '').replace(/\b(remote|distance)\b/ig, '').replace(/\s+/g, ' ').trim() || job,
         date: d, start, end: asTime(g('heuredefin')) || start, minutes,
         description: String(g('description') || '').trim(),
-        onSite: +g('deplacement') > 0, alescom: /alescom/i.test(String(g('donneurdordre') || '')),
+        onSite: +g('deplacement') > 0, alescom: /alescom/i.test(String(g('donneurdordre') || g('commanditaire') || '')),
         install: String(g('install') || '').trim()
       });
     });

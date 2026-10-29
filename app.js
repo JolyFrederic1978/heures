@@ -59,6 +59,53 @@ const liveBills = () => state.bills.filter(b => !b.deleted);
 const touch = o => { o.updatedAt = Date.now(); return o; };
 function setTimer(t) { state.timer = t; state.timerAt = Date.now(); }
 
+// ---------- sociétés (commanditaires) et utilisateurs ----------
+// One Level UP = société « maison » (id 'olu') ; Alescom = premier commanditaire (id 'alescom' : tarifs partenaire, échéance 10 j).
+// Une intervention a un commanditaire (cmdId) et un technicien (techId). Anciennes données : case alescom, technicien = administrateur.
+// La case alescom reste écrite (cmdId === 'alescom') pour les appareils qui ont encore une ancienne version.
+const HOME = 'olu', ADMIN = 'u_admin';
+const liveSocs = () => state.societes.filter(s => !s.deleted).sort((a, b) => (b.id === HOME) - (a.id === HOME) || a.name.localeCompare(b.name));
+const activeSocs = () => liveSocs().filter(s => s.active !== false);
+const soc = id => state.societes.find(s => s.id === id) || { id, name: '(société supprimée)' };
+const liveUsers = () => state.users.filter(u => !u.deleted).sort((a, b) => a.name.localeCompare(b.name));
+const user = id => state.users.find(u => u.id === id) || { id, name: '(utilisateur supprimé)' };
+// Utilisateur connecté : reconnu par son adresse Microsoft ; sinon l'administrateur (étape 1 : seul Fred a accès aux données).
+const me = () => { const m = fold(OneDrive.user()); return liveUsers().find(u => u.email && fold(u.email) === m) || user(ADMIN); };
+const isAdmin = () => (me().roles || ['admin']).includes('admin');
+const cmdOf = e => e.cmdId || (e.alescom ? 'alescom' : HOME);
+const techOf = e => e.techId || ADMIN;
+const techSoc = e => state.users.find(u => u.id === techOf(e))?.societeId || HOME;
+const clientSoc = c => c?.societeId || (c?.defaultAlescom ? 'alescom' : HOME);
+// Facturé par One Level UP : commanditaire One Level UP (au client) ou technicien One Level UP pour un autre commanditaire (au commanditaire).
+const billable = e => cmdOf(e) === HOME || techSoc(e) === HOME;
+const socRates = s => s.rates || state.settings.rates.partner;
+// Clients visibles par l'utilisateur connecté (réglés dans Administration, par société) ; un administrateur voit tout.
+function canSee(c) {
+  if (isAdmin()) return true;
+  const v = me().clients?.[clientSoc(c)];
+  return v === 'all' || (Array.isArray(v) && v.includes(c.id));
+}
+
+// Sociétés et administrateur créés une fois, à partir des réglages existants (ID fixes : pas de doublon entre appareils).
+function ensureSocietes() {
+  state.societes ||= []; state.users ||= [];
+  const s = state.settings;
+  if (!state.societes.some(x => x.id === HOME)) state.societes.push({ id: HOME, name: 'One Level UP', home: true, active: true, updatedAt: 0 });
+  if (!state.societes.some(x => x.id === 'alescom')) state.societes.push({ id: 'alescom', name: 'Alescom', active: true, tenant: '',
+    billitName: s.alescomBillit || 'ALESCOM SRL', billitIds: { ...s.alescomBillitIds }, rates: { ...s.rates.partner }, due: 10, updatedAt: 0 });
+  let a = state.users.find(u => u.id === ADMIN);
+  if (!a) state.users.push(a = { id: ADMIN, name: 'Fred', email: '', societeId: HOME, roles: ['admin', 'resp', 'tech'], active: true, clients: {}, updatedAt: 0 });
+  if (!a.email && OneDrive.user()) { a.email = OneDrive.user(); touch(a); }
+  // Clients sans société : One Level UP (ou Alescom s'ils avaient « alescom par défaut »), enregistré dans la fiche.
+  state.clients.forEach(c => { if (!c.societeId) { c.societeId = c.defaultAlescom ? 'alescom' : HOME; touch(c); } });
+}
+const socOptions = sel => {
+  const l = activeSocs(), cur = sel && !l.some(s => s.id === sel) && state.societes.find(s => s.id === sel);
+  return (cur ? `<option value="${cur.id}" selected>${esc(cur.name)} (inactive)</option>` : '')
+    + l.map(s => `<option value="${s.id}" ${s.id === sel ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+};
+const userLabel = u => u.name + (u.societeId && u.societeId !== HOME ? ` (${soc(u.societeId).name})` : '');
+
 // Un seul client par société : « Vedi distance » / « Afm remote » sont fusionnés dans « Vedi » / « Afm »,
 // leurs interventions passent en « à distance » (case Sur site décochée). Renvoie true si quelque chose a changé.
 function mergeRemoteClients() {
@@ -77,15 +124,19 @@ function mergeRemoteClients() {
 }
 
 // ---------- facturation ----------
-// Un groupe de facturation = un client, ou "alescom" (commanditaire qui regroupe plusieurs clients).
-const groupKey = e => e.alescom ? 'alescom' : 'c:' + e.clientId;
+// Un groupe de facturation = un client (commanditaire One Level UP), ou un autre commanditaire qui regroupe plusieurs clients
+// ('alescom' : clé des factures existantes ; 's:<id>' pour les suivants).
+const groupKey = e => { const c = cmdOf(e); return c === HOME ? 'c:' + e.clientId : c === 'alescom' ? 'alescom' : 's:' + c; };
 function groupInfo(key) {
   const rates = state.settings.rates;
-  if (key === 'alescom') return { key, label: 'alescom', billitName: state.settings.alescomBillit || 'alescom', rates: rates.partner, partner: true };
+  if (!key.startsWith('c:')) {
+    const s = soc(key === 'alescom' ? 'alescom' : key.slice(2));
+    return { key, label: s.name, billitName: s.billitName || s.name, rates: socRates(s), partner: true, soc: s, due: s.due ?? 15 };
+  }
   const c = client(key.slice(2));
   // Client proche : le déplacement est facturé avec l'article zone 1 (dep-003).
   const r = c.near ? { ...rates.client, dep: rates.zone1.dep, depLabel: rates.zone1.depLabel, depRef: rates.zone1.depRef } : rates.client;
-  return { key, label: c.name, billitName: c.billitName || c.name, rates: r, partner: false, near: !!c.near };
+  return { key, label: c.name, billitName: c.billitName || c.name, rates: r, partner: false, near: !!c.near, due: 15 };
 }
 function totals(entries, r) {
   let h = 0, m = 0, dep = 0;
@@ -103,9 +154,10 @@ function normalizeSettings() {
   Object.assign(r.partner, { hRef: 'mai-001', mRef: 'mai-002', depRef: 'dep-001', ...pick(r.partner) });
   r.zone1.depRef ||= 'dep-003';
   state.settings.billit ||= { mode: 'test', test: { apiKey: '', partyId: '' }, live: { apiKey: '', partyId: '' } };
+  ensureSocietes();
 }
-// Échéance des factures Billit (jours) : fixe, à modifier au besoin dans Billit.
-const dueDays = info => info.partner ? 10 : 15;
+// Échéance des factures Billit (jours) : 15 j pour les clients, celle du commanditaire sinon (Alescom 10 j) ; à modifier au besoin dans Billit.
+const dueDays = info => info.due ?? 15;
 const pick = o => Object.fromEntries(['hRef', 'mRef', 'depRef'].filter(k => o[k]).map(k => [k, o[k]]));
 
 // Liste de clients fournie par Fred (oct. 2026) : ajoutée une seule fois, sans doublon (comparaison sans casse).
@@ -118,16 +170,17 @@ function seedClients() {
   const have = new Set(state.clients.filter(c => !c.deleted).map(c => c.name.toLowerCase()));
   for (const name of CLIENTS_SEED) {
     if (have.has(name.toLowerCase())) continue;
-    state.clients.push(touch({ id: uid('c'), name, billitName: '', near: false, defaultAlescom: false, server: false, servers: 0 }));
+    state.clients.push(touch({ id: uid('c'), name, billitName: '', near: false, societeId: HOME, server: false, servers: 0 }));
     have.add(name.toLowerCase());
   }
   state.settings.clientsSeed = 1; state.settingsAt = Date.now();
   return true;
 }
-const xrow = e => ({ ...e, client: client(e.clientId).name });
+const xrow = e => ({ ...e, client: client(e.clientId).name, cmd: cmdOf(e) === HOME ? '' : soc(cmdOf(e)).name, tech: user(techOf(e)).name });
 
 const prestationsName = b => `Prestations - ${b.label} ${b.date}.xlsx`;
-const prestationsFile = b => Xlsx.prestations(sortEntries(live().filter(e => e.billId === b.id)).map(xrow), b.key === 'alescom');
+// Facture à un commanditaire : colonne client en plus.
+const prestationsFile = b => Xlsx.prestations(sortEntries(live().filter(e => e.billId === b.id)).map(xrow), !b.key.startsWith('c:'));
 
 // Achats refacturés (module Achats, achats.js) : ils peuvent être ajoutés à la facture d'un client.
 const achSum = ach => ach.reduce((s, x) => s + x.total, 0);
@@ -179,7 +232,7 @@ const statusText = () => syncStatus.kind === 'ok'
   : (syncStatus.msg || $('#syncPill').textContent);
 
 function mergeRemote(remote) {
-  const before = JSON.stringify([state.entries, state.clients, state.bills, state.timer, state.settings]);
+  const before = JSON.stringify([state.entries, state.clients, state.bills, state.timer, state.settings, state.societes, state.users]);
   const mergeArr = (a = [], b = []) => {
     const m = new Map(a.map(x => [x.id, x]));
     for (const x of b) { const y = m.get(x.id); if (!y || (x.updatedAt || 0) > (y.updatedAt || 0)) m.set(x.id, x); }
@@ -188,15 +241,17 @@ function mergeRemote(remote) {
   state.entries = mergeArr(state.entries, remote.entries);
   state.clients = mergeArr(state.clients, remote.clients);
   state.bills = mergeArr(state.bills, remote.bills);
+  state.societes = mergeArr(state.societes, remote.societes);
+  state.users = mergeArr(state.users, remote.users);
   if ((remote.timerAt || 0) > (state.timerAt || 0)) { state.timer = remote.timer; state.timerAt = remote.timerAt; }
   if (remote.settings && (remote.settingsAt || 0) > (state.settingsAt || 0)) { state.settings = remote.settings; state.settingsAt = remote.settingsAt; }
   normalizeSettings();
-  return before !== JSON.stringify([state.entries, state.clients, state.bills, state.timer, state.settings]);
+  return before !== JSON.stringify([state.entries, state.clients, state.bills, state.timer, state.settings, state.societes, state.users]);
 }
 
 // Régénère les fichiers Excel seulement si leur contenu a changé.
 async function publishExcel() {
-  const open = sortEntries(live().filter(e => !e.billId)).map(xrow);
+  const open = sortEntries(live().filter(e => !e.billId && billable(e))).map(xrow);
   const arch = sortEntries(live().filter(e => e.billId && bill(e.billId))).map(e => {
     const b = bill(e.billId); return { ...xrow(e), billDate: b.date, billRef: b.ref, amount: entryAmount(e) };
   }).sort((a, b) => (a.billDate + a.client + a.date + a.start).localeCompare(b.billDate + b.client + b.date + b.start));
@@ -228,6 +283,7 @@ async function sync() {
       changed = mergeRemoteClients() || changed;
       changed = seedClients() || changed;      // après la fusion : pas de doublon entre appareils
       const payload = JSON.stringify({ version: 3, entries: state.entries, clients: state.clients, bills: state.bills,
+        societes: state.societes, users: state.users,
         timer: state.timer, timerAt: state.timerAt, settings: state.settings, settingsAt: state.settingsAt });
       const r = await OneDrive.put(P.data(), payload, { etag: cur?.etag, type: 'application/json' });
       if (r.status === 412) continue;                       // modifié par un autre appareil : on refusionne
@@ -252,9 +308,9 @@ async function sync() {
 }
 
 // ---------- rendu ----------
-const TITLES = { today: "Aujourd'hui", list: 'Interventions', billing: 'Facturer', archive: 'Archives', achats: 'Achats', articles: 'Articles', settings: 'Réglages' };
+const TITLES = { today: "Aujourd'hui", list: 'Interventions', billing: 'Facturer', archive: 'Archives', achats: 'Achats', articles: 'Articles', admin: 'Administration', settings: 'Réglages' };
 // Achats et Articles : module séparé (achats.js), avec ses propres données et sa propre synchro.
-const VIEWS = () => ({ today: viewToday, list: viewList, billing: viewBilling, archive: viewArchive, achats: Achats.view, articles: Achats.articles, settings: viewSettings });
+const VIEWS = () => ({ today: viewToday, list: viewList, billing: viewBilling, archive: viewArchive, achats: Achats.view, articles: Achats.articles, admin: viewAdmin, settings: viewSettings });
 // Bandeau de la version de développement, avec le dossier de données utilisé (en rouge s'il ne s'agit pas d'un dossier -DEV).
 function envBar() {
   if (ENV === 'prod') return;
@@ -275,6 +331,9 @@ function render() {
   const gate = !OneDrive.signedIn() ? 'login' : locked ? 'pin' : null;
   document.body.classList.toggle('locked', !!gate);
   if (gate) { if ($('#dlg').open) $('#dlg').close(); $('#viewTitle').textContent = 'OLU Gestion'; return gate === 'login' ? viewLogin() : viewPin(); }
+  // Onglet Administration : administrateurs seulement.
+  $('.tabs [data-tab="admin"]').classList.toggle('hidden', !isAdmin());
+  if (tab === 'admin' && !isAdmin()) tab = 'today';
   $('#viewTitle').textContent = TITLES[tab];
   $$('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   VIEWS()[tab]();
@@ -285,7 +344,8 @@ function entryLi(e, { showDate = false, showBill = true } = {}) {
   return `<li class="tap" data-edit="${e.id}">
     <div class="grow">
       <div><strong>${esc(client(e.clientId).name)}</strong> ${e.onSite ? '<span class="pill">sur site</span>' : '<span class="pill">à distance</span>'}
-        ${e.alescom ? '<span class="pill warn">alescom</span>' : ''}
+        ${cmdOf(e) !== HOME ? `<span class="pill warn">${esc(soc(cmdOf(e)).name)}</span>` : ''}
+        ${techOf(e) !== me().id ? `<span class="pill">👤 ${esc(user(techOf(e)).name)}</span>` : ''}
         ${showBill && b ? `<span class="pill ok">facturé ${frDate(b.date)}${b.ref ? ' · ' + esc(b.ref) : ''}</span>` : ''}</div>
       <div class="small muted">${showDate ? frDate(e.date) + ' · ' : ''}${e.forfait || !e.start ? 'forfait' : `${e.start}–${e.end}`}${e.pauseMin ? ` · pause ${fmtDur(e.pauseMin)}` : ''}${e.install ? ' · ' + esc(e.install) : ''}</div>
       ${e.description ? `<div class="small">${esc(e.description)}</div>` : ''}
@@ -296,16 +356,22 @@ function bindEdits(root = document) {
   $$('[data-edit]', root).forEach(li => li.onclick = () => openEntry(state.entries.find(e => e.id === li.dataset.edit)));
 }
 // Le client choisi reste dans la liste même s'il est archivé ou supprimé : sinon le menu prendrait un autre client à l'enregistrement.
+// Seulement les clients visibles par l'utilisateur connecté (Administration).
 function clientOptions(sel) {
-  const list = activeClients(), cur = sel && !list.some(c => c.id === sel) && state.clients.find(c => c.id === sel);
-  return (cur ? `<option value="${cur.id}" selected>${esc(cur.name)} (${cur.deleted ? 'supprimé' : 'archivé'})</option>` : '')
+  const list = activeClients().filter(canSee), cur = sel && !list.some(c => c.id === sel) && state.clients.find(c => c.id === sel);
+  return (cur ? `<option value="${cur.id}" selected>${esc(cur.name)}${cur.deleted ? ' (supprimé)' : cur.archived ? ' (archivé)' : ''}</option>` : '')
     + list.map(c => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
 }
-const flags = (site, ales, p) => `
-  <div class="row">
-    <label class="check grow"><input type="checkbox" id="${p}Site" ${site ? 'checked' : ''}> Sur site</label>
-    <label class="check grow"><input type="checkbox" id="${p}Ales" ${ales ? 'checked' : ''}> alescom</label>
+// Sur site, commanditaire et technicien (x : intervention ou chrono ; p : préfixe des id des champs).
+// Technicien = l'utilisateur connecté pour une nouvelle intervention, celui d'origine pour une intervention existante : jamais modifiable (demande de Fred).
+const flags = (x, p) => `
+  <label class="check"><input type="checkbox" id="${p}Site" ${x.onSite ? 'checked' : ''}> Sur site</label>
+  <div class="grid2">
+    <div><label>Commanditaire</label><select id="${p}Cmd">${socOptions(cmdOf(x))}</select></div>
+    <div><label>Technicien</label><input id="${p}Tech" data-id="${esc(techOf(x))}" value="${esc(userLabel(user(techOf(x))))}" disabled></div>
   </div>`;
+const readWho = p => { const cmdId = $(`#${p}Cmd`).value; return { cmdId, techId: $(`#${p}Tech`).dataset.id, alescom: cmdId === 'alescom' }; };
+const newWho = c => ({ cmdId: clientSoc(c), techId: me().id, alescom: clientSoc(c) === 'alescom' });
 
 // Heure de début ramenée à aujourd'hui (ou hier si elle est dans le futur).
 function startFromTime(hm) {
@@ -326,8 +392,8 @@ function viewToday() {
   const now = new Date(), monday = new Date(now); monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
   const week = live().filter(e => e.date >= isoDate(monday) && e.date <= d);
   const sum = es => es.reduce((s, e) => s + e.minutes, 0);
-  const open = live().filter(e => !e.billId);
-  const lastC = state.clients.find(c => c.id === state.lastClientId && !c.deleted) || activeClients()[0];
+  const open = live().filter(e => !e.billId && billable(e));
+  const lastC =state.clients.find(c => c.id === state.lastClientId && !c.deleted) || activeClients()[0];
 
   // Bandeau du jour (ex. « dim. 25/10 »).
   const dayLabel = new Date().toLocaleDateString('fr-BE', { weekday: 'short', day: '2-digit', month: '2-digit' });
@@ -344,14 +410,14 @@ function viewToday() {
           <div><label>Pause déduite (H:MM)</label><input id="tPauseMin" value="${fmtDur(Math.round(timerPausedMs(t) / 60000))}"></div>
         </div>
         <input id="tDesc" placeholder="Description (optionnel)" value="${esc(t.description || '')}" style="margin-top:10px">
-        ${flags(t.onSite, t.alescom, 't')}
+        ${flags(t, 't')}
         <div class="row"><button class="btn" id="tCancel">Annuler</button>
           <button class="btn grow" id="tPause">${t.pausedAt ? '▶ Fin de pause' : '❚❚ Pause'}</button>
           <button class="btn primary grow" id="tStop">■ Arrêter</button></div>`
       : lastC ? `
         <select id="tClient">${clientOptions(lastC.id)}</select>
         <input id="tDesc0" placeholder="Description de l'intervention" style="margin-top:10px">
-        ${flags(false, lastC.defaultAlescom, 't')}
+        ${flags({ onSite: false, ...newWho(lastC) }, 't')}
         <div class="row" style="justify-content:center;margin-bottom:10px">
           <span class="small muted">Début</span>
           <input type="time" id="tAt" style="width:auto">
@@ -397,7 +463,7 @@ function viewToday() {
     };
     $('#tDesc').onchange = ev => { t.description = ev.target.value; save(); };
     $('#tSite').onchange = ev => { t.onSite = ev.target.checked; save(); };
-    $('#tAles').onchange = ev => { t.alescom = ev.target.checked; save(); };
+    $('#tCmd').onchange = () => { Object.assign(t, readWho('t')); save(); };
     $('#tPause').onclick = async () => {
       t.description = $('#tDesc').value;
       if (t.pausedAt) { t.pausedMs = (t.pausedMs || 0) + (Date.now() - new Date(t.pausedAt)); t.pausedAt = null; }
@@ -412,17 +478,17 @@ function viewToday() {
       openEntry(null, {
         clientId: t.clientId, date: isoDate(start), start: hhmm(start), end: hhmm(end), pauseMin,
         minutes: Math.max(1, Math.round(timerElapsed(t) / 60000)), description: t.description,
-        onSite: t.onSite, alescom: t.alescom
+        onSite: t.onSite, cmdId: cmdOf(t), techId: techOf(t), alescom: cmdOf(t) === 'alescom'
       }, true);
     };
   } else if ($('#tStart')) {
-    $('#tClient').onchange = ev => { $('#tAles').checked = !!client(ev.target.value).defaultAlescom; };
+    $('#tClient').onchange = ev => { $('#tCmd').value = clientSoc(client(ev.target.value)); };
     $('#tStart').onclick = async () => {
       const at = $('#tAt').value;
       const start = at ? startFromTime(at) : new Date();
       state.lastClientId = $('#tClient').value;
       setTimer({ clientId: state.lastClientId, start: start.toISOString(), description: $('#tDesc0').value.trim(),
-        onSite: $('#tSite').checked, alescom: $('#tAles').checked, pausedMs: 0, pausedAt: null });
+        onSite: $('#tSite').checked, ...readWho('t'), pausedMs: 0, pausedAt: null });
       await persist();
     };
   }
@@ -436,7 +502,7 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft 
   const c0 = state.clients.find(c => c.id === state.lastClientId && !c.deleted) || activeClients()[0];
   const e = { ...(entry || {
     clientId: c0?.id, date: today(), start: hhmm(new Date(Date.now() - 3600e3)), end: hhmm(new Date()), minutes: 60, pauseMin: 0,
-    description: '', install: '', onSite: false, alescom: !!c0?.defaultAlescom, ...preset
+    description: '', install: '', onSite: false, ...newWho(c0), ...preset
   }), ...(draft || {}) };
   if (!e.clientId) return alert("Ajoute d'abord un client dans Réglages.");
   const b = e.billId && bill(e.billId);
@@ -460,7 +526,7 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft 
       <div><label>Pause</label><input id="fPause" value="${e.pauseMin ? fmtDur(e.pauseMin) : ''}" placeholder="0:00"></div>
     </div>
     <label>Description</label><textarea id="fDesc">${esc(e.description)}</textarea>
-    ${flags(e.onSite, e.alescom, 'f')}
+    ${flags(e, 'f')}
     <label>Installation / réinstallation (optionnel)</label><input id="fInst" value="${esc(e.install)}" placeholder="ex. Réinstallation PC">
     <div class="actions">
       ${entry && !b ? '<button class="btn danger" id="fDel" style="margin-right:auto">Supprimer</button>' : ''}
@@ -488,11 +554,11 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft 
     if (ev.target.value === '__new') {
       // Fiche client complète (avec la liste des clients Billit pas encore reliés), puis retour au formulaire avec ce qui était saisi.
       const d = { clientId: e.clientId, date: $('#fDate').value, minutes: parseDur($('#fDur').value) || e.minutes, start: $('#fStart').value, end: $('#fEnd').value,
-        pauseMin: parseDur($('#fPause').value) || 0, description: $('#fDesc').value, onSite: $('#fSite').checked, alescom: $('#fAles').checked,
+        pauseMin: parseDur($('#fPause').value) || 0, description: $('#fDesc').value, onSite: $('#fSite').checked, ...readWho('f'),
         install: $('#fInst').value, flat: flat() };
       const back = x => openEntry(entry, preset, fromTimer, onSaved, x);
-      editClient(null, { onSaved: c => back({ ...d, clientId: c.id, alescom: entry ? d.alescom : !!c.defaultAlescom }), onCancel: () => back(d) });
-    } else if (!entry) $('#fAles').checked = !!client(ev.target.value).defaultAlescom;
+      editClient(null, { onSaved: c => back({ ...d, clientId: c.id, ...(entry ? {} : { cmdId: clientSoc(c), alescom: clientSoc(c) === 'alescom' }) }), onCancel: () => back(d) });
+    } else if (!entry) $('#fCmd').value = clientSoc(client(ev.target.value));
   };
   if ($('#fDel')) $('#fDel').onclick = async () => {
     if (!confirm('Supprimer cette intervention ?')) return;
@@ -508,7 +574,7 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft 
     if (minutes > 12 * 60 && !confirm(`Durée de ${fmtDur(minutes)} : oubli de dépointage ?\nEnregistrer quand même ?`)) return;
     const data = {
       clientId, date: $('#fDate').value, start: flat() ? '' : $('#fStart').value, end: flat() ? '' : $('#fEnd').value, minutes, pauseMin,
-      description: $('#fDesc').value.trim(), onSite: $('#fSite').checked, alescom: $('#fAles').checked, install: $('#fInst').value.trim()
+      description: $('#fDesc').value.trim(), onSite: $('#fSite').checked, ...readWho('f'), install: $('#fInst').value.trim()
     };
     if (b && !confirm('Cette intervention est déjà facturée. Modifier quand même l\'archive ?')) return;
     let saved = entry;
@@ -543,7 +609,7 @@ function openForfait(entry, kind) {
   }
   const c0 = entry ? client(entry.clientId) : clients.find(c => c.id === state.lastClientId) || clients[0];
   const e = entry || { clientId: c0.id, date: today(), minutes: kind === 'update' ? updateMinutes(c0) : 0,
-    description: label, onSite: false, alescom: !!c0.defaultAlescom };
+    description: label, onSite: false, ...newWho(c0) };
   const b = e.billId && bill(e.billId);
   const opts = clients.map(c => `<option value="${c.id}" ${c.id === e.clientId ? 'selected' : ''}>${esc(c.name)}${c.server ? ` · ${serverCount(c)} serveur(s)` : ''}</option>`).join('');
   const hint = c => kind !== 'update' ? 'Forfait : seule la durée est facturée.'
@@ -559,7 +625,7 @@ function openForfait(entry, kind) {
     </div>
     <p class="small muted" id="kHint">${esc(hint(client(e.clientId)))}</p>
     <label>Description</label><textarea id="kDesc">${esc(e.description)}</textarea>
-    ${flags(e.onSite, e.alescom, 'k')}
+    ${flags(e, 'k')}
     <div class="actions">
       ${entry && !b ? '<button class="btn danger" id="kDel" style="margin-right:auto">Supprimer</button>' : ''}
       <button class="btn" value="cancel">Annuler</button>
@@ -569,7 +635,7 @@ function openForfait(entry, kind) {
     const c = client(ev.target.value);
     $('#kHint').textContent = hint(c);
     if (kind === 'update') $('#kDur').value = fmtDur(updateMinutes(c));
-    if (!entry) $('#kAles').checked = !!c.defaultAlescom;
+    if (!entry) $('#kCmd').value = clientSoc(c);
   };
   if ($('#kDel')) $('#kDel').onclick = async () => {
     if (!confirm('Supprimer cette intervention ?')) return;
@@ -581,7 +647,7 @@ function openForfait(entry, kind) {
     if (isNaN(minutes) || minutes <= 0) return alert('Encode une durée (ex. 0:45 ou 1:30).');
     if (b && !confirm('Cette intervention est déjà facturée. Modifier quand même l\'archive ?')) return;
     const data = { clientId: $('#kClient').value, date: $('#kDate').value, start: '', end: '', minutes, pauseMin: 0,
-      description: $('#kDesc').value.trim(), onSite: $('#kSite').checked, alescom: $('#kAles').checked, install: '', forfait: kind };
+      description: $('#kDesc').value.trim(), onSite: $('#kSite').checked, ...readWho('k'), install: '', forfait: kind };
     if (entry) Object.assign(touch(entry), data);
     else state.entries.push(touch({ id: uid('e'), billId: null, ...data }));
     state.lastClientId = data.clientId;
@@ -621,7 +687,8 @@ function viewList() {
 // ---- Facturer ----
 let billingTarget = null, billUntil = today(), excluded = new Set(), excludedAch = new Set();
 function viewBilling() {
-  const open = live().filter(e => !e.billId);
+  // Seulement ce que One Level UP facture (pas le travail d'un autre technicien pour un autre commanditaire).
+  const open = live().filter(e => !e.billId && billable(e));
   // Un client sans intervention en attente apparaît aussi s'il a des achats prêts à refacturer.
   const keys = [...new Set([...open.map(groupKey), ...Achats.readyClients().map(id => 'c:' + id)])];
   if (billingTarget && !keys.includes(billingTarget)) billingTarget = null;
@@ -650,7 +717,7 @@ function viewBilling() {
       ${groups.map(g => `
       <div class="ccard tap" data-target="${g.info.key}">
         <div class="av" style="background:${avColor(g.info.key)}">${esc((g.info.label.trim()[0] || '?').toUpperCase())}</div>
-        <div class="mid"><div class="nm">${esc(g.info.label)} ${g.info.partner ? '<span class="pill warn">partenaire</span>' : ''}</div>
+        <div class="mid"><div class="nm">${esc(g.info.label)} ${g.info.partner ? '<span class="pill warn">commanditaire</span>' : ''}</div>
           <div class="meta">${[g.es.length && `${g.es.length} interv. · ${fmtDur(g.t.minutes)} · ${short(g.es[0].date)} → ${short(g.es[g.es.length - 1].date)}`,
             g.ach.length && `${g.ach.length} achat${g.ach.length > 1 ? 's' : ''}`].filter(Boolean).join(' · ')}</div>
           <div class="bar"><i style="width:${g.amount ? g.t.amount / g.amount * 100 : 100}%"></i><u style="width:${g.amount ? g.achAmount / g.amount * 100 : 0}%"></u></div></div>
@@ -694,7 +761,8 @@ function viewBillingTarget(key, all) {
     ${es.length ? `<div class="card"><h2>Interventions (${sel.length}/${es.length})</h2>
       <ul class="list">${es.map(e => `<li><input type="checkbox" data-inc="${e.id}" ${excluded.has(e.id) ? '' : 'checked'}>
         <div class="grow tap" data-edit="${e.id}"><div><strong>${frDate(e.date)}</strong> ${e.forfait || !e.start ? 'forfait' : `${e.start}–${e.end}`}
-          ${info.partner ? '· ' + esc(client(e.clientId).name) : ''} ${e.onSite ? '<span class="pill">sur site</span>' : ''}</div>
+          ${info.partner ? '· ' + esc(client(e.clientId).name) : ''} ${e.onSite ? '<span class="pill">sur site</span>' : ''}
+          ${techOf(e) !== me().id ? `<span class="pill">👤 ${esc(user(techOf(e)).name)}</span>` : ''}</div>
           <div class="small muted">${esc(e.description)}${e.install ? ' · ' + esc(e.install) : ''}</div></div>
         <div class="dur">${fmtDur(e.minutes)}</div></li>`).join('')}</ul></div>` : ''}
     ${ach.length ? `<div class="card"><h2>Achats à refacturer (${selA.length}/${ach.length})</h2>
@@ -800,7 +868,7 @@ const toBase64 = blob => new Promise((resolve, reject) => {
 async function resolveBillitCustomer(info, say) {
   const m = Billit.mode();
   const c = info.partner ? null : client(info.key.slice(2));
-  const stored = info.partner ? state.settings.alescomBillitIds?.[m] : c.billitIds?.[m];
+  const stored = info.partner ? info.soc.billitIds?.[m] : c.billitIds?.[m];
   if (stored) return stored;
   say('Recherche du client dans Billit…');
   const all = await Billit.customers();
@@ -819,7 +887,7 @@ async function resolveBillitCustomer(info, say) {
     id = await new Promise(res => { $('#bCustOk').onclick = () => res($('#bCust').value); $('#bCustNo').onclick = () => res(null); });
     if (!id) return null;
   }
-  if (info.partner) { state.settings.alescomBillitIds = { ...state.settings.alescomBillitIds, [m]: id }; state.settingsAt = Date.now(); }
+  if (info.partner) { info.soc.billitIds = { ...info.soc.billitIds, [m]: id }; touch(info.soc); }
   else { c.billitIds = { ...c.billitIds, [m]: id }; touch(c); }
   await DB.save(state); scheduleSync();
   return id;
@@ -904,7 +972,7 @@ async function sendToBillit(b) {
 }
 
 // ---- Archives : anciennes interventions (déjà facturées) ----
-let archQuery = '', archYear = today().slice(0, 4), archClient = '';
+let archQuery = '', archYear = today().slice(0, 4), archClient = '', archCmd = '';
 const ARCH_MAX = 300;
 function viewArchive() {
   const q = archQuery.toLowerCase();
@@ -912,16 +980,18 @@ function viewArchive() {
   const years = [...new Set([today().slice(0, 4), ...billed.map(e => e.date.slice(0, 4))])].sort().reverse();
   const text = e => { const b = bill(e.billId); return [client(e.clientId).name, e.description, e.install, b.ref, b.label].join(' ').toLowerCase(); };
   const es = sortEntries(billed.filter(e => (!archYear || e.date.startsWith(archYear)) && (!archClient || e.clientId === archClient)
-    && (!q || text(e).includes(q)))).reverse();
+    && (!archCmd || cmdOf(e) === archCmd) && (!q || text(e).includes(q)))).reverse();
+  const cmds = [...new Set(billed.map(cmdOf))].map(soc).sort((a, b) => (b.id === HOME) - (a.id === HOME) || a.name.localeCompare(b.name));
   const shown = es.slice(0, ARCH_MAX);
   const days = [...new Set(shown.map(e => e.date))];
 
   $('#view').innerHTML = `
     <div class="card">
       <label style="margin-top:0">Rechercher</label><input type="search" id="aQ" value="${esc(archQuery)}" placeholder="description, client, n° facture…">
-      <div class="grid2">
+      <div class="grid3">
         <div><label>Année</label><select id="aYear"><option value="">Toutes</option>${years.map(y => `<option ${y === archYear ? 'selected' : ''}>${y}</option>`).join('')}</select></div>
         <div><label>Client</label><select id="aClient"><option value="">Tous</option>${clientOptions(archClient)}</select></div>
+        <div><label>Commanditaire</label><select id="aCmd"><option value="">Tous</option>${cmds.map(s => `<option value="${s.id}" ${s.id === archCmd ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></div>
       </div>
       <p class="small muted" style="margin:10px 0 0">${es.length} intervention(s) archivée(s) · <strong>${fmtDur(es.reduce((s, e) => s + e.minutes, 0))}</strong>
         ${es.length > ARCH_MAX ? ` · ${ARCH_MAX} plus récentes affichées, affine la recherche` : ''}</p>
@@ -936,6 +1006,7 @@ function viewArchive() {
   };
   $('#aYear').onchange = e => { archYear = e.target.value; render(); };
   $('#aClient').onchange = e => { archClient = e.target.value; render(); };
+  $('#aCmd').onchange = e => { archCmd = e.target.value; render(); };
   // Archives : consultation seulement (pas de modification d'une intervention facturée).
   $$('[data-edit]').forEach(li => li.onclick = () => viewArchivedEntry(state.entries.find(e => e.id === li.dataset.edit)));
 }
@@ -955,7 +1026,8 @@ function viewArchivedEntry(e) {
       ${row('Pause', !flat && e.pauseMin ? fmtDur(e.pauseMin) : '')}
       ${row('Durée facturée', `<strong>${fmtDur(e.minutes)}</strong>`)}
       ${row('Lieu', e.onSite ? 'sur site' : 'à distance')}
-      ${row("Donneur d'ordre", e.alescom ? 'alescom' : '')}
+      ${row('Commanditaire', esc(soc(cmdOf(e)).name))}
+      ${row('Technicien', esc(userLabel(user(techOf(e)))))}
       ${row('Description', esc(e.description).replace(/\n/g, '<br>'))}
       ${row('Installation', esc(e.install))}
       ${row('Montant HTVA', eur(entryAmount(e)))}
@@ -965,6 +1037,142 @@ function viewArchivedEntry(e) {
       <button class="btn primary" id="vOk">Fermer</button></div>`;
   if ($('#vBill')) $('#vBill').onclick = () => showBill(b);
   $('#vOk').onclick = ev => { ev.preventDefault(); dlg.close(); };
+  if (!dlg.open) dlg.showModal();
+}
+
+// ---- Administration : sociétés (commanditaires), utilisateurs, rôles et clients visibles ----
+// Étape 1 (multi-societes.md) : seul Fred utilise l'app ; les droits seront appliqués aux autres sociétés avec le serveur (étape 2).
+const ROLES = { admin: 'Administrateur', resp: 'Responsable', tech: 'Technicien' };
+function viewAdmin() {
+  const socs = liveSocs(), us = liveUsers();
+  const nUsers = s => us.filter(u => u.societeId === s.id).length;
+  const nClients = s => state.clients.filter(c => !c.deleted && clientSoc(c) === s.id).length;
+  const seeLabel = u => (u.roles || []).includes('admin') ? 'tous les clients'
+    : Object.entries(u.clients || {}).map(([k, v]) => v === 'all' ? `${soc(k).name} : tous` : v?.length ? `${soc(k).name} : ${v.length}` : '').filter(Boolean).join(', ') || 'aucun client';
+  $('#view').innerHTML = `
+    <div class="card"><div class="row"><h2 class="grow" style="margin:0;border:0;padding:0">Sociétés (${socs.length})</h2><button class="btn" id="socAdd">+ Société</button></div>
+      <p class="small muted" style="margin:6px 0 8px">One Level UP et les commanditaires pour qui tu interviens. Leurs tarifs, client Billit et échéance servent à facturer tes interventions pour eux.</p>
+      <ul class="list">${socs.map(s => `<li class="tap" data-soc="${s.id}"><div class="grow" style="flex:1;min-width:0"><strong>${esc(s.name)}</strong>
+          ${s.home ? '<span class="pill ok">ta société</span>' : ''}${s.active === false ? '<span class="pill">inactive</span>' : ''}
+          <div class="small muted">${(s.home ? ['tarifs clients : Réglages'] : [`Billit : ${s.billitName || '—'}`, `${eur(socRates(s).h)} / h`, `échéance ${s.due ?? 15} j`])
+            .concat([`${nUsers(s)} utilisateur(s)`, `${nClients(s)} client(s)`]).map(esc).join(' · ')}</div></div><span class="chev">›</span></li>`).join('')}</ul>
+    </div>
+    <div class="card"><div class="row"><h2 class="grow" style="margin:0;border:0;padding:0">Utilisateurs (${us.length})</h2><button class="btn" id="usrAdd">+ Utilisateur</button></div>
+      <p class="small muted" style="margin:6px 0 8px">Techniciens et responsables des sociétés, reconnus par leur adresse Microsoft 365.</p>
+      <ul class="list">${us.map(u => `<li class="tap" data-usr="${u.id}"><div class="grow" style="flex:1;min-width:0"><strong>${esc(u.name)}</strong>
+          ${u.id === me().id ? '<span class="pill ok">toi</span>' : ''}${u.active === false ? '<span class="pill">inactif</span>' : ''}
+          <div class="small muted">${[soc(u.societeId).name, u.email || 'adresse à compléter', (u.roles || []).map(r => ROLES[r]).join(', '), seeLabel(u)].map(esc).join(' · ')}</div></div><span class="chev">›</span></li>`).join('')}</ul>
+    </div>
+    <div class="card"><h2>Droits</h2>
+      <ul class="small" style="margin:0;padding-left:18px">
+        <li><strong>Administrateur</strong> : tout, dont cet onglet, la facturation, les achats et les réglages.</li>
+        <li><strong>Responsable</strong> : les interventions dont sa société est le commanditaire et celles de ses techniciens, durées seulement.</li>
+        <li><strong>Technicien</strong> : saisit, modifie et supprime ses interventions ; voit celles dont sa société est le commanditaire, durées seulement.</li>
+        <li>Le technicien d'une intervention est toujours l'utilisateur connecté qui la crée ; il ne se change pas, même par un administrateur.</li>
+        <li>Chaque utilisateur ne choisit que parmi ses <strong>clients visibles</strong> (par société).</li></ul>
+      <p class="small muted">Pour l'instant, toi seul as accès aux données. Les autres sociétés pourront se connecter quand le serveur commun sera en place (étape 2) :
+        les droits ci-dessus seront alors appliqués.</p>
+    </div>`;
+  $('#socAdd').onclick = () => editSoc(null);
+  $('#usrAdd').onclick = () => editUser(null);
+  $$('[data-soc]').forEach(li => li.onclick = () => editSoc(soc(li.dataset.soc)));
+  $$('[data-usr]').forEach(li => li.onclick = () => editUser(user(li.dataset.usr)));
+}
+
+function editSoc(s) {
+  const dlg = $('#dlg'), f = $('#dlgForm');
+  // Nouvelle société : tarifs et articles d'Alescom (partenaire) proposés.
+  const r = s ? socRates(s) : { ...socRates(soc('alescom')) }, home = !!s?.home;
+  const rate = (k, label, step = '0.01') => `<div><label>${label}</label><input type="number" step="${step}" id="s_${k}" value="${esc(r[k] ?? '')}"></div>`;
+  const txt = (k, label) => `<div><label>${label}</label><input id="s_${k}" value="${esc(r[k] ?? '')}" autocapitalize="off"></div>`;
+  f.innerHTML = `<h2>${s ? esc(s.name) : 'Nouvelle société'}</h2>
+    <label>Nom</label><input id="sName" value="${esc(s?.name ?? '')}" placeholder="ex. Société X">
+    ${home ? '<p class="small muted">Ta société : ses tarifs (clients) se règlent dans Réglages.</p>' : `
+    <label>Tenant Microsoft 365 <span class="small">(domaine ou ID, pour la connexion de ses utilisateurs plus tard)</span></label>
+    <input id="sTenant" value="${esc(s?.tenant ?? '')}" placeholder="ex. societe-x.be" autocapitalize="off">
+    <label>Nom du client dans Billit <span class="small">(à qui tu factures ton travail pour eux)</span></label>
+    <input id="sBillit" value="${esc(s?.billitName ?? '')}" placeholder="ex. SOCIETE X SRL">
+    <h3 style="margin:14px 0 0">Tes tarifs pour ce commanditaire</h3>
+    <div class="grid3">${rate('h', '€ / heure')}${rate('m', '€ / minute')}${rate('dep', '€ déplacement')}</div>
+    <div class="grid3">${txt('hRef', 'Article heure')}${txt('mRef', 'Article minute')}${txt('depRef', 'Article déplacement')}</div>
+    <label>Échéance des factures (jours)</label><input type="number" step="1" min="0" id="sDue" value="${esc(s?.due ?? 15)}" style="max-width:120px">
+    <label class="check"><input type="checkbox" id="sActive" ${s?.active === false ? '' : 'checked'}> Active (proposée comme commanditaire)</label>`}
+    <div class="actions"><button class="btn" value="cancel">Annuler</button><button class="btn primary" id="sSave">Enregistrer</button></div>`;
+  $('#sSave').onclick = async ev => {
+    ev.preventDefault();
+    const name = $('#sName').value.trim().replace(/\s+/g, ' ');
+    if (!name) return alert('Nom requis.');
+    if (liveSocs().some(x => x !== s && fold(x.name) === fold(name))) return alert('Cette société existe déjà.');
+    const data = { name };
+    if (!home) {
+      const num = k => { const v = parseFloat($('#s_' + k).value); return isNaN(v) ? 0 : v; };
+      const ref = k => $('#s_' + k).value.trim();
+      // Les libellés (recap, fichier Prestations) suivent le nom de la société et les articles.
+      const rates = { ...r, h: num('h'), m: num('m'), dep: num('dep'), hRef: ref('hRef'), mRef: ref('mRef'), depRef: ref('depRef') };
+      if (!s || s.id !== 'alescom') Object.assign(rates, { hLabel: `Main d'œuvre ${name} heure (${rates.hRef})`, mLabel: `Main d'œuvre ${name} minutes (${rates.mRef})`, depLabel: `Déplacement ${name} (${rates.depRef})` });
+      Object.assign(data, { tenant: $('#sTenant').value.trim(), billitName: $('#sBillit').value.trim(), rates,
+        due: Math.max(0, parseInt($('#sDue').value, 10) || 0), active: $('#sActive').checked });
+    }
+    if (s) Object.assign(touch(s), data); else state.societes.push(touch({ id: uid('s'), billitIds: {}, ...data }));
+    dlg.close(); await persist(); toast('Enregistré');
+  };
+  if (!dlg.open) dlg.showModal();
+}
+
+function editUser(u) {
+  const dlg = $('#dlg'), f = $('#dlgForm');
+  const roles = u?.roles || ['tech'], see = { ...(u?.clients || {}) };
+  if (!u) see[HOME] = see[HOME] || [];
+  const socs = activeSocs();
+  const clientsOf = s => state.clients.filter(c => !c.deleted && !c.archived && clientSoc(c) === s.id).sort((a, b) => a.name.localeCompare(b.name));
+  // Clients visibles : par société, tous / une sélection / aucun.
+  const seeBlock = s => {
+    const v = see[s.id], mode = v === 'all' ? 'all' : Array.isArray(v) && v.length ? 'some' : 'none', cs = clientsOf(s);
+    return `<div class="card" style="margin:8px 0;padding:8px 10px"><div class="row"><strong class="grow">${esc(s.name)}</strong>
+        <select data-see="${s.id}" style="width:auto">
+          <option value="none" ${mode === 'none' ? 'selected' : ''}>Aucun client</option>
+          <option value="all" ${mode === 'all' ? 'selected' : ''}>Tous (${cs.length})</option>
+          <option value="some" ${mode === 'some' ? 'selected' : ''}>Sélection</option></select></div>
+      <div class="${mode === 'some' ? '' : 'hidden'}" data-seebox="${s.id}" style="max-height:180px;overflow:auto;margin-top:6px">
+        ${cs.length ? cs.map(c => `<label class="check"><input type="checkbox" data-seec="${s.id}" value="${c.id}" ${Array.isArray(v) && v.includes(c.id) ? 'checked' : ''}> ${esc(c.name)}</label>`).join('')
+          : '<span class="small muted">Aucun client rattaché à cette société (fiche client → Société).</span>'}</div></div>`;
+  };
+  f.innerHTML = `<h2>${u ? esc(u.name) : 'Nouvel utilisateur'}</h2>
+    <label>Nom</label><input id="uName" value="${esc(u?.name ?? '')}" placeholder="ex. Geoffrey">
+    <label>Adresse Microsoft 365</label><input id="uEmail" type="email" value="${esc(u?.email ?? '')}" placeholder="prenom@societe.be" autocapitalize="off">
+    <label>Société</label><select id="uSoc">${socOptions(u?.societeId || HOME)}</select>
+    <label>Rôles</label>
+    <div class="row">${Object.entries(ROLES).map(([k, l]) => `<label class="check grow"><input type="checkbox" data-role="${k}" ${roles.includes(k) ? 'checked' : ''}> ${l}</label>`).join('')}</div>
+    <label class="check"><input type="checkbox" id="uActive" ${u?.active === false ? '' : 'checked'}> Actif</label>
+    <h3 style="margin:14px 0 0">Clients visibles</h3>
+    <p class="small muted" id="uSeeAdmin" style="margin:4px 0">Un administrateur voit tous les clients.</p>
+    <div id="uSee">${socs.map(seeBlock).join('')}</div>
+    <div class="actions"><button class="btn" value="cancel">Annuler</button><button class="btn primary" id="uSave">Enregistrer</button></div>`;
+  const isAdm = () => $('[data-role="admin"]').checked;
+  const upAdm = () => { $('#uSee').classList.toggle('hidden', isAdm()); $('#uSeeAdmin').classList.toggle('hidden', !isAdm()); };
+  $('[data-role="admin"]').onchange = upAdm; upAdm();
+  $$('[data-see]', f).forEach(sel => sel.onchange = () => $(`[data-seebox="${sel.dataset.see}"]`).classList.toggle('hidden', sel.value !== 'some'));
+  $('#uSave').onclick = async ev => {
+    ev.preventDefault();
+    const name = $('#uName').value.trim().replace(/\s+/g, ' '), email = $('#uEmail').value.trim().toLowerCase();
+    const rs = $$('[data-role]', f).filter(x => x.checked).map(x => x.dataset.role), active = $('#uActive').checked;
+    if (!name) return alert('Nom requis.');
+    if (!rs.length) return alert('Choisis au moins un rôle.');
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return alert('Adresse e-mail invalide.');
+    if (email && liveUsers().some(x => x !== u && fold(x.email) === fold(email))) return alert('Cette adresse est déjà utilisée par un autre utilisateur.');
+    // Toujours au moins un administrateur actif (sinon plus personne n'accède à cet onglet).
+    const admins = liveUsers().filter(x => x !== u && x.active !== false && (x.roles || []).includes('admin'));
+    if (!admins.length && !(rs.includes('admin') && active)) return alert('Il faut garder au moins un administrateur actif.');
+    const clients = {};
+    $$('[data-see]', f).forEach(sel => {
+      const id = sel.dataset.see;
+      if (sel.value === 'all') clients[id] = 'all';
+      else if (sel.value === 'some') clients[id] = $$(`[data-seec="${id}"]`, f).filter(x => x.checked).map(x => x.value);
+    });
+    const data = { name, email, societeId: $('#uSoc').value, roles: rs, active, clients };
+    if (u) Object.assign(touch(u), data); else state.users.push(touch({ id: uid('u'), ...data }));
+    dlg.close(); await persist(); toast('Enregistré');
+  };
   if (!dlg.open) dlg.showModal();
 }
 
@@ -982,16 +1190,15 @@ function viewSettings() {
       <ul class="list" style="margin-top:8px;max-height:420px;overflow:auto">${state.clients.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name)).map(c => `
         <li data-name="${esc(fold(c.name + ' ' + (c.billitName || '') + ' ' + (c.domains || []).join(' ')))}">
           <div class="grow tap" data-client="${c.id}"><strong>${esc(c.name)}</strong> ${c.archived ? '<span class="pill">archivé</span>' : ''}
-            <div class="small muted">Billit : ${esc(c.billitName || '—')}${c.near ? ' · proche (zone 1)' : ''}${c.server ? ` · ${serverCount(c)} serveur(s)` : ''}${c.defaultAlescom ? ' · alescom' : ''}${c.domains?.length ? ' · ' + esc(c.domains.join(', ')) : ''}</div></div>
+            <div class="small muted">Billit : ${esc(c.billitName || '—')}${c.near ? ' · proche (zone 1)' : ''}${c.server ? ` · ${serverCount(c)} serveur(s)` : ''}${clientSoc(c) !== HOME ? ' · ' + esc(soc(clientSoc(c)).name) : ''}${c.domains?.length ? ' · ' + esc(c.domains.join(', ')) : ''}</div></div>
           <button class="btn danger chip" data-delclient="${c.id}" title="Supprimer">🗑</button></li>`).join('')}</ul>
-      <label>Nom Billit du commanditaire alescom</label><input id="alesBillit" value="${esc(s.alescomBillit)}">
     </div>
 
     <div class="card">${rateBlock('client', 'Tarifs clients')}
       <div class="grid2" style="margin-top:4px">
         <div><label>€ déplacement client proche (dep-003)</label><input type="number" step="0.01" data-rate="zone1.dep" value="${r.zone1.dep}"></div>
       </div>
-      <div style="height:12px"></div>${rateBlock('partner', 'Tarifs alescom (partenaire)')}</div>
+      <p class="small muted">Tarifs des commanditaires (Alescom…) : onglet Administration → Sociétés.</p></div>
 
     <div class="card"><h2>OneDrive</h2>
       <p class="small" id="odStatus">${esc(statusText())}</p>
@@ -1061,7 +1268,6 @@ function viewSettings() {
     $$('li[data-name]').forEach(li => li.classList.toggle('hidden', !!q && !li.dataset.name.includes(q)));
   };
   const saveSettings = async () => { state.settingsAt = Date.now(); await DB.save(state); scheduleSync(); toast('Enregistré'); };
-  $('#alesBillit').onchange = ev => { s.alescomBillit = ev.target.value.trim(); saveSettings(); };
   $$('[data-rate]').forEach(inp => inp.onchange = () => {
     const [k, fld] = inp.dataset.rate.split('.'); const v = parseFloat(inp.value);
     if (!isNaN(v)) { r[k][fld] = v; saveSettings(); }
@@ -1125,7 +1331,7 @@ function viewSettings() {
     delete state.settings.pin; state.settingsAt = Date.now(); await persist(); toast('Code PIN supprimé');
   };
 
-  $('#backup').onclick = () => download(new Blob([JSON.stringify({ entries: state.entries, clients: state.clients, bills: state.bills }, null, 1)],
+  $('#backup').onclick = () => download(new Blob([JSON.stringify({ entries: state.entries, clients: state.clients, bills: state.bills, societes: state.societes, users: state.users }, null, 1)],
     { type: 'application/json' }), `heures-sauvegarde-${today()}.json`);
   $('#importHT').onclick = () => $('#fileHT').click();
   $('#fileHT').onchange = async ev => {
@@ -1182,7 +1388,7 @@ function editClient(c, opts = {}) {
     <label>Nom(s) de domaine <span class="small">(séparés par une virgule, sert à attribuer les achats OVH…)</span></label>
     <input id="cDomains" value="${esc((c?.domains || pre.domains || []).join(', '))}" placeholder="ex. vedi.be, vts-sa.com" autocapitalize="off">
     <label class="check"><input type="checkbox" id="cNear" ${c?.near ? 'checked' : ''}> Client proche (déplacement zone 1, dep-003)</label>
-    <label class="check"><input type="checkbox" id="cAles" ${c?.defaultAlescom ? 'checked' : ''}> alescom par défaut</label>
+    <label>Société du client (commanditaire proposé par défaut)</label><select id="cSoc">${socOptions(c ? clientSoc(c) : HOME)}</select>
     <div class="row">
       <label class="check grow"><input type="checkbox" id="cServer" ${c?.server ? 'checked' : ''}> Serveur(s)</label>
       <div id="cServersBox" class="${c?.server ? '' : 'hidden'}" style="width:140px"><label style="margin-top:0">Nombre de serveurs</label>
@@ -1227,7 +1433,7 @@ function editClient(c, opts = {}) {
       .map(d => d.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '')).filter(d => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d)))];
     const taken = domains.map(d => [d, state.clients.find(x => x !== c && !x.deleted && (x.domains || []).includes(d))]).find(([, x]) => x);
     if (taken) return alert(`Le domaine ${taken[0]} est déjà attribué à ${taken[1].name}.`);
-    const data = { name, billitName: $('#cBillit').value.trim(), domains, near: $('#cNear').checked, defaultAlescom: $('#cAles').checked, archived: !!$('#cArch')?.checked,
+    const data = { name, billitName: $('#cBillit').value.trim(), domains, near: $('#cNear').checked, societeId: $('#cSoc').value, defaultAlescom: $('#cSoc').value === 'alescom', archived: !!$('#cArch')?.checked,
       server, servers: server ? servers : 0 };
     // Client Billit choisi dans la liste : lien mémorisé (comme au 1er envoi d'une facture), pas de recherche par le nom ensuite.
     if (billitId) data.billitIds = { ...c?.billitIds, [mode]: billitId };
@@ -1261,7 +1467,7 @@ function importRows(rows, source, askBilled) {
     ev.preventDefault();
     for (const n of newClients) {
       const first = rows.find(r => r.client === n);
-      state.clients.push(touch({ id: uid('c'), name: n, billitName: '', defaultOnSite: first.onSite, defaultAlescom: first.alescom }));
+      state.clients.push(touch({ id: uid('c'), name: n, billitName: '', defaultOnSite: first.onSite, societeId: first.alescom ? 'alescom' : HOME, defaultAlescom: first.alescom }));
     }
     let b = null;
     if (askBilled && $('#iBilled').checked) state.bills.push(b = touch({ id: uid('b'), key: 'import', label: 'Import historique', date: today(), ref: '', entryIds: [], from: '', to: '', amount: 0 }));
@@ -1270,7 +1476,7 @@ function importRows(rows, source, askBilled) {
       const c = find(r.client);
       if (existing.has(dupKey(c.id, r))) continue;
       const e = touch({ id: uid('e'), clientId: c.id, date: r.date, start: r.start, end: r.end, minutes: r.minutes, pauseMin: 0,
-        description: r.description, onSite: r.onSite, alescom: r.alescom, install: r.install || '', billId: b?.id || null });
+        description: r.description, onSite: r.onSite, cmdId: r.alescom ? 'alescom' : HOME, techId: ADMIN, alescom: r.alescom, install: r.install || '', billId: b?.id || null });
       state.entries.push(e); existing.add(dupKey(c.id, r)); n++;
       if (b) b.entryIds.push(e.id);
     }
@@ -1318,6 +1524,7 @@ function adoptRemote(remote) {
   state.entries = [...rE, ...localOnly];
   state.clients = [...rC, ...state.clients.filter(c => !c.deleted && need.has(c.id) && !rC.some(r => r.id === c.id))];
   state.bills = remote.bills || [];
+  state.societes = remote.societes || []; state.users = remote.users || [];
   state.timer = remote.timer ?? null; state.timerAt = remote.timerAt || 0;
   if (remote.settings) { state.settings = remote.settings; state.settingsAt = remote.settingsAt || 0; }
   normalizeSettings();

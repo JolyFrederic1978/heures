@@ -576,7 +576,9 @@ const Achats = (() => {
     $$('[data-wadd]', root).forEach(btn => btn.onclick = ev => {
       ev.preventDefault();
       const { i, x } = get(btn.dataset.wadd);
-      const preset = { date: x.date, start: x.start || '', end: x.end || '', minutes: x.minutes || 0, pauseMin: 0, onSite: !!x.onSite, alescom: false, install: '',
+      // Travail fait pour One Level UP ; technicien = l'utilisateur connecté (règle de l'app), celui de la facture reste dans la description.
+      const preset = { date: x.date, start: x.start || '', end: x.end || '', minutes: x.minutes || 0, pauseMin: 0, onSite: !!x.onSite,
+        cmdId: HOME, alescom: false, install: '',
         description: [x.notes, `(${[i.supplier, x.tech].filter(Boolean).join(' – ')}, facture ${i.number})`].filter(Boolean).join(' ') };
       if (x.clientId && state.clients.some(c => c.id === x.clientId && !c.deleted)) preset.clientId = x.clientId;
       openEntry(null, preset, false, async e => { x.entryId = e.id; touch(i); await save(); });
@@ -1008,6 +1010,7 @@ const Achats = (() => {
       alive(A.lines).forEach(l => { if (l.mapId === m.id && l.status !== 'billed') { l.mapId = null; touch(l); } });
       await save(); scheduleSync(); backToArticles();
     };
+    openDlg();
   }
 
   // Modification d'un article Billit existant (nom, prix, TVA) : renvoyé en entier avec son ProductID.

@@ -36,6 +36,9 @@ body.locked .tabs, body.locked #syncPill { display: none; }
   font-size: 11px; display: flex; flex-direction: column; align-items: center; gap: 2px; cursor: pointer; }
 .tabs .ico { font-size: 20px; line-height: 1; }
 .tabs button.active { color: var(--accent); font-weight: 600; }
+/* 8 onglets (avec Admin) : texte plus petit sur téléphone pour qu'il tienne. */
+.tabs button { min-width: 0; overflow: hidden; white-space: nowrap; }
+@media (max-width: 440px) { .tabs button { font-size: 9px; letter-spacing: -.2px; } }
 
 .daybar { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px;
   background: var(--accent); color: #fff; border-radius: 10px; padding: 10px 14px; font-weight: 600; }
