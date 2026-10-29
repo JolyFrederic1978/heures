@@ -983,12 +983,26 @@ const Achats = (() => {
     });
   }
 
-  function editMap(m) {
+  // Liste déroulante des articles Billit, par catégorie. La référence actuelle reste proposée même si elle n'existe pas (ou plus) dans Billit.
+  // Liste Billit indisponible (pas de clé, erreur) : saisie de la référence à la main.
+  function productSelect(id, sel) {
+    if (!products) return `<input id="${id}" value="${esc(sel)}" autocapitalize="off" placeholder="ex. int-004">`;
+    const ps = products.slice().sort((a, b) => String(a.Reference).localeCompare(String(b.Reference)));
+    const opt = p => `<option value="${esc(p.Reference)}" ${fold(p.Reference) === fold(sel) ? 'selected' : ''}>${esc(p.Reference)} · ${esc(p.Description || '')} · ${eur(productPrice(p))}</option>`;
+    const groups = categories().map(g => ({ name: g.name, ps: ps.filter(p => p.GroupID === g.id) }))
+      .concat([{ name: 'Sans catégorie', ps: ps.filter(p => !p.GroupID) }]).filter(g => g.ps.length);
+    return `<select id="${id}"><option value="">— aucun article —</option>
+      ${sel && !product(sel) ? `<option value="${esc(sel)}" selected>${esc(sel)} (inconnu dans Billit)</option>` : ''}
+      ${groups.map(g => `<optgroup label="${esc(g.name)}">${g.ps.map(opt).join('')}</optgroup>`).join('')}</select>`;
+  }
+
+  async function editMap(m) {
+    await loadProducts(0);
     const f = $('#dlgForm'), s = supplierOf(m.supplier);
     f.innerHTML = `<h2>${esc(m.label)}</h2><p class="small muted">${esc(m.supplier)} · clé « ${esc(m.key)} »</p>
       <label>Nom du produit (affiché dans l'app et les fichiers Excel)</label><input id="mLabel" value="${esc(m.label)}">
-      <label>Article Billit (référence)</label><input id="mRef" value="${esc(m.billitRef)}" list="billitRefs" autocapitalize="off">
-      <datalist id="billitRefs">${productOptions()}</datalist>
+      <label>Article Billit (${Billit.mode() === 'live' ? 'réel' : 'test'}, ${products ? products.length + ' articles' : 'liste indisponible'})</label>${productSelect('mRef', m.billitRef || '')}
+      ${productsErr ? `<p class="small muted">${esc(productsErr)}</p>` : ''}
       <label>Marge de l'article en % (vide = marge fournisseur : ${s && isSet(s.margin) ? pct(s.margin) : 'non définie'})</label>
       <input type="number" step="0.1" id="mMargin" value="${esc(m.margin ?? '')}">
       <label class="check"><input type="checkbox" id="mIgnore" ${m.ignore ? 'checked' : ''}> Ne jamais refacturer ce type d'article</label>

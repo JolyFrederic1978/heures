@@ -1233,7 +1233,7 @@ function viewSettings() {
       <p class="small muted">Clients, articles (catégories par leur nom) et factures de vente et d'achat des 3 derniers mois, avec leurs fournisseurs.
         Le Billit réel est seulement lu (clé « réel » ci-dessus). Ventes copiées en Projet ; clients et fournisseurs sans e-mail ni Peppol.
         Relancer ne crée pas de doublon. Pour que l'onglet Achats importe les factures d'achat copiées, ouvre-le une fois <em>avant</em> la copie.</p>
-      <button class="btn" id="cpGo">Préparer la copie</button>
+      <div class="row"><button class="btn" id="cpGo">Préparer la copie</button><button class="btn" id="cpArt">Copier les articles seulement</button></div>
       <pre class="recap hidden" id="cpLog"></pre>`}
       <p class="small muted">Clé API : dans Billit, menu de ton profil → API. Laisse le PartyID vide puis clique « Tester la connexion » : il est retrouvé automatiquement. Ils sont enregistrés dans tes données OneDrive
         (protégées par ta connexion Microsoft et ton code PIN), jamais sur GitHub. La clé donne accès à tout ton Billit : tu peux la révoquer à tout moment dans Billit.</p>
@@ -1314,17 +1314,20 @@ function viewSettings() {
       out.innerHTML = `<span class="pill ok">✓ Connecté (${esc(billitModeLabel(Billit.mode()))}) : ${esc(co?.Name || a?.Email || 'OK')} · PartyID ${esc(k.partyId)}</span>`;
     } catch (e) { out.innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
   };
-  if ($('#cpGo')) $('#cpGo').onclick = async () => {
-    const out = $('#cpLog'), btn = $('#cpGo'), log = t => { out.textContent += t + '\n'; out.scrollTop = out.scrollHeight; };
-    out.textContent = ''; out.classList.remove('hidden'); btn.disabled = true;
+  // Copie complète (clients, articles, factures des 3 derniers mois) ou articles seulement.
+  const copyBillit = async productsOnly => {
+    const out = $('#cpLog'), btns = $$('#cpGo, #cpArt'), log = t => { out.textContent += t + '\n'; out.scrollTop = out.scrollHeight; };
+    out.textContent = ''; out.classList.remove('hidden'); btns.forEach(b => b.disabled = true);
     try {
-      const plan = await CopieBillit.prepare(3, log);
+      const plan = await CopieBillit.prepare(3, log, { productsOnly });
       log(CopieBillit.summary(plan));
       if (!confirm(CopieBillit.summary(plan) + '\n\nLancer la copie vers le sandbox ?')) return log('Copie annulée.');
       await CopieBillit.run(plan, log);
     } catch (e) { log('Erreur : ' + e.message); }
-    finally { btn.disabled = false; }
+    finally { btns.forEach(b => b.disabled = false); }
   };
+  if ($('#cpGo')) $('#cpGo').onclick = () => copyBillit(false);
+  if ($('#cpArt')) $('#cpArt').onclick = () => copyBillit(true);
   $('#pinSet').onclick = () => editPin();
   if ($('#pinDel')) $('#pinDel').onclick = async () => {
     if (!confirm('Supprimer le code PIN (sur tous tes appareils) ?')) return;

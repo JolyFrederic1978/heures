@@ -25,7 +25,8 @@ const CopieBillit = (() => {
   }
 
   // 1. Lecture des deux comptes et préparation (rien n'est écrit, sauf le PartyID réel s'il manquait).
-  async function prepare(months, log) {
+  // productsOnly : seulement les articles (ni clients, ni fournisseurs, ni factures).
+  async function prepare(months, log, { productsOnly = false } = {}) {
     guard();
     const lk = state.settings.billit.live;
     if (!lk.partyId) {
@@ -37,12 +38,13 @@ const CopieBillit = (() => {
     const since = new Date(); since.setMonth(since.getMonth() - months);
     const from = isoDate(since);
     const invoices = Billit.odata(`OrderType eq 'Invoice' and OrderDate ge DateTime'${from}'`);
+    const none = async () => [];
     log('Lecture du Billit réel…');
-    const [lProducts, lParties, lOrders] = await Promise.all([
-      Billit.live.list('/v1/products'), Billit.live.list('/v1/parties'), Billit.live.list('/v1/orders' + invoices)]);
+    const [lProducts, lParties, lOrders] = await Promise.all([Billit.live.list('/v1/products'),
+      productsOnly ? none() : Billit.live.list('/v1/parties'), productsOnly ? none() : Billit.live.list('/v1/orders' + invoices)]);
     log('Lecture du sandbox…');
-    const [tProducts, tParties, tOrders] = await Promise.all([
-      Billit.list('/v1/products'), Billit.list('/v1/parties'), Billit.list('/v1/orders' + Billit.odata("OrderType eq 'Invoice'"))]);
+    const [tProducts, tParties, tOrders] = await Promise.all([Billit.list('/v1/products'),
+      productsOnly ? none() : Billit.list('/v1/parties'), productsOnly ? none() : Billit.list('/v1/orders' + Billit.odata("OrderType eq 'Invoice'"))]);
 
     // Catégories : par nom (celles du sandbox sont lues sur ses articles).
     const tGroups = new Map(tProducts.filter(p => p.GroupID && p.GroupName).map(p => [norm(p.GroupName), p.GroupID]));
@@ -68,17 +70,17 @@ const CopieBillit = (() => {
       if (!t) newProducts.push(p);
       else { productMap.set(p.ProductID, t.ProductID); if (!t.GroupID && groupMap.has(p.GroupID)) regroup.push([p, t]); }
     }
-    return { months, from, groupMap, missingGroups, partyMap, newParties, productMap, newProducts, regroup, orders,
+    return { productsOnly, months, from, groupMap, missingGroups, partyMap, newParties, productMap, newProducts, regroup, orders,
       already: lOrders.length - orders.length, sales: orders.filter(o => o.OrderDirection !== 'Cost').length, costs: orders.filter(o => o.OrderDirection === 'Cost').length };
   }
 
   const summary = p => [
-    `Billit réel → sandbox, factures depuis le ${p.from.split('-').reverse().join('/')} :`,
-    `- clients / fournisseurs à créer : ${p.newParties.length} (${p.partyMap.size} déjà dans le sandbox)`,
+    p.productsOnly ? 'Billit réel → sandbox, articles seulement :' : `Billit réel → sandbox, factures depuis le ${p.from.split('-').reverse().join('/')} :`,
+    !p.productsOnly && `- clients / fournisseurs à créer : ${p.newParties.length} (${p.partyMap.size} déjà dans le sandbox)`,
     `- articles à créer : ${p.newProducts.length} (${p.productMap.size} déjà dans le sandbox${p.regroup.length ? `, ${p.regroup.length} à ranger dans leur catégorie` : ''})`,
-    `- factures à copier : ${p.sales} vente(s) en Projet + ${p.costs} achat(s)${p.already ? ` (${p.already} déjà copiée(s))` : ''}`,
+    !p.productsOnly && `- factures à copier : ${p.sales} vente(s) en Projet + ${p.costs} achat(s)${p.already ? ` (${p.already} déjà copiée(s))` : ''}`,
     p.missingGroups.length ? `- catégories absentes du sandbox (l'API ne peut pas les créer) : ${p.missingGroups.join(', ')}.\n  Les articles concernés sont créés sans catégorie ; crée ces catégories dans le sandbox puis relance la copie pour les y ranger.` : '- catégories : toutes présentes dans le sandbox'
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 
   const fileOf = async f => { const x = await Billit.live.get('/v1/files/' + encodeURIComponent(f.FileID)); return { FileName: x.FileName || f.FileName, FileContent: x.FileContent }; };
 
@@ -90,7 +92,7 @@ const CopieBillit = (() => {
     const productBody = (lp, extra = {}) => ({ ...pick(lp, ['Reference', 'Description', 'AmountExcl', 'VAT', 'Unit', 'BuyExcl']),
       ...(p.groupMap.has(lp.GroupID) ? { GroupID: p.groupMap.get(lp.GroupID) } : {}), ...extra });
 
-    log(`Clients / fournisseurs (${p.newParties.length})…`);
+    if (!p.productsOnly) log(`Clients / fournisseurs (${p.newParties.length})…`);
     for (const lp of p.newParties) {
       try {
         const id = await Billit.saveParty({ ...pick(lp, PARTY_FIELDS), PartyType: lp.PartyType,
@@ -105,7 +107,7 @@ const CopieBillit = (() => {
     for (const [lp, t] of p.regroup) {
       try { await Billit.saveProduct(productBody(lp, { ProductID: t.ProductID })); } catch (e) { fail(lp.Reference + ' (catégorie)', e); }
     }
-    log(`Factures (${p.orders.length})…`);
+    if (!p.productsOnly) log(`Factures (${p.orders.length})…`);
     let done = 0;
     for (const lo of p.orders) {
       const label = `${lo.OrderDirection === 'Cost' ? 'achat' : 'vente'} ${lo.OrderNumber || lo.OrderID} du ${day(lo.OrderDate)}`;
@@ -126,7 +128,7 @@ const CopieBillit = (() => {
         done++;
       } catch (e) { fail(label, e); }
     }
-    log(`Terminé : ${parties} client(s)/fournisseur(s), ${products} article(s), ${done} facture(s) copiée(s)${errors ? `, ${errors} erreur(s) (voir ci-dessus)` : ', aucune erreur'}.`);
+    log(`Terminé : ${p.productsOnly ? '' : `${parties} client(s)/fournisseur(s), `}${products} article(s)${p.productsOnly ? ' copié(s)' : `, ${done} facture(s) copiée(s)`}${errors ? `, ${errors} erreur(s) (voir ci-dessus)` : ', aucune erreur'}.`);
     return { done, errors };
   }
 
