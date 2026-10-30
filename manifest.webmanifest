@@ -1,6 +1,6 @@
 {
-  "name": "OLU Gestion",
-  "short_name": "OLU Gestion",
+  "name": "LevelDesk",
+  "short_name": "LevelDesk",
   "description": "Outil interne de One Level UP : pointage, facturation et refacturation des achats.",
   "lang": "fr",
   "start_url": "./",

@@ -131,46 +131,67 @@ const Taches = (() => {
     if (tab === 'today' && $('#tkDay')) dayList($('#tkDay'));
   }
 
-  // --- ajout rapide : « Réinstaller PC accueil Vedi demain 14h p1 @Geoffrey » ---
-  // Reconnu : p1…p4, @technicien, #client (sinon le nom d'un client dans le texte), aujourd'hui / demain / après-demain / jour de la semaine /
-  // JJ/MM[/AAAA] / « dans N jours », heure 14h, 14h30, 14:30. Le reste devient le titre ; tout est vérifié dans la fiche avant d'enregistrer.
+  // --- ajout rapide : « Réinstaller PC accueil Vedi demain 14h p1 @Geoffrey » (au clavier ou dicté) ---
+  // Reconnu : p1…p4, « priorité 1 », « urgent » ; @technicien ; #client (sinon le nom d'un client dans le texte) ;
+  // aujourd'hui / ce soir / demain / après-demain / lundi [prochain] / la semaine prochaine / dans N jours ou semaines / 12/11[/2026] / le 12 novembre ;
+  // heure 14h, 14h30, 14 h 30, 14 heures, 14:30, midi. Les petits mots devant (« à », « le », « pour »…) partent avec. Le reste devient le titre ;
+  // tout est vérifié dans la fiche avant d'enregistrer.
   const DAYS = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+  const MONTHS = ['janvier', 'fevrier', 'mars', 'avril', 'mai', 'juin', 'juillet', 'aout', 'septembre', 'octobre', 'novembre', 'decembre'];
+  const MONTH_RE = 'janvier|f[ée]vrier|mars|avril|mai|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[ée]cembre';
   const addDays = n => { const d = new Date(); d.setDate(d.getDate() + n); return isoDate(d); };
+  const inDays = wd => (wd - new Date().getDay() + 7) % 7 || 7;          // prochain jour de semaine wd (jamais aujourd'hui)
+  // Date sans année déjà passée : l'an prochain.
+  const dayMonth = (d, mo, y) => {
+    if (!d || d > 31 || !mo || mo > 12) return null;
+    const yy = y ? +(String(y).length === 2 ? '20' + y : y) : new Date().getFullYear();
+    const iso = `${yy}-${pad(mo)}-${pad(d)}`;
+    return !y && iso < today() ? `${yy + 1}-${pad(mo)}-${pad(d)}` : iso;
+  };
   function parseQuick(s) {
-    let txt = ` ${s} `;
+    // Apostrophes du téléphone et de la dictée (’) ; ponctuation de la dictée (« demain. »).
+    let txt = ` ${String(s).replace(/[’‘]/g, "'").replace(/[,;!?]|\.(?=\s|$)/g, ' ')} `;
     const out = {};
     // fn renvoie false : le morceau reste dans le titre.
     const take = (re, fn) => { txt = txt.replace(re, (...m) => fn(m) === false ? m[0] : ' '); };
-    take(/\s[pP]([1-4])(?=\s)/, m => { out.priority = +m[1]; });
+    const pre = '(?:(?:pour|le|ce|d\'ici|avant)\\s)*';                   // petits mots devant une date, retirés avec elle
+    take(/\s(?:[pP]\s?([1-4])|priorit[ée]\s?([1-4]))(?=\s)/, m => { out.priority = +(m[1] || m[2]); });
+    take(/\surgente?(?=\s)/i, () => { out.priority = 1; });
     take(/\s@(\S+)/, m => {
       const u = liveUsers().find(x => x.active !== false && fold(x.name).startsWith(fold(m[1])));
-      if (!u) return false; out.assigneeId = u.id;
+      if (!u) { out.unknownUser = m[1]; return false; }
+      out.assigneeId = u.id;
     });
     take(/\s#(\S+)/, m => {
       const c = activeClients().filter(canSee).find(x => fold(x.name).replace(/\s+/g, '').startsWith(fold(m[1])));
-      if (!c) return false; out.clientId = c.id;
+      if (!c) { out.unknownClient = m[1]; return false; }
+      out.clientId = c.id;
     });
-    take(/\s(\d{1,2})(?:h(\d{2})?|:(\d{2}))(?=\s)/i, m => {
-      const h = +m[1], mi = +(m[2] || m[3] || 0);
+    take(/\s(?:(?:à|a|vers|pour)\s)?(\d{1,2})\s?(?:h|heures?)(?:\s?(\d{2}))?(?=\s)/i, m => {
+      const h = +m[1], mi = +(m[2] || 0);
       if (h > 23 || mi > 59) return false; out.time = `${pad(h)}:${pad(mi)}`;
     });
-    take(/\saprès-demain(?=\s)/i, () => { out.due = addDays(2); });
-    take(/\sdemain(?=\s)/i, () => { out.due = addDays(1); });
-    take(/\s(aujourd'hui|auj)(?=\s)/i, () => { out.due = today(); });
-    take(/\sdans (\d{1,3}) jours?(?=\s)/i, m => { out.due = addDays(+m[1]); });
-    take(new RegExp(`\\s(${DAYS.join('|')})(?=\\s)`, 'i'), m => {
-      const n = (DAYS.indexOf(m[1].toLowerCase()) - new Date().getDay() + 7) % 7 || 7; out.due = addDays(n);
+    take(/\s(?:(?:à|a|vers)\s)?(\d{1,2}):(\d{2})(?=\s)/, m => {
+      if (+m[1] > 23 || +m[2] > 59) return false; out.time = `${pad(+m[1])}:${m[2]}`;
     });
-    take(/\s(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?=\s)/, m => {
-      const d = +m[1], mo = +m[2];
-      if (!d || d > 31 || !mo || mo > 12) return false;
-      let y = m[3] ? +(m[3].length === 2 ? '20' + m[3] : m[3]) : new Date().getFullYear();
-      let iso = `${y}-${pad(mo)}-${pad(d)}`;
-      if (!m[3] && iso < today()) iso = `${y + 1}-${pad(mo)}-${pad(d)}`;     // date passée sans année : l'an prochain
-      out.due = iso;
+    take(/\s(?:(?:à|a|vers)\s)?midi(?=\s)/i, () => { out.time ||= '12:00'; });
+    take(new RegExp(`\\s${pre}après[- ]demain(?=\\s)`, 'i'), () => { out.due = addDays(2); });
+    take(new RegExp(`\\s${pre}demain(?:\\s(?:matin|soir))?(?=\\s)`, 'i'), () => { out.due = addDays(1); });
+    take(new RegExp(`\\s${pre}(?:aujourd'hui|auj|ce\\s(?:soir|matin)|cet\\saprès-midi)(?=\\s)`, 'i'), () => { out.due = today(); });
+    take(new RegExp(`\\s${pre}(?:dans|d'ici)\\s(\\d{1,3})\\s(jours?|semaines?)(?=\\s)`, 'i'), m => { out.due = addDays(+m[1] * (/^s/i.test(m[2]) ? 7 : 1)); });
+    take(new RegExp(`\\s${pre}(?:la\\s)?semaine\\sprochaine(?=\\s)`, 'i'), () => { out.due = addDays(inDays(1)); });
+    take(new RegExp(`\\s${pre}(${DAYS.join('|')})(?:\\s(?:prochain|matin|soir|après-midi))?(?=\\s)`, 'i'), m => { out.due = addDays(inDays(DAYS.indexOf(m[1].toLowerCase()))); });
+    take(new RegExp(`\\s${pre}(\\d{1,2})(?:er)?\\s(${MONTH_RE})(?:\\s(\\d{4}))?(?=\\s)`, 'i'), m => {
+      const iso = dayMonth(+m[1], MONTHS.indexOf(fold(m[2])) + 1, m[3]);
+      if (!iso) return false; out.due = iso;
+    });
+    take(new RegExp(`\\s${pre}(\\d{1,2})\\/(\\d{1,2})(?:\\/(\\d{2,4}))?(?=\\s)`), m => {
+      const iso = dayMonth(+m[1], +m[2], m[3]);
+      if (!iso) return false; out.due = iso;
     });
     if (out.time && !out.due) out.due = today();
     out.title = txt.replace(/\s+/g, ' ').trim();
+    out.title = out.title.charAt(0).toUpperCase() + out.title.slice(1);
     // Pas de #client : nom d'un client dans le texte (le plus long d'abord), laissé dans le titre.
     if (!out.clientId) {
       const f = ` ${fold(out.title)} `;
@@ -198,11 +219,29 @@ const Taches = (() => {
       t.comments?.length && `💬 ${t.comments.length}`,
       t.entryIds?.length && `🔗 ${t.entryIds.length} interv.`
     ].filter(Boolean).join(' · ');
-    return `<li class="tk p${t.priority || 4} ${isOpen(t) ? '' : 'done'}" data-tk="${t.id}">
+    return `<li class="tk p${t.priority || 4} ${isOpen(t) ? '' : 'done'} ${t.id === flashId ? 'flash' : ''}" data-tk="${t.id}">
       <button class="tkdone" data-tkdone="${t.id}" title="${isOpen(t) ? 'Terminer' : 'Rouvrir'}" ${canEdit(t) ? '' : 'disabled'}>${isOpen(t) ? '' : '✓'}</button>
       <div class="grow tap" style="flex:1;min-width:0"><div><strong>${esc(t.title)}</strong>${t.newFor === me().id ? ' <span class="pill ok">nouvelle</span>' : ''}</div>
         <div class="small muted">${meta}</div></div></li>`;
   }
+
+  const QUICK_HELP = "Exemples : « demain 14h », « lundi », « le 12 novembre », « p1 » ou « urgent », « @Geoffrey », « #Vedi ». Champ vide + Ajouter : fiche vierge.";
+  // Aperçu de l'ajout rapide : ce que la fiche contiendra.
+  function quickPreview(o) {
+    const due = o.due ? dueLabel(o) : '';
+    return [`<strong>${esc(o.title || '(sans titre)')}</strong>`,
+      o.clientId ? `🏢 ${esc(client(o.clientId).name)}` : '🔒 privé',
+      `👤 ${esc(userName(o.assigneeId || me().id))}`,
+      due && `📅 ${esc(due)}`,
+      o.priority && o.priority < 4 && `<span class="pill">${PRIO[o.priority]}</span>`,
+      o.unknownUser && `<span class="pill warn">technicien « ${esc(o.unknownUser)} » inconnu</span>`,
+      o.unknownClient && `<span class="pill warn">client « ${esc(o.unknownClient)} » inconnu</span>`
+    ].filter(Boolean).join(' · ');
+  }
+  // Filtre où une tâche apparaît (après création : on y va, pour qu'elle ne semble pas perdue).
+  const FILTER_OF = x => !isOpen(x) ? 'done' : overdue(x) || dueToday(x) ? 'today' : x.due ? 'upcoming' : 'open';
+  const FILTER_NAME = { today: "Aujourd'hui et en retard", upcoming: 'À venir', open: 'Toutes', done: 'Terminées' };
+  let flashId = null;
 
   function view() {
     if (!T) { $('#view').innerHTML = '<div class="empty">Chargement…</div>'; load().then(() => tab === 'taches' && render()); return; }
@@ -223,7 +262,7 @@ const Taches = (() => {
       <div class="card">
         <form id="tkQuick" class="row" style="margin:0"><input id="tkQ" class="grow" style="flex:1" placeholder="Nouvelle tâche : « Réinstaller PC Vedi demain 14h p1 @Geoffrey »" autocomplete="off">
           ${mic('tkQ', true)}<button class="btn primary" type="submit">+ Ajouter</button></form>
-        <p class="small muted" style="margin:6px 0 0">Reconnu : date (demain, lundi, 12/11…), heure (14h), p1 à p4, @technicien, #client. Tu vérifies avant d'enregistrer.</p>
+        <p class="small muted" id="tkQPrev" style="margin:6px 0 0">${QUICK_HELP}</p>
       </div>
       <div class="row" style="flex-wrap:wrap;margin-bottom:8px">${Object.entries(FILTERS).map(([k, [l]]) =>
         `<button class="btn chip ${k === filter ? 'active' : ''}" data-tkf="${k}">${l}${k === 'done' ? '' : ` (${count(k)})`}</button>`).join('')}</div>
@@ -236,11 +275,13 @@ const Taches = (() => {
       <div class="card" style="padding:4px 14px">${shown.length ? `<ul class="list tklist">${shown.map(taskLi).join('')}</ul>`
         : '<div class="empty">Aucune tâche ici.</div>'}</div>
       ${list.length > shown.length ? `<p class="small muted">${shown.length} plus récentes sur ${list.length}.</p>` : ''}`;
+    // Champ vide : fiche vierge ; sinon fiche préremplie. Sous le champ, ce qui sera reconnu (mis à jour en tapant ou pendant la dictée).
     $('#tkQuick').onsubmit = ev => {
       ev.preventDefault();
       const q = $('#tkQ').value.trim();
-      if (q) editTask(null, parseQuick(q));
+      editTask(null, q ? parseQuick(q) : {});
     };
+    $('#tkQ').oninput = () => { const q = $('#tkQ').value.trim(); $('#tkQPrev').innerHTML = q ? quickPreview(parseQuick(q)) : QUICK_HELP; };
     $$('[data-tkf]').forEach(b => b.onclick = () => { filter = b.dataset.tkf; render(); });
     $('#tkFC').onchange = ev => { fClient = ev.target.value; render(); };
     $('#tkFT').onchange = ev => { fTech = ev.target.value; render(); };
@@ -268,11 +309,14 @@ const Taches = (() => {
         <div><label>Technicien</label><select id="kAs" ${ro}><option value="">— à prendre —</option>
           ${liveUsers().filter(x => x.active !== false || x.id === d.assigneeId).map(x => `<option value="${x.id}" ${x.id === d.assigneeId ? 'selected' : ''}>${esc(userLabel(x))}</option>`).join('')}</select></div>
       </div>
-      <div class="grid3">
+      <div class="grid2">
         <div><label>Échéance</label><input type="date" id="kDue" value="${esc(d.due || '')}" ${ro}></div>
         <div><label>Heure</label><input type="time" id="kTime" value="${esc(d.time || '')}" ${ro}></div>
-        <div><label>Priorité</label><select id="kPr" ${ro}>${[1, 2, 3, 4].map(p => `<option value="${p}" ${+d.priority === p ? 'selected' : ''}>${PRIO[p]}</option>`).join('')}</select></div>
       </div>
+      ${edit ? `<div class="row" style="flex-wrap:wrap;margin-top:6px">${[['0', "Aujourd'hui"], ['1', 'Demain'], ['mon', 'Lundi'], ['7', 'Dans 1 sem.'], ['', 'Sans date']]
+        .map(([k, l]) => `<button class="btn chip" type="button" data-kd="${k}">${l}</button>`).join('')}</div>` : ''}
+      <label>Priorité</label><input type="hidden" id="kPr" value="${+d.priority || 4}">
+      <div class="row prio" style="flex-wrap:wrap">${[1, 2, 3, 4].map(p => `<button class="btn chip pr${p} ${(+d.priority || 4) === p ? 'active' : ''}" type="button" data-kp="${p}" ${ro}>${PRIO[p]}</button>`).join('')}</div>
       <label>Points à cocher</label><ul class="list compact" id="kList"></ul>
       ${edit ? `<div class="row"><input id="kItem" class="grow" style="flex:1" placeholder="Ajouter un point…"><button class="btn" id="kAdd" type="button">+</button></div>` : ''}
       ${t ? `<label>Commentaires</label><ul class="list compact">${(t.comments || []).map(c => `<li><div class="grow" style="flex:1;min-width:0">${esc(c.text)}
@@ -300,10 +344,23 @@ const Taches = (() => {
       $('#kAdd').onclick = addItem;
       $('#kItem').onkeydown = ev => { if (ev.key === 'Enter') { ev.preventDefault(); addItem(); } };
     }
-    // Valeurs du formulaire → tâche (sans enregistrer).
+    // Priorité : boutons (une liste déroulante était écrasée sur téléphone).
+    $$('[data-kp]', f).forEach(b => b.onclick = () => {
+      $('#kPr').value = b.dataset.kp;
+      $$('[data-kp]', f).forEach(x => x.classList.toggle('active', x === b));
+    });
+    // Raccourcis d'échéance.
+    $$('[data-kd]', f).forEach(b => b.onclick = () => {
+      const k = b.dataset.kd;
+      $('#kDue').value = k === '' ? '' : addDays(k === 'mon' ? inDays(1) : +k);
+      if (k === '') $('#kTime').value = '';
+    });
+    // Valeurs du formulaire → tâche (sans enregistrer). Un point à cocher tapé mais pas encore ajouté (« + ») est gardé.
     const read = () => ({ title: $('#kTitle').value.trim().replace(/\s+/g, ' '), notes: $('#kNotes').value.trim(), clientId: $('#kCl').value || null,
       assigneeId: $('#kAs').value || null, due: $('#kDue').value, time: $('#kTime').value, priority: +$('#kPr').value, checklist: cl });
     const store = async () => {
+      const pending = $('#kItem')?.value.trim();
+      if (pending) { cl.push({ id: uid('ck'), text: pending, done: false }); $('#kItem').value = ''; }
       const v = read();
       if (!v.title) { alert('Titre requis.'); return null; }
       if (v.time && !v.due) v.due = today();
@@ -316,7 +373,21 @@ const Taches = (() => {
       await save(); scheduleSync();
       return x;
     };
-    if ($('#kSave')) $('#kSave').onclick = async ev => { ev.preventDefault(); if (await store()) { dlg.close(); render(); toast('Tâche enregistrée'); } };
+    // Nouvelle tâche : on affiche le filtre où elle se trouve et elle clignote brièvement (sinon, sans date, elle semblait perdue).
+    if ($('#kSave')) $('#kSave').onclick = async ev => {
+      ev.preventDefault();
+      const x = await store();
+      if (!x) return;
+      dlg.close();
+      if (!t && tab === 'taches') {
+        filter = FILTER_OF(x); fClient = ''; fTech = ''; flashId = x.id;
+        setTimeout(() => { flashId = null; }, 2500);
+        toast(`Tâche ajoutée · ${FILTER_NAME[filter]}`);
+      } else toast('Tâche enregistrée');
+      render();
+      if (!t) $('[data-tk].flash')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    };
+    if (!t && edit) setTimeout(() => { const el = $('#kTitle'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); }, 50);
     if ($('#kComAdd')) {
       const addCom = async () => {
         const v = $('#kCom').value.trim(); if (!v) return;

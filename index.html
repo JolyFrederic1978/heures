@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>OLU Gestion</title>
-  <meta name="description" content="OLU Gestion, outil interne de One Level UP : pointage des interventions, préparation des factures et refacturation des achats. Connexion par la page officielle de Microsoft 365.">
+  <title>LevelDesk</title>
+  <meta name="description" content="LevelDesk, outil interne de One Level UP : pointage des interventions, préparation des factures et refacturation des achats. Connexion par la page officielle de Microsoft 365.">
   <meta name="robots" content="noindex, nofollow">
   <!-- Sécurité : seuls ce site, Microsoft (connexion, OneDrive), Billit et le serveur OVH (/api, /api-dev ; localhost:8092 = tests locaux) sont autorisés.
        Ajouter ici tout nouveau service appelé par l'app. -->
@@ -20,7 +20,7 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">One Level UP</div>
+    <div class="brand">LevelDesk</div>
     <h1 id="viewTitle">Aujourd'hui</h1>
     <span id="syncPill" class="pill"></span>
   </header>
@@ -32,11 +32,12 @@
     <button data-tab="taches"><span class="ico">📋</span>Tâches</button>
     <button data-tab="list"><span class="ico">☰</span><span class="lg">Interventions</span><span class="sh">Interv.</span></button>
     <button data-tab="billing"><span class="ico">€</span>Facturer</button>
-    <button data-tab="archive"><span class="ico">🗄</span>Archives</button>
-    <button data-tab="achats"><span class="ico">📥</span>Achats</button>
-    <button data-tab="articles"><span class="ico">🏷</span>Articles</button>
-    <button data-tab="admin" class="hidden"><span class="ico">👥</span>Admin</button>
-    <button data-tab="settings"><span class="ico">⚙</span>Réglages</button>
+    <button data-tab="archive" class="sec"><span class="ico">🗄</span>Archives</button>
+    <button data-tab="achats" class="sec"><span class="ico">📥</span>Achats</button>
+    <button data-tab="articles" class="sec"><span class="ico">🏷</span>Articles</button>
+    <button data-tab="admin" class="sec hidden"><span class="ico">👥</span>Admin</button>
+    <button data-tab="settings" class="sec"><span class="ico">⚙</span>Réglages</button>
+    <button class="more" id="tabMore"><span class="ico">⋯</span>Plus</button>
   </nav>
 
   <dialog id="dlg"><form method="dialog" id="dlgForm"></form></dialog>

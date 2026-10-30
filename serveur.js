@@ -1,4 +1,4 @@
-// Serveur OLU Gestion chez OVH (PHP + MySQL, dossier serveur/ du projet ; adresse API_URL dans db.js).
+// Serveur LevelDesk chez OVH (PHP + MySQL, dossier serveur/ du projet ; adresse API_URL dans db.js).
 // Pour l'instant : relais Billit (la clé API reste sur le serveur, chiffrée). L'app n'envoie que son jeton Microsoft.
 const Serveur = (() => {
   let info = null;   // dernière réponse de « me » : { email, admin, env, billit: { test, live } }

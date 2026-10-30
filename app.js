@@ -1,4 +1,4 @@
-// OLU Gestion (anciennement Heures OLU) – pointage des interventions, facturation et archivage, synchronisés sur OneDrive.
+// LevelDesk (anciennement OLU Gestion, puis Heures OLU) – pointage des interventions, facturation et archivage, synchronisés sur OneDrive.
 // Les noms techniques gardent « heures » (heures-data.json, base locale, cache) : les changer ferait perdre données et connexion.
 // Source de vérité : App/heures-data.json. Les fichiers Excel sont régénérés à partir de ces données :
 //   Interventions-A-Facturer.xlsx, Archives/Archive-Interventions.xlsx, A facturer/Prestations - Client date.xlsx
@@ -376,12 +376,13 @@ function render() {
   const gate = !OneDrive.signedIn() ? 'login' : locked ? 'pin' : me() === GUEST ? 'denied' : null;
   document.body.classList.toggle('locked', !!gate);
   document.body.classList.toggle('dashwide', !gate && tab === 'today' && wideToday());
-  if (gate) { if ($('#dlg').open) $('#dlg').close(); $('#viewTitle').textContent = 'OLU Gestion'; return gate === 'login' ? viewLogin() : gate === 'pin' ? viewPin() : viewDenied(); }
+  if (gate) { if ($('#dlg').open) $('#dlg').close(); $('#viewTitle').textContent = 'LevelDesk'; return gate === 'login' ? viewLogin() : gate === 'pin' ? viewPin() : viewDenied(); }
   // Onglet Administration : administrateurs seulement.
   $('.tabs [data-tab="admin"]').classList.toggle('hidden', !isAdmin());
   if (tab === 'admin' && !isAdmin()) tab = 'today';
   $('#viewTitle').textContent = TITLES[tab];
-  $$('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  $$('.tabs button[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  $('#tabMore').classList.toggle('active', !!$(`.tabs .sec[data-tab="${tab}"]`));   // onglet secondaire ouvert : « Plus » allumé
   VIEWS()[tab]();
 }
 
@@ -471,72 +472,84 @@ function viewToday() {
   const now = new Date(), monday = new Date(now); monday.setDate(now.getDate() - ((now.getDay() + 6) % 7));
   const week = live().filter(e => e.date >= isoDate(monday) && e.date <= d);
   const sum = es => es.reduce((s, e) => s + e.minutes, 0);
-  const open = live().filter(e => !e.billId && billable(e));
-  const lastC =state.clients.find(c => c.id === state.lastClientId && !c.deleted) || activeClients()[0];
+  const lastC = state.clients.find(c => c.id === state.lastClientId && !c.deleted) || activeClients()[0];
 
-  // Bandeau du jour (ex. « dim. 25/10 »).
-  const dayLabel = new Date().toLocaleDateString('fr-BE', { weekday: 'short', day: '2-digit', month: '2-digit' });
+  // Mise en page « aérée » (maquette A choisie par Fred le 30/10) : salutation, chrono compact, 3 actions, chiffres du jour, liste.
+  const dayLabel = new Date().toLocaleDateString('fr-BE', { weekday: 'long', day: 'numeric', month: 'long' });
+  const hello = `${new Date().getHours() >= 18 ? 'Bonsoir' : 'Bonjour'} ${esc(me().name || '')}`.trim();
+  const helloSub = todays.length ? `${todays.length} intervention${todays.length > 1 ? 's' : ''} · ${fmtDur(sum(todays))} aujourd'hui` : 'Aucune intervention encore aujourd\'hui';
+  // Réglages rarement changés (sur site, commanditaire, heure de début) repliés sous « Options ».
   const timerCard = `
-    <div class="card timer">
+    <div class="card chrono ${t ? 'running' : ''}">
       ${t ? `
-        <div><strong>${esc(client(t.clientId).name)}</strong> ${t.pausedAt ? '<span class="pill warn">en pause</span>' : ''}</div>
-        <div class="clock ${t.pausedAt ? 'muted' : ''}" id="clock">0:00:00</div>
-        ${t.pausedAt ? '<div class="small">Pause en cours : <strong id="pauseClock">0:00:00</strong></div>' : ''}
-        <div class="grid2" style="text-align:left">
-          <div><label>Début</label><input type="time" id="tStartAt" value="${hhmm(new Date(t.start))}"></div>
-          <div><label>Pause déduite (H:MM)</label><input id="tPauseMin" value="${fmtDur(Math.round(timerPausedMs(t) / 60000))}"></div>
+        <div class="crow">
+          <div class="grow"><div class="cl">Chrono en cours ${t.pausedAt ? '<span class="pill warn">en pause</span>' : ''}</div>
+            <div class="cname">${esc(client(t.clientId).name)}</div></div>
+          <div class="clock ${t.pausedAt ? 'muted' : ''}" id="clock">0:00:00</div>
         </div>
+        ${t.pausedAt ? '<div class="small muted">Pause en cours : <strong id="pauseClock">0:00:00</strong></div>' : ''}
         <div class="row" style="margin-top:10px"><input id="tDesc" class="grow" placeholder="Description (optionnel)" value="${esc(t.description || '')}">${mic('tDesc')}</div>
-        ${flags(t, 't')}
-        <div class="row"><button class="btn" id="tCancel">Annuler</button>
-          <button class="btn grow" id="tPause">${t.pausedAt ? '▶ Fin de pause' : '❚❚ Pause'}</button>
-          <button class="btn primary grow" id="tStop">■ Arrêter</button></div>`
+        <details class="opts"><summary>Début, pause, sur site, commanditaire</summary>
+          <div class="grid2">
+            <div><label>Début</label><input type="time" id="tStartAt" value="${hhmm(new Date(t.start))}"></div>
+            <div><label>Pause déduite (H:MM)</label><input id="tPauseMin" value="${fmtDur(Math.round(timerPausedMs(t) / 60000))}"></div>
+          </div>
+          ${flags(t, 't')}
+        </details>
+        <div class="acts"><button class="btn" id="tCancel">Annuler</button>
+          <button class="btn" id="tPause">${t.pausedAt ? '▶ Reprendre' : '❚❚ Pause'}</button>
+          <button class="btn primary" id="tStop">■ Arrêter</button></div>`
       : lastC ? `
-        <select id="tClient">${clientOptions(lastC.id)}</select>
-        <div class="row" style="margin-top:10px"><input id="tDesc0" class="grow" placeholder="Description de l'intervention">${mic('tDesc0')}</div>
-        ${flags({ onSite: false, ...newWho(lastC) }, 't')}
-        <div class="row" style="justify-content:center;margin-bottom:10px">
-          <span class="small muted">Début</span>
-          <input type="time" id="tAt" style="width:auto">
-          <span class="small muted">(vide = maintenant)</span>
+        <div class="crow">
+          <div class="grow"><div class="cl">Chrono</div>
+            <select id="tClient">${clientOptions(lastC.id)}</select>
+            <div class="row"><input id="tDesc0" class="grow" placeholder="Description de l'intervention">${mic('tDesc0')}</div></div>
+          <button class="playbtn" id="tStart" title="Démarrer le chrono" aria-label="Démarrer le chrono">▶</button>
         </div>
-        <button class="btn primary big" id="tStart">▶ Démarrer le chrono</button>`
+        <details class="opts"><summary>Sur site, commanditaire, heure de début</summary>
+          ${flags({ onSite: false, ...newWho(lastC) }, 't')}
+          <div class="row"><span class="small muted">Début</span><input type="time" id="tAt" style="width:auto"><span class="small muted">(vide = maintenant)</span></div>
+        </details>`
       : `<p class="muted">Commence par ajouter un client dans Réglages.</p>`}
     </div>`;
   const buttons = `
-    <button class="btn big" id="addManual">+ Ajouter une intervention</button>
-    <div class="grid2" style="margin-top:10px">
-      <button class="btn" id="addMaint">🛠 Maintenance serveur</button>
-      <button class="btn" id="addUpd">⟳ Mise à jour serveur</button>
+    <div class="qa">
+      <button class="btn" id="addManual"><span class="qi">＋</span>Intervention</button>
+      <button class="btn" id="addMaint"><span class="qi">🛠</span>Maintenance</button>
+      <button class="btn" id="addQuick"><span class="qi">⚡</span>Rapide 5 min</button>
     </div>`;
   const dayList = todays.length ? `<ul class="list">${todays.map(e => entryLi(e)).join('')}</ul>` : '<div class="empty">Rien pour l\'instant.</div>';
+  const toBill = billingGroups().groups.reduce((s, g) => s + g.amount, 0);
+  const head = `<div class="hello"><div><h2>${hello}</h2><div class="sub">${esc(helloSub)}</div></div><div class="date">${esc(dayLabel)}</div></div>`;
 
-  // Grand écran (PC) : mise en page « journée + barre latérale » (maquette B choisie par Fred le 29/10) ; téléphone : page d'origine.
+  // Grand écran (PC) : journée + barre latérale (maquette B du 29/10, au nouveau style) ; téléphone : une colonne.
   $('#view').innerHTML = wideToday() ? `
-    <div class="daybar"><span>Aujourd'hui</span><span>${esc(dayLabel)}</span></div>
+    ${head}
     <div class="dash">
       <div class="dmain">
         <div id="tkNotif"></div><div id="achNotif"></div>
         ${timerCard}${buttons}
-        <div class="card" style="margin-top:12px"><h2>Interventions du jour <span class="small muted" style="float:right">${fmtDur(sum(todays))}</span></h2>${dayList}</div>
+        <div class="card"><h2>Interventions du jour <span class="tot">${fmtDur(sum(todays))}</span></h2>${dayList}</div>
         <div class="card"><h2>Tâches du jour et en retard</h2><div id="tkDay"></div></div>
       </div>
       <aside class="dside">${dashSide(todays, week, sum)}</aside>
     </div>` : `
-    <div class="daybar"><span>Aujourd'hui</span><span>${esc(dayLabel)}</span></div>
+    ${head}
     <div id="tkNotif"></div>
     <div id="achNotif"></div>
     ${timerCard}${buttons}
-    <div class="kpis" style="margin-top:12px">
-      <div class="kpi"><div class="v">${fmtDur(sum(todays))}</div><div class="l">aujourd'hui</div></div>
-      <div class="kpi"><div class="v">${fmtDur(sum(week))}</div><div class="l">cette semaine</div></div>
-      <div class="kpi tap" id="goBill"><div class="v">${eur(open.reduce((s, e) => s + entryAmount(e), 0))}</div><div class="l">à facturer (${open.length} interv.) →</div></div>
+    <div class="card stats">
+      <div><b>${fmtDur(sum(todays))}</b><span>aujourd'hui</span></div>
+      <div><b>${fmtDur(sum(week))}</b><span>semaine</span></div>
+      <div class="tap money" id="goBill"><b>${eur(toBill)}</b><span>à facturer ›</span></div>
     </div>
-    <div class="card"><h2>Interventions du jour</h2>${dayList}</div>`;
+    <div class="card"><h2>Aujourd'hui <span class="tot">${fmtDur(sum(todays))}</span></h2>${dayList}</div>`;
 
   $('#addManual').onclick = () => openEntry(null);
   $('#addMaint').onclick = () => openForfait(null, 'maint');
-  $('#addUpd').onclick = () => openForfait(null, 'update');
+  // Intervention rapide : forfait de 5 minutes (sans heures), il reste à choisir le client et à écrire la description.
+  // Les mises à jour serveur passent par leurs tâches récurrentes (onglet Tâches), plus par un bouton ici (demande de Fred, 30/10).
+  $('#addQuick').onclick = () => openEntry(null, { start: '', end: '', minutes: 5, pauseMin: 0 });
   $$('#goBill, [data-dgo]').forEach(b => b.onclick = () => { tab = b.dataset.dgo || 'billing'; render(); });
   bindEdits();
   Achats.todayBanner($('#achNotif'));         // nouvelles factures fournisseurs (module Achats)
@@ -1303,7 +1316,7 @@ function viewSettings() {
       <ul class="list" style="margin-top:8px;max-height:420px;overflow:auto">${state.clients.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name)).map(c => `
         <li data-name="${esc(fold(c.name + ' ' + (c.billitName || '') + ' ' + (c.domains || []).join(' ')))}">
           <div class="grow tap" data-client="${c.id}"><strong>${esc(c.name)}</strong> ${c.archived ? '<span class="pill">archivé</span>' : ''}
-            <div class="small muted">Billit : ${esc(c.billitName || '—')}${c.near ? ' · proche (zone 1)' : ''}${c.server ? ` · ${serverCount(c)} serveur(s)` : ''}${clientSoc(c) !== HOME ? ' · ' + esc(soc(clientSoc(c)).name) : ''}${c.domains?.length ? ' · ' + esc(c.domains.join(', ')) : ''}</div></div>
+            <div class="small muted">Billit : ${esc(c.billitName || '—')}${c.near ? ' · proche (zone 1)' : ''}${c.server ? ` · ${serverCount(c)} serveur(s)${c.m365Enforce ? ' · M365 Enforce' : ''}${c.esetCloud ? ' · ESET Cloud' : ''}` : ''}${clientSoc(c) !== HOME ? ' · ' + esc(soc(clientSoc(c)).name) : ''}${c.domains?.length ? ' · ' + esc(c.domains.join(', ')) : ''}</div></div>
           <button class="btn danger chip" data-delclient="${c.id}" title="Supprimer">🗑</button></li>`).join('')}</ul>
     </div>
 
@@ -1564,11 +1577,16 @@ function editClient(c, opts = {}) {
       <div id="cServersBox" class="${c?.server ? '' : 'hidden'}" style="width:140px"><label style="margin-top:0">Nombre de serveurs</label>
         <input type="number" id="cServers" min="1" step="1" value="${c?.servers || 1}"></div>
     </div>
+    <div id="cSrvOpts" class="row ${c?.server ? '' : 'hidden'}" style="margin-top:-4px">
+      <label class="check grow"><input type="checkbox" id="cM365" ${c?.m365Enforce ? 'checked' : ''}> M365 Enforce</label>
+      <label class="check grow"><input type="checkbox" id="cEset" ${c?.esetCloud ? 'checked' : ''}> ESET Cloud</label>
+    </div>
     ${c ? `<label class="check"><input type="checkbox" id="cArch" ${c.archived ? 'checked' : ''}> Archivé (masqué des listes)</label>` : ''}
     <div class="actions">
       ${c ? '<button class="btn danger" id="cDel" style="margin-right:auto">Supprimer</button>' : ''}
       <button class="btn" ${opts.onCancel ? 'id="cCancel"' : 'value="cancel"'}>${opts.onCancel ? 'Retour' : 'Annuler'}</button><button class="btn primary" id="cSave">Enregistrer</button></div>`;
-  $('#cServer').onchange = ev => $('#cServersBox').classList.toggle('hidden', !ev.target.checked);
+  // M365 Enforce et ESET Cloud : seulement pour un client avec serveur(s).
+  $('#cServer').onchange = ev => ['#cServersBox', '#cSrvOpts'].forEach(s => $(s).classList.toggle('hidden', !ev.target.checked));
   if ($('#cDel')) $('#cDel').onclick = () => deleteClient(c);
   if (opts.onCancel) $('#cCancel').onclick = () => opts.onCancel();
   if (askBillit) (async () => {
@@ -1604,7 +1622,7 @@ function editClient(c, opts = {}) {
     const taken = domains.map(d => [d, state.clients.find(x => x !== c && !x.deleted && (x.domains || []).includes(d))]).find(([, x]) => x);
     if (taken) return alert(`Le domaine ${taken[0]} est déjà attribué à ${taken[1].name}.`);
     const data = { name, billitName: $('#cBillit').value.trim(), domains, near: $('#cNear').checked, societeId: $('#cSoc').value, defaultAlescom: $('#cSoc').value === 'alescom', archived: !!$('#cArch')?.checked,
-      server, servers: server ? servers : 0 };
+      server, servers: server ? servers : 0, m365Enforce: server && $('#cM365').checked, esetCloud: server && $('#cEset').checked };
     // Client Billit choisi dans la liste : lien mémorisé (comme au 1er envoi d'une facture), pas de recherche par le nom ensuite.
     if (billitId) data.billitIds = { ...c?.billitIds, [mode]: billitId };
     let saved = c;
@@ -1705,7 +1723,7 @@ function viewLogin() {
   $('#view').innerHTML = `
     <div class="card" style="text-align:center;margin-top:24px">
       <img src="icons/icon-192.png" alt="" width="72" height="72" style="border-radius:16px">
-      <h2 style="font-size:18px;margin:12px 0 4px">OLU Gestion</h2>
+      <h2 style="font-size:18px;margin:12px 0 4px">LevelDesk</h2>
       <p class="muted">Outil interne de gestion de One Level UP.</p>
       <button class="btn primary big" id="loginBtn" ${OneDrive.configured() ? '' : 'disabled'}>Se connecter avec Microsoft 365</button>
       ${OneDrive.configured() ? '' : '<p class="small"><span class="pill warn">ID d\'application manquant dans la configuration.</span></p>'}
@@ -1719,7 +1737,7 @@ function viewDenied() {
   $('#view').innerHTML = `
     <div class="card" style="text-align:center;margin-top:24px">
       <h2 style="font-size:18px">⛔ Accès refusé</h2>
-      <p>Le compte <strong>${esc(OneDrive.user())}</strong> n'est pas autorisé dans OLU Gestion.</p>
+      <p>Le compte <strong>${esc(OneDrive.user())}</strong> n'est pas autorisé dans LevelDesk.</p>
       <p class="small muted">Demande à l'administrateur de l'ajouter (ou de le réactiver) dans l'onglet Admin.</p>
       <button class="btn big" id="deniedOut">Se déconnecter</button>
     </div>`;
@@ -1784,7 +1802,16 @@ new MutationObserver(() => $$('#dlgForm button').forEach(b => {
 })).observe($('#dlgForm'), { childList: true });
 $('#dlgForm').addEventListener('submit', ev => { ev.preventDefault(); $('#dlgForm .btn.primary')?.click(); });
 
-$$('.tabs button').forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+$$('.tabs button[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+// « Plus » (téléphone) : les onglets secondaires dans une fenêtre (Admin seulement pour un administrateur).
+$('#tabMore').onclick = () => {
+  const f = $('#dlgForm');
+  f.innerHTML = `<h2>Plus</h2><div class="moresheet">${$$('.tabs .sec').filter(b => !b.classList.contains('hidden')).map(b =>
+    `<button class="btn ${b.dataset.tab === tab ? 'active' : ''}" data-go="${b.dataset.tab}">${b.innerHTML}</button>`).join('')}</div>
+    <div class="actions"><button class="btn" value="cancel">Fermer</button></div>`;
+  $$('[data-go]', f).forEach(x => x.onclick = () => { $('#dlg').close(); tab = x.dataset.go; render(); });
+  if (!$('#dlg').open) $('#dlg').showModal();
+};
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; if (tab === 'settings') render(); });
 window.addEventListener('online', sync);
 window.addEventListener('offline', () => setSync('offline', 'Hors ligne : synchro au retour du réseau.'));
