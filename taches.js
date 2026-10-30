@@ -1,5 +1,6 @@
 // Module Tâches (voir taches.md) : tâches « à la Todoist », liées à un client et à un technicien ; une tâche mène à une ou plusieurs interventions.
 // - Données : TimeSheet/App/taches-data.json, avec sa propre synchro (comme Achats). heures-data.json : seulement entries[].taskId.
+//   Avec le serveur OVH (srvOn(), architecture.md) : table tasks, synchronisée par app.js (srvSync) ; plus de fichier OneDrive.
 // - Technicien vide = « à prendre » : un technicien peut se l'attribuer si le client fait partie de ses clients visibles (Admin → Utilisateurs).
 // - Tout technicien peut assigner à tout autre ; le créateur et le technicien assigné peuvent modifier, réassigner, terminer, supprimer.
 // Utilise les outils de app.js ($, esc, uid, touch, state, client, me, canSee, openEntry…) : chargé avant lui, appelé après le démarrage.
@@ -70,6 +71,7 @@ const Taches = (() => {
     return isoDate(d);
   }
   function ensureRecurring() {
+    if (!isAdmin() || !mod('forfaits')) return false;        // seul un administrateur les crée (pour lui-même)
     const month = today().slice(0, 7);
     let ch = false;
     for (const c of activeClients().filter(x => x.server)) {
@@ -77,7 +79,7 @@ const Taches = (() => {
       if (task(id)) continue;
       if (live().some(e => e.forfait === 'update' && e.clientId === c.id && e.date.startsWith(month))) continue;
       T.tasks.push(touch({ id, kind: 'upd', recur: { every: 'month', nth: 2, weekday: 3 }, title: `Mise à jour serveur – ${c.name}`, notes: '',
-        clientId: c.id, assigneeId: ADMIN, createdBy: ADMIN, createdAt: Date.now(), due: secondWednesday(month), time: '', priority: 3,
+        clientId: c.id, assigneeId: me().id, createdBy: me().id, createdAt: Date.now(), due: secondWednesday(month), time: '', priority: 3,
         status: 'open', checklist: [], comments: [], entryIds: [] }));
       ch = true;
     }
@@ -102,7 +104,20 @@ const Taches = (() => {
     T.tasks = [...x.values()];
     return before !== JSON.stringify(T.tasks);
   }
+  // Avec le serveur : les tâches sont envoyées et reçues par srvSync (app.js) ; ici, seulement les tâches récurrentes et l'affichage.
+  async function serverSync() {
+    await load();
+    if (ensureRecurring()) { await save(); scheduleSync(); }
+    msg = '';
+    afterSync(true);
+  }
+  function afterSync(redraw) {
+    if (redraw && tab === 'taches' && !$('#dlg').open) render();
+    if (tab === 'today' && $('#tkNotif')) todayBanner($('#tkNotif'));
+    if (tab === 'today' && $('#tkDay')) dayList($('#tkDay'));
+  }
   async function sync() {
+    if (srvOn()) return serverSync();
     await load();
     if (busy || !OneDrive.signedIn() || !navigator.onLine) return;
     busy = true;
@@ -126,9 +141,7 @@ const Taches = (() => {
       msg = e instanceof OneDrive.NeedLogin ? '' : e.message;
       redraw = true;
     } finally { busy = false; }
-    if (redraw && tab === 'taches' && !$('#dlg').open) render();
-    if (tab === 'today' && $('#tkNotif')) todayBanner($('#tkNotif'));
-    if (tab === 'today' && $('#tkDay')) dayList($('#tkDay'));
+    afterSync(redraw);
   }
 
   // --- ajout rapide : « Réinstaller PC accueil Vedi demain 14h p1 @Geoffrey » (au clavier ou dicté) ---
@@ -482,6 +495,9 @@ const Taches = (() => {
   }
 
   async function reset() { T = null; msg = ''; await idb('readwrite', s => s.delete('data')); }
+  // Pour la synchro du serveur (app.js) : liste des tâches, puis enregistrement local après réception.
+  async function raw() { return (await load()).tasks; }
+  async function setRaw(tasks) { await load(); T.tasks = tasks; await save(); }
 
-  return { view, sync, todayBanner, dayList, linkEntry, forfaitSaved, titleOf, open, reset, parseQuick };
+  return { view, sync, todayBanner, dayList, linkEntry, forfaitSaved, titleOf, open, reset, parseQuick, raw, setRaw, afterSync };
 })();

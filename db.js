@@ -52,6 +52,8 @@ const DB = (() => {
       // Inscription Entra « Heures OLU » (One Level UP sprl) – identifiants publics, pas des secrets.
       onedrive: { clientId: '0b486fd1-e8f9-4933-94cd-49c5df20d6d6', tenant: 'eb79b929-d806-4ec9-8282-a93399a8ca66', folder: DEFAULT_FOLDER },
       billitKeys: { test: '', live: '' },   // clés API Billit : jamais envoyées sur OneDrive
+      // Données sur le serveur OVH (architecture.md) : { on, rev, ack: { collection: { id: empreinte } }, me } ; null = fichiers OneDrive.
+      srv: null,
       published: {}, lastClientId: null, lastSync: 0
     };
   }

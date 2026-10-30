@@ -1,5 +1,6 @@
 // Serveur LevelDesk chez OVH (PHP + MySQL, dossier serveur/ du projet ; adresse API_URL dans db.js).
-// Pour l'instant : relais Billit (la clé API reste sur le serveur, chiffrée). L'app n'envoie que son jeton Microsoft.
+// Relais Billit (la clé API reste sur le serveur, chiffrée) et données de l'app (synchro, migration ; architecture.md).
+// L'app n'envoie que son jeton Microsoft : le serveur en tire l'utilisateur, sa société et ses droits.
 const Serveur = (() => {
   let info = null;   // dernière réponse de « me » : { email, admin, env, billit: { test, live } }
 
@@ -27,6 +28,10 @@ const Serveur = (() => {
     call, json,
     info: () => info,
     async me() { return (info = await json('me')); },
+    // { since, changes } → { rev, rows, rejected, me }
+    sync: body => json('sync', { method: 'POST', body }),
+    // Migration des données de OneDrive (administrateur de la plateforme).
+    import: (data, replace) => json('import', { method: 'POST', body: { ...data, replace: !!replace } }),
     // Enregistre (après contrôle par Billit) ou efface (apiKey vide) la clé d'un mode. Réponse : { billit, companies }.
     async saveBillitKey(mode, apiKey) {
       const r = await json('billit-key', { method: 'POST', body: { mode, apiKey } });

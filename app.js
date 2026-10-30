@@ -44,7 +44,7 @@ function toast(msg) {
 // --- dictée vocale : reconnaissance du navigateur (Chrome → Google, Edge → Microsoft ; absente de Firefox : pas de bouton) ---
 // mic(id) : bouton 🎤 qui ajoute le texte dicté au champ id ; submit = envoie ensuite le formulaire du champ (ajout rapide des tâches).
 const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
-const mic = (id, submit) => Speech ? `<button type="button" class="btn chip mic" data-mic="${id}" ${submit ? 'data-mic-submit' : ''} title="Dicter">🎤</button>` : '';
+const mic = (id, submit) => Speech && mod('dictee') ? `<button type="button" class="btn chip mic" data-mic="${id}" ${submit ? 'data-mic-submit' : ''} title="Dicter">🎤</button>` : '';
 const lblMic = (text, id) => `<div class="lblmic"><label>${text}</label>${mic(id)}</div>`;
 let dictation = null;
 document.addEventListener('click', ev => {
@@ -92,7 +92,9 @@ function setTimer(t) { state.timer = t; state.timerAt = Date.now(); }
 // One Level UP = société « maison » (id 'olu') ; Alescom = premier commanditaire (id 'alescom' : tarifs partenaire, échéance 10 j).
 // Une intervention a un commanditaire (cmdId) et un technicien (techId). Anciennes données : case alescom, technicien = administrateur.
 // La case alescom reste écrite (cmdId === 'alescom') pour les appareils qui ont encore une ancienne version.
-const HOME = 'olu', ADMIN = 'u_admin';
+// Avec le serveur, HOME = société de l'utilisateur connecté (srvSync) ; 'olu' pour les données de OneDrive.
+let HOME = 'olu';
+const ADMIN = 'u_admin';
 const liveSocs = () => state.societes.filter(s => !s.deleted).sort((a, b) => (b.id === HOME) - (a.id === HOME) || a.name.localeCompare(b.name));
 const activeSocs = () => liveSocs().filter(s => s.active !== false);
 const soc = id => state.societes.find(s => s.id === id) || { id, name: '(société supprimée)' };
@@ -102,6 +104,14 @@ const user = id => state.users.find(u => u.id === id) || { id, name: '(utilisate
 // Seule exception : tant que l'administrateur n'a pas d'adresse (toute 1re connexion), c'est lui (ensureSocietes la renseigne alors).
 const GUEST = { id: 'u_guest', name: 'Compte non reconnu', roles: [], clients: {} };
 const me = () => {
+  // Serveur : l'utilisateur est celui que le serveur a reconnu (jeton Microsoft) ; en attendant la 1re synchro, ses droits connus du serveur.
+  if (srvOn()) {
+    const i = state.srv.me;
+    if (!i?.member) return GUEST;
+    const u = state.users.find(x => x.id === i.userId);
+    if (!u) return { id: i.userId, name: OneDrive.user(), societeId: i.societeId, roles: i.roles || [], clients: {} };
+    return u.deleted || u.active === false ? GUEST : u;
+  }
   const m = fold(OneDrive.user()), u = m && state.users.find(x => x.email && fold(x.email) === m);
   if (u) return u.deleted || u.active === false ? GUEST : u;
   return user(ADMIN).email ? GUEST : user(ADMIN);
@@ -124,6 +134,7 @@ function canSee(c) {
 // Sociétés et administrateur créés une fois, à partir des réglages existants (ID fixes : pas de doublon entre appareils).
 function ensureSocietes() {
   state.societes ||= []; state.users ||= [];
+  if (srvOn()) return;                       // serveur : sociétés et utilisateurs viennent de la base, rien n'est créé ici
   const s = state.settings;
   if (!state.societes.some(x => x.id === HOME)) state.societes.push({ id: HOME, name: 'One Level UP', home: true, active: true, updatedAt: 0 });
   if (!state.societes.some(x => x.id === 'alescom')) state.societes.push({ id: 'alescom', name: 'Alescom', active: true, tenant: '',
@@ -144,6 +155,7 @@ const userLabel = u => u.name + (u.societeId && u.societeId !== HOME ? ` (${soc(
 // Un seul client par société : « Vedi distance » / « Afm remote » sont fusionnés dans « Vedi » / « Afm »,
 // leurs interventions passent en « à distance » (case Sur site décochée). Renvoie true si quelque chose a changé.
 function mergeRemoteClients() {
+  if (srvOn()) return false;
   let changed = false;
   for (const c of state.clients.filter(x => !x.deleted && /\b(remote|distance)\b/i.test(x.name))) {
     const name = c.name.replace(/\b(à|a)\s+distance\b/i, '').replace(/\b(remote|distance)\b/ig, '').replace(/\s+/g, ' ').trim();
@@ -210,7 +222,7 @@ const CLIENTS_SEED = ['Ace', 'Acofisc', 'AFM', 'All Clean', 'Atelier C', 'BAEV',
   'INT', 'JMD', 'Krack', 'LCTS', 'Marvelle', 'MCS', 'Metalik Pro', 'MF', 'Nextgen', 'P4P', 'PAPV', 'Pitau', 'Quertinmont',
   'SFER', 'Trav', 'Vedi', 'Viart', 'Warnier'];
 function seedClients() {
-  if (state.settings.clientsSeed >= 1) return false;
+  if (srvOn() || state.settings.clientsSeed >= 1) return false;
   const have = new Set(state.clients.filter(c => !c.deleted).map(c => c.name.toLowerCase()));
   for (const name of CLIENTS_SEED) {
     if (have.has(name.toLowerCase())) continue;
@@ -267,12 +279,12 @@ const P = {
 function setSync(kind, msg = '') {
   syncStatus = { kind, msg };
   const p = $('#syncPill');
-  p.textContent = { off: 'Local', login: 'Non connecté', busy: 'Synchro…', ok: '☁ OneDrive', err: '⚠ Erreur', offline: 'Hors ligne' }[kind];
+  p.textContent = { off: 'Local', login: 'Non connecté', busy: 'Synchro…', ok: srvOn() ? '☁ Serveur' : '☁ OneDrive', err: '⚠ Erreur', offline: 'Hors ligne' }[kind];
   p.title = msg;
   if ($('#odStatus')) $('#odStatus').textContent = statusText();
 }
 const statusText = () => syncStatus.kind === 'ok'
-  ? `Synchronisé à ${new Date(state.lastSync).toLocaleTimeString('fr-BE', { hour: '2-digit', minute: '2-digit' })} · fichiers Excel à jour`
+  ? `Synchronisé à ${new Date(state.lastSync).toLocaleTimeString('fr-BE', { hour: '2-digit', minute: '2-digit' })}${srvOn() ? ' avec le serveur' : ' · fichiers Excel à jour'}`
   : (syncStatus.msg || $('#syncPill').textContent);
 
 function mergeRemote(remote) {
@@ -317,6 +329,22 @@ async function sync() {
   if (!OneDrive.signedIn()) return setSync('login', 'Connecte-toi à OneDrive dans Réglages.');
   if (!navigator.onLine) return setSync('offline', 'Hors ligne : synchro au retour du réseau.');
   if (syncing) { syncAgain = true; return; }
+  // Une fois par ouverture : la société est-elle sur le serveur ? (sinon, fichiers OneDrive comme avant)
+  if (!srvOn() && !srvChecked) {
+    srvChecked = true;
+    try {
+      const i = (await Serveur.me()).data;
+      if (i?.migrated) {
+        // Appareil jamais synchronisé : ses données locales ne sont que les valeurs par défaut (Vedi, administrateur…), à ne pas envoyer.
+        if (!state.lastSync) {
+          Object.assign(state, { clients: [], entries: [], bills: [], societes: [], users: [], timer: null, timerAt: 0 });
+          await Taches.setRaw([]);
+        }
+        state.srv = { on: true, rev: 0, ack: {}, me: i }; srvFull = true; HOME = i.societeId || HOME; await DB.save(state);
+      }
+    } catch (_) { /* serveur injoignable : on continue avec OneDrive */ }
+  }
+  if (srvOn()) return srvSync();
   syncing = true; setSync('busy');
   try {
     let changed = false, written = false;
@@ -352,6 +380,173 @@ async function sync() {
   }
 }
 
+// ---------- données sur le serveur OVH (architecture.md, phase 1) ----------
+// Une fois la société migrée, tout passe par le serveur : sociétés, utilisateurs, clients, interventions, factures, tâches, chrono, réglages.
+// Le serveur ne renvoie que ce que l'utilisateur a le droit de voir et refuse ce qu'il n'a pas le droit d'écrire.
+// OneDrive ne sert plus qu'aux fichiers (Excel, Prestations, Achats), pour un administrateur qui a OneDrive.
+// Envoi : chaque objet dont l'empreinte diffère de celle de la dernière version reçue du serveur (state.srv.ack) ; aucune modification à suivre ailleurs.
+const srvOn = () => !!state?.srv?.on;
+// Modules de la société (architecture.md, section 3) ; tous actifs avec les fichiers OneDrive.
+const mod = name => !srvOn() || !!state.srv.me?.modules?.[name];
+const MODULES = ['facturation', 'taches', 'forfaits', 'achats', 'soustraitance', 'dictee'];
+const MODULE_NAMES = { facturation: 'Facturation (Facturer, Archives, Billit)', taches: 'Tâches', forfaits: 'Forfaits serveur (maintenance, mises à jour)',
+  achats: 'Achats (refacturation, Articles)', soustraitance: 'Sous-traitance (commanditaires)', dictee: 'Dictée 🎤' };
+let srvChecked = false, srvFull = true;
+const omit = (o, ...keys) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !keys.includes(k)));
+const fp = o => hash(JSON.stringify(o));
+
+// Objets uniques : réglages de la société (sans le PIN), réglages personnels (PIN), chrono de l'utilisateur.
+function srvSingles() {
+  const S = state.srv, meId = S.me.userId;
+  return {
+    settings: { id: S.me.societeId, write: isAdmin(), at: state.settingsAt || 0,
+      get: () => ({ ...omit(state.settings, 'pin'), settingsAt: state.settingsAt || 0 }),
+      set: d => {
+        const pin = state.settings.pin;
+        state.settings = { ...DB.defaults().settings, ...omit(d, 'id', 'settingsAt', 'updatedAt') };
+        if (pin) state.settings.pin = pin;
+        state.settingsAt = d.settingsAt || 0;
+      } },
+    usettings: { id: meId, write: true, at: 0,
+      get: () => ({ pin: state.settings.pin || null }),
+      set: d => { if (d.pin) state.settings.pin = d.pin; else delete state.settings.pin; } },
+    timers: { id: meId, write: true, at: state.timerAt || 0,
+      get: () => ({ timer: state.timer, timerAt: state.timerAt || 0 }),
+      set: d => { state.timer = d.timer ?? null; state.timerAt = d.timerAt || 0; } },
+  };
+}
+
+async function srvSync() {
+  if (syncing) { syncAgain = true; return; }
+  syncing = true; setSync('busy');
+  const S = state.srv;
+  S.ack ||= {};
+  try {
+    if (!S.me?.member) {                                  // compte pas (encore) reconnu : on redemande au serveur
+      S.me = (await Serveur.me()).data;
+      if (!S.me?.member) { setSync('err', 'Compte inconnu ou désactivé sur le serveur.'); render(); return; }
+    }
+    HOME = S.me.societeId;
+    const lists = { societes: state.societes, users: state.users, clients: state.clients, entries: state.entries, bills: state.bills, tasks: await Taches.raw() };
+    const writable = { societes: isAdmin(), users: isAdmin(), clients: isAdmin(), entries: true, bills: isAdmin(), tasks: true };
+    const singles = srvSingles();
+    const changes = [];
+    for (const [t, list] of Object.entries(lists)) {
+      const ack = S.ack[t] ||= {};
+      if (!writable[t]) continue;
+      const ids = new Set();
+      for (const o of list) {
+        ids.add(o.id);
+        if (ack[o.id] === fp(o)) continue;
+        o.updatedAt ||= Date.now();
+        changes.push({ t, id: o.id, updatedAt: o.updatedAt, deleted: !!o.deleted, data: o, fp: fp(o) });
+      }
+      for (const id of Object.keys(ack)) if (!ids.has(id)) changes.push({ t, id, deleted: true, updatedAt: Date.now() });
+    }
+    for (const [t, x] of Object.entries(singles)) {
+      const ack = S.ack[t] ||= {}, d = { id: x.id, ...x.get() };
+      // Jamais envoyé avant la 1re synchro complète : un appareil neuf n'efface ni le chrono, ni le PIN, ni les réglages du serveur.
+      if (!x.write || !(x.id in ack) || ack[x.id] === fp(d)) continue;
+      d.updatedAt = x.at || Date.now();
+      changes.push({ t, id: x.id, updatedAt: d.updatedAt, data: d, fp: fp(d) });
+    }
+
+    const res = await Serveur.sync({ since: srvFull ? 0 : S.rev || 0, changes: changes.map(({ fp: _, ...c }) => c) });
+    const refused = new Set(res.rejected.map(x => x.t + ':' + x.id));
+    for (const c of changes) if (!refused.has(c.t + ':' + c.id) && c.fp) S.ack[c.t][c.id] = c.fp;
+    let changed = false;
+    const seen = {};
+    const apply = (r, force) => {
+      (seen[r.t] ||= new Set()).add(r.id);
+      const ack = S.ack[r.t] ||= {};
+      const x = singles[r.t];
+      if (x) {
+        const cur = { id: x.id, ...x.get() };
+        if (!force && x.write && ack[x.id] !== fp(cur) && x.at > r.updatedAt) { ack[x.id] ??= 'en attente'; return; }
+        x.set(r.data);
+        ack[x.id] = fp({ id: x.id, ...x.get() });
+        changed = true; return;
+      }
+      const list = lists[r.t];
+      if (!list) return;
+      const i = list.findIndex(o => o.id === r.id), loc = list[i];
+      // Modifié ici depuis (et l'utilisateur peut l'écrire) : gardé, envoyé à la prochaine synchro. Sinon, la version du serveur fait foi.
+      if (!force && writable[r.t] && loc && ack[r.id] !== fp(loc) && (loc.updatedAt || 0) > r.updatedAt) return;
+      const o = r.deleted ? { ...r.data, deleted: true } : r.data;
+      if (i >= 0) list[i] = o; else list.push(o);
+      ack[r.id] = fp(o);
+      changed = true;
+    };
+    res.rows.forEach(r => apply(r, false));
+    const why = [];
+    for (const x of res.rejected) {
+      if (x.row) { apply(x.row, true); if (x.reason !== 'ancienne') why.push(x.reason); continue; }
+      const list = lists[x.t];
+      if (list) { const i = list.findIndex(o => o.id === x.id); if (i >= 0) list.splice(i, 1); }
+      delete S.ack[x.t]?.[x.id];
+      why.push(x.reason); changed = true;
+    }
+    // Synchro complète : ce que le serveur ne renvoie plus (droits retirés, autre appareil) disparaît d'ici.
+    if (srvFull) {
+      for (const [t, list] of Object.entries(lists)) {
+        const keep = seen[t] || new Set(), ack = S.ack[t] ||= {};
+        for (let i = list.length - 1; i >= 0; i--) {
+          const id = list[i].id;
+          if (!keep.has(id) && (ack[id] || !writable[t])) { list.splice(i, 1); changed = true; }
+        }
+        for (const id of Object.keys(ack)) if (!keep.has(id)) delete ack[id];
+      }
+      for (const [t, x] of Object.entries(singles)) if (!seen[t]?.has(x.id)) (S.ack[t] ||= {})[x.id] ??= 'aucun';   // pas encore sur le serveur
+    }
+    await Taches.setRaw(lists.tasks);
+    S.rev = res.rev; S.me = res.me; srvFull = false;
+    state.lastSync = Date.now();
+    normalizeSettings();
+    await DB.save(state);
+    setSync('ok');
+    if (why.length) toast('Refusé par le serveur : ' + [...new Set(why)].join(', '));
+    if (changed && !$('#dlg').open) render();
+    if (!S.me.member) { render(); return; }
+    // Fichiers OneDrive : seulement pour un administrateur connecté à OneDrive (Excel de facturation, module Achats).
+    if (isAdmin() && mod('facturation')) publishExcel().catch(e => setSync('err', 'Excel : ' + e.message));
+    if (isAdmin() && mod('achats')) Achats.sync();
+    if (mod('taches')) Taches.sync();
+  } catch (e) {
+    if (e instanceof OneDrive.NeedLogin) { setSync('login', 'Session expirée : reconnecte-toi.'); render(); }
+    else setSync(navigator.onLine ? 'err' : 'offline', e.message);
+  } finally {
+    syncing = false;
+    if (syncAgain) { syncAgain = false; scheduleSync(); }
+  }
+}
+// Avec le serveur, synchro aussi toutes les minutes quand l'app est visible (travail des autres utilisateurs).
+setInterval(() => { if (srvOn() && document.visibilityState === 'visible' && !locked && navigator.onLine) sync(); }, 60000);
+
+// Migration des fichiers OneDrive vers le serveur (administrateur de la plateforme ; architecture.md, section 13).
+// Sociétés autres que la sienne : gérées par elle (Alescom) ; sa société : tous les modules.
+async function srvPayload() {
+  const u = me();
+  return {
+    societes: state.societes.map(s => s.id === HOME ? { ...s, managedBy: '', modules: Object.fromEntries(MODULES.map(m => [m, true])) } : { ...s, managedBy: HOME }),
+    users: state.users, clients: state.clients, entries: state.entries, bills: state.bills, tasks: await Taches.raw(),
+    settings: [{ id: HOME, ...omit(state.settings, 'pin'), settingsAt: state.settingsAt || 0, updatedAt: state.settingsAt || 0 }],
+    usettings: [{ id: u.id, pin: state.settings.pin || null, updatedAt: Date.now() }],
+    timers: [{ id: u.id, timer: state.timer, timerAt: state.timerAt || 0, updatedAt: state.timerAt || 0 }],
+  };
+}
+async function migrateToServer(replace) {
+  const data = await srvPayload();
+  const r = await Serveur.import(data, replace);
+  state.srv = { on: true, rev: 0, ack: {}, me: (await Serveur.me()).data };
+  srvFull = true; HOME = state.srv.me.societeId || HOME;
+  // Ce qui vient d'être envoyé n'est pas renvoyé : la 1re synchro remplace seulement les objets par la version du serveur.
+  const lists = { societes: state.societes, users: state.users, clients: state.clients, entries: state.entries, bills: state.bills, tasks: data.tasks };
+  for (const [t, list] of Object.entries(lists)) state.srv.ack[t] = Object.fromEntries(list.map(o => [o.id, fp(o)]));
+  for (const [t, x] of Object.entries(srvSingles())) state.srv.ack[t] = { [x.id]: fp({ id: x.id, ...x.get() }) };
+  await DB.save(state);
+  return r.count;
+}
+
 // ---------- rendu ----------
 const TITLES = { today: "Aujourd'hui", taches: 'Tâches', list: 'Interventions', billing: 'Facturer', archive: 'Archives', achats: 'Achats', articles: 'Articles', admin: 'Administration', settings: 'Réglages' };
 // Achats et Articles (achats.js), Tâches (taches.js) : modules séparés, avec leurs propres données et leur propre synchro.
@@ -369,6 +564,16 @@ function envBar() {
   bar.textContent = `DEV · données : ${folder}${real ? ' ⚠ DONNÉES RÉELLES' : ''} · Billit sandbox`;
 }
 
+const TAB_RULES = {
+  taches: () => mod('taches'),
+  billing: () => isAdmin() && mod('facturation'), archive: () => isAdmin() && mod('facturation'),
+  achats: () => isAdmin() && mod('achats'), articles: () => isAdmin() && mod('achats'),
+  admin: () => isAdmin()
+};
+const tabAllowed = t => TAB_RULES[t]?.() ?? true;
+// Montants et facturation affichés seulement à ceux qui facturent.
+const seesMoney = () => isAdmin() && mod('facturation');
+
 function render() {
   clearInterval(tick);
   envBar();
@@ -377,9 +582,9 @@ function render() {
   document.body.classList.toggle('locked', !!gate);
   document.body.classList.toggle('dashwide', !gate && tab === 'today' && wideToday());
   if (gate) { if ($('#dlg').open) $('#dlg').close(); $('#viewTitle').textContent = 'LevelDesk'; return gate === 'login' ? viewLogin() : gate === 'pin' ? viewPin() : viewDenied(); }
-  // Onglet Administration : administrateurs seulement.
-  $('.tabs [data-tab="admin"]').classList.toggle('hidden', !isAdmin());
-  if (tab === 'admin' && !isAdmin()) tab = 'today';
+  // Onglets selon le rôle (prix et facturation : administrateurs) et les modules de la société.
+  $$('.tabs button[data-tab]').forEach(b => b.classList.toggle('hidden', !tabAllowed(b.dataset.tab)));
+  if (!tabAllowed(tab)) tab = 'today';
   $('#viewTitle').textContent = TITLES[tab];
   $$('.tabs button[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   $('#tabMore').classList.toggle('active', !!$(`.tabs .sec[data-tab="${tab}"]`));   // onglet secondaire ouvert : « Plus » allumé
@@ -416,7 +621,7 @@ function clientOptions(sel) {
 const flags = (x, p) => `
   <label class="check"><input type="checkbox" id="${p}Site" ${x.onSite ? 'checked' : ''}> Sur site</label>
   <div class="grid2">
-    <div><label>Commanditaire</label><select id="${p}Cmd" disabled title="Société du client (fiche client)">${socOptions(cmdOf(x))}</select></div>
+    <div class="${mod('soustraitance') ? '' : 'hidden'}"><label>Commanditaire</label><select id="${p}Cmd" disabled title="Société du client (fiche client)">${socOptions(cmdOf(x))}</select></div>
     <div><label>Technicien</label><input id="${p}Tech" data-id="${esc(techOf(x))}" value="${esc(userLabel(user(techOf(x))))}" disabled></div>
   </div>`;
 const readWho = p => { const cmdId = $(`#${p}Cmd`).value; return { cmdId, techId: $(`#${p}Tech`).dataset.id, alescom: cmdId === 'alescom' }; };
@@ -449,9 +654,9 @@ function dashSide(todays, week, sum) {
   // Comparaison avec la même période du mois précédent (du 1er au même jour).
   const before = sum(live().filter(e => e.date.startsWith(prev) && +e.date.slice(8) <= day));
   const diff = before ? Math.round((mine - before) / before * 100) : null;
-  const { groups } = billingGroups(), total = groups.reduce((s, g) => s + g.amount, 0);
+  const { groups } = seesMoney() ? billingGroups() : { groups: [] }, total = groups.reduce((s, g) => s + g.amount, 0);
   const oldest = groups.filter(g => g.age >= 20).sort((a, b) => b.age - a.age)[0];
-  const srv = activeClients().filter(c => c.server);
+  const srv = mod('forfaits') ? activeClients().filter(c => c.server) : [];
   const done = srv.filter(c => live().some(e => e.forfait === 'update' && e.clientId === c.id && e.date.startsWith(month)));
   const left = srv.filter(c => !done.includes(c));
   const monthName = new Date(d + 'T00:00').toLocaleDateString('fr-BE', { month: 'long' });
@@ -459,12 +664,12 @@ function dashSide(todays, week, sum) {
     <div class="dtile"><div class="l">Heures</div>
       <div class="dgrid"><div><b>${fmtDur(sum(todays))}</b>aujourd'hui</div><div><b>${fmtDur(sum(week))}</b>semaine</div><div><b>${fmtDur(mine)}</b>${esc(monthName)}</div></div>
       ${diff !== null ? `<div class="small ${diff >= 0 ? 'okc' : 'muted'}">${diff >= 0 ? '+' : ''}${diff} % par rapport au début de ${esc(prevName)}</div>` : ''}</div>
-    <div class="dtile tap" data-dgo="billing"><div class="l">À facturer ›</div><div class="v">${eur(total)}</div>
-      <div class="small muted">${groups.length} client(s)${oldest ? ` · <span class="warnc">${esc(oldest.info.label)} depuis ${oldest.age} j</span>` : ''}</div></div>
+    ${seesMoney() ? `<div class="dtile tap" data-dgo="billing"><div class="l">À facturer ›</div><div class="v">${eur(total)}</div>
+      <div class="small muted">${groups.length} client(s)${oldest ? ` · <span class="warnc">${esc(oldest.info.label)} depuis ${oldest.age} j</span>` : ''}</div></div>` : ''}
     ${srv.length ? `<div class="dtile"><div class="l">Mises à jour serveur · ${esc(monthName)}</div><div class="v">${done.length}/${srv.length}</div>
       <div class="dbar"><i style="width:${done.length / srv.length * 100}%"></i></div>
       <div class="small muted">${left.length ? 'Reste : ' + left.slice(0, 8).map(c => esc(c.name)).join(', ') + (left.length > 8 ? '…' : '') : 'Toutes faites ✓'}</div></div>` : ''}
-    <div class="dtile tap" data-dgo="achats" id="achTile"><div class="l">Achats ›</div><div class="small muted">Chargement…</div></div>`;
+    ${tabAllowed('achats') ? '<div class="dtile tap" data-dgo="achats" id="achTile"><div class="l">Achats ›</div><div class="small muted">Chargement…</div></div>' : ''}`;
 }
 
 function viewToday() {
@@ -516,11 +721,11 @@ function viewToday() {
   const buttons = `
     <div class="qa">
       <button class="btn" id="addManual"><span class="qi">＋</span>Intervention</button>
-      <button class="btn" id="addMaint"><span class="qi">🛠</span>Maintenance</button>
+      ${mod('forfaits') ? '<button class="btn" id="addMaint"><span class="qi">🛠</span>Maintenance</button>' : ''}
       <button class="btn" id="addQuick"><span class="qi">⚡</span>Rapide 5 min</button>
     </div>`;
   const dayList = todays.length ? `<ul class="list">${todays.map(e => entryLi(e)).join('')}</ul>` : '<div class="empty">Rien pour l\'instant.</div>';
-  const toBill = billingGroups().groups.reduce((s, g) => s + g.amount, 0);
+  const toBill = seesMoney() ? billingGroups().groups.reduce((s, g) => s + g.amount, 0) : 0;
   const head = `<div class="hello"><div><h2>${hello}</h2><div class="sub">${esc(helloSub)}</div></div><div class="date">${esc(dayLabel)}</div></div>`;
 
   // Grand écran (PC) : journée + barre latérale (maquette B du 29/10, au nouveau style) ; téléphone : une colonne.
@@ -531,7 +736,7 @@ function viewToday() {
         <div id="tkNotif"></div><div id="achNotif"></div>
         ${timerCard}${buttons}
         <div class="card"><h2>Interventions du jour <span class="tot">${fmtDur(sum(todays))}</span></h2>${dayList}</div>
-        <div class="card"><h2>Tâches du jour et en retard</h2><div id="tkDay"></div></div>
+        ${mod('taches') ? '<div class="card"><h2>Tâches du jour et en retard</h2><div id="tkDay"></div></div>' : ''}
       </div>
       <aside class="dside">${dashSide(todays, week, sum)}</aside>
     </div>` : `
@@ -542,20 +747,21 @@ function viewToday() {
     <div class="card stats">
       <div><b>${fmtDur(sum(todays))}</b><span>aujourd'hui</span></div>
       <div><b>${fmtDur(sum(week))}</b><span>semaine</span></div>
-      <div class="tap money" id="goBill"><b>${eur(toBill)}</b><span>à facturer ›</span></div>
+      ${seesMoney() ? `<div class="tap money" id="goBill"><b>${eur(toBill)}</b><span>à facturer ›</span></div>`
+        : `<div><b>${todays.length}</b><span>intervention(s)</span></div>`}
     </div>
     <div class="card"><h2>Aujourd'hui <span class="tot">${fmtDur(sum(todays))}</span></h2>${dayList}</div>`;
 
   $('#addManual').onclick = () => openEntry(null);
-  $('#addMaint').onclick = () => openForfait(null, 'maint');
+  if ($('#addMaint')) $('#addMaint').onclick = () => openForfait(null, 'maint');
   // Intervention rapide : forfait de 5 minutes (sans heures), il reste à choisir le client et à écrire la description.
   // Les mises à jour serveur passent par leurs tâches récurrentes (onglet Tâches), plus par un bouton ici (demande de Fred, 30/10).
   $('#addQuick').onclick = () => openEntry(null, { start: '', end: '', minutes: 5, pauseMin: 0 });
   $$('#goBill, [data-dgo]').forEach(b => b.onclick = () => { tab = b.dataset.dgo || 'billing'; render(); });
   bindEdits();
-  Achats.todayBanner($('#achNotif'));         // nouvelles factures fournisseurs (module Achats)
-  Taches.todayBanner($('#tkNotif'));          // tâches du jour, en retard, à prendre (module Tâches)
-  if ($('#tkDay')) Taches.dayList($('#tkDay'));
+  if (tabAllowed('achats')) Achats.todayBanner($('#achNotif'));         // nouvelles factures fournisseurs (module Achats)
+  if (mod('taches')) Taches.todayBanner($('#tkNotif'));          // tâches du jour, en retard, à prendre (module Tâches)
+  if ($('#tkDay') && mod('taches')) Taches.dayList($('#tkDay'));
   if ($('#achTile')) Achats.dashTile($('#achTile'));
 
   if (t) {
@@ -627,7 +833,7 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft 
       ${b.key !== 'import' ? '<button class="link" id="fBill">Voir la facture</button>' : ''}</p>` : ''}
     ${e.taskId ? `<p class="small">📋 Tâche : <button class="link" id="fTask">${esc(Taches.titleOf(e.taskId) || "voir la tâche d'origine")}</button></p>` : ''}
     <label>Client</label>
-    <select id="fClient">${clientOptions(e.clientId)}<option value="__new">+ Nouveau client…</option></select>
+    <select id="fClient">${clientOptions(e.clientId)}${isAdmin() ? '<option value="__new">+ Nouveau client…</option>' : ''}</select>
     <div class="grid2">
       <div><label>Date</label><input type="date" id="fDate" value="${e.date}" required></div>
       <div><label>Durée facturée (H:MM)</label><input id="fDur" value="${fmtDur(e.minutes)}"></div>
@@ -1196,8 +1402,8 @@ function viewAdmin() {
         <li><strong>Technicien</strong> : saisit, modifie et supprime ses interventions ; voit celles dont sa société est le commanditaire, durées seulement.</li>
         <li>Le technicien d'une intervention est toujours l'utilisateur connecté qui la crée ; il ne se change pas, même par un administrateur.</li>
         <li>Chaque utilisateur ne choisit que parmi ses <strong>clients visibles</strong> (par société).</li></ul>
-      <p class="small muted">Pour l'instant, toi seul as accès aux données. Les autres sociétés pourront se connecter quand le serveur commun sera en place (étape 2) :
-        les droits ci-dessus seront alors appliqués.</p>
+      <p class="small muted">${srvOn() ? 'Données sur le serveur : ces droits sont appliqués par le serveur, chaque utilisateur ne reçoit que ce qu\'il peut voir (jamais les prix pour un technicien).'
+        : 'Données dans OneDrive : toi seul y as accès. Après la migration vers le serveur (Réglages → Serveur LevelDesk), les autres utilisateurs pourront se connecter avec ces droits.'}</p>
     </div>`;
   $('#socAdd').onclick = () => editSoc(null);
   $('#usrAdd').onclick = () => editUser(null);
@@ -1213,7 +1419,10 @@ function editSoc(s) {
   const txt = (k, label) => `<div><label>${label}</label><input id="s_${k}" value="${esc(r[k] ?? '')}" autocapitalize="off"></div>`;
   f.innerHTML = `<h2>${s ? esc(s.name) : 'Nouvelle société'}</h2>
     <label>Nom</label><input id="sName" value="${esc(s?.name ?? '')}" placeholder="ex. Société X">
-    ${home ? '<p class="small muted">Ta société : ses tarifs (clients) se règlent dans Réglages.</p>' : `
+    ${home ? `<p class="small muted">Ta société : ses tarifs (clients) se règlent dans Réglages.</p>
+    ${srvOn() && state.srv.me?.platform ? `<h3 style="margin:14px 0 0">Modules</h3>
+      <p class="small muted">Réglés par l'administrateur de la plateforme. Un module désactivé disparaît de l'app pour toute la société.</p>
+      ${MODULES.map(m => `<label class="check"><input type="checkbox" data-mod="${m}" ${s.modules?.[m] ? 'checked' : ''}> ${MODULE_NAMES[m]}</label>`).join('')}` : ''}` : `
     <label>Tenant Microsoft 365 <span class="small">(domaine ou ID, pour la connexion de ses utilisateurs plus tard)</span></label>
     <input id="sTenant" value="${esc(s?.tenant ?? '')}" placeholder="ex. societe-x.be" autocapitalize="off">
     <label>Nom du client dans Billit <span class="small">(à qui tu factures ton travail pour eux)</span></label>
@@ -1230,6 +1439,7 @@ function editSoc(s) {
     if (!name) return alert('Nom requis.');
     if (liveSocs().some(x => x !== s && fold(x.name) === fold(name))) return alert('Cette société existe déjà.');
     const data = { name };
+    if ($('[data-mod]')) data.modules = Object.fromEntries($$('[data-mod]').map(x => [x.dataset.mod, x.checked]));
     if (!home) {
       const num = k => { const v = parseFloat($('#s_' + k).value); return isNaN(v) ? 0 : v; };
       const ref = k => $('#s_' + k).value.trim();
@@ -1304,6 +1514,7 @@ function editUser(u) {
 
 // ---- Réglages ----
 function viewSettings() {
+  if (!isAdmin()) return viewMySettings();
   const od = state.onedrive, s = state.settings, r = s.rates;
   const rateBlock = (k, title) => `<h2>${title}</h2><div class="grid3">
       <div><label>€ / heure</label><input type="number" step="0.01" data-rate="${k}.h" value="${r[k].h}"></div>
@@ -1379,6 +1590,8 @@ function viewSettings() {
       <div class="row"><button class="btn" id="pinSet">${state.settings.pin ? 'Changer le code PIN' : 'Définir un code PIN'}</button>
         ${state.settings.pin ? '<button class="btn danger" id="pinDel">Supprimer le code PIN</button>' : ''}</div>
     </div>
+
+    <div class="card"><h2>Serveur LevelDesk</h2><div id="srvCard"></div></div>
 
     <div class="card"><h2>Reprise des données</h2>
       <div class="row">
@@ -1533,7 +1746,12 @@ function viewSettings() {
     const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
     try { importRows(await Xlsx.readArchiveTemplate(await f.arrayBuffer()), 'ArchiveTemplate.xlsx', false); } catch (e) { alert(e.message); }
   };
-  // Version installée (nom du cache du service worker, ex. heures-v23) : pour vérifier qu'une publication est bien arrivée.
+  srvCard();
+  showVersion();
+}
+
+// Version installée (nom du cache du service worker, ex. heures-v23) : pour vérifier qu'une publication est bien arrivée.
+function showVersion() {
   window.caches?.keys().then(ks => {
     const v = ks.filter(k => /^heures-v\d+$/.test(k)).sort((a, b) => +b.slice(8) - +a.slice(8))[0];
     if ($('#appVersion')) $('#appVersion').textContent = `Version : ${v || 'inconnue (pas de cache)'}`;
@@ -1542,6 +1760,75 @@ function viewSettings() {
     const el = $('#persistInfo');
     if (el) el.textContent = p ? 'Cache local persistant.' : 'Installe l\'app pour que le navigateur ne vide pas le cache local.';
   });
+}
+
+// Réglages d'un utilisateur qui n'est pas administrateur : seulement « Mes réglages » (compte, PIN, version).
+function viewMySettings() {
+  const i = state.srv?.me;
+  $('#view').innerHTML = `
+    ${installPrompt ? '<button class="btn primary big" id="install" style="margin-bottom:12px">Installer l\'application</button>' : ''}
+    <div class="card"><h2>Mon compte</h2>
+      <p class="small">${esc(me().name || '')} · ${esc(OneDrive.user())}${i?.societe ? ' · ' + esc(i.societe) : ''}</p>
+      <p class="small" id="odStatus">${esc(statusText())}</p>
+      <div class="row"><button class="btn" id="odSync">Synchroniser</button><button class="btn danger" id="odOut">Se déconnecter</button></div>
+    </div>
+    <div class="card"><h2>Code PIN</h2>
+      <p class="small muted">${state.settings.pin ? 'Un code PIN est demandé à l\'ouverture de l\'app et après 5 minutes en arrière-plan, sur tous tes appareils.'
+        : 'Aucun code PIN : l\'app s\'ouvre dès que tu es connecté à Microsoft 365.'}</p>
+      <div class="row"><button class="btn" id="pinSet">${state.settings.pin ? 'Changer le code PIN' : 'Définir un code PIN'}</button>
+        ${state.settings.pin ? '<button class="btn danger" id="pinDel">Supprimer le code PIN</button>' : ''}</div>
+    </div>
+    <div class="card"><p class="small muted" id="persistInfo"></p><p class="small muted" id="appVersion"></p></div>`;
+  if (installPrompt) $('#install').onclick = async () => { installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; render(); };
+  $('#odSync').onclick = () => { srvFull = true; sync(); };
+  $('#odOut').onclick = () => { if (confirm('Se déconnecter ?\nLa copie locale de cet appareil est effacée ; tes données restent sur le serveur.')) signOut(); };
+  $('#pinSet').onclick = () => editPin();
+  if ($('#pinDel')) $('#pinDel').onclick = async () => {
+    if (!confirm('Supprimer le code PIN (sur tous tes appareils) ?')) return;
+    delete state.settings.pin; await persist(); toast('Code PIN supprimé');
+  };
+  showVersion();
+}
+
+// Carte « Serveur LevelDesk » (Réglages d'un administrateur) : état, ou migration des données de OneDrive (architecture.md, section 13).
+function srvCard() {
+  const el = $('#srvCard');
+  if (!el) return;
+  if (srvOn()) {
+    const i = state.srv.me || {};
+    el.innerHTML = `<p class="small"><span class="pill ok">✓ Données sur le serveur</span> ${esc(i.societe || '')} · ${esc(new URL(API_URL).host + new URL(API_URL).pathname)}</p>
+      <p class="small muted">Sociétés, utilisateurs, clients, interventions, factures, tâches, chrono et réglages. OneDrive ne sert plus qu'aux fichiers (Excel, Prestations, Achats).
+        Les anciens fichiers heures-data.json et taches-data.json restent dans OneDrive, sans être modifiés.</p>
+      <button class="btn" id="srvResync">Tout recharger depuis le serveur</button>`;
+    $('#srvResync').onclick = () => { srvFull = true; sync(); toast('Synchro complète…'); };
+    return;
+  }
+  el.innerHTML = '<p class="small muted">Serveur…</p>';
+  Serveur.me().then(async r => {
+    const i = r.data || {};
+    if (!i.platform) { el.innerHTML = '<p class="small muted">Données dans OneDrive. La migration vers le serveur est faite par l\'administrateur de la plateforme.</p>'; return; }
+    const tasks = await Taches.raw();
+    const n = { clients: state.clients.length, entries: state.entries.length, bills: state.bills.length, tasks: tasks.length, users: state.users.length, societes: state.societes.length };
+    el.innerHTML = `<p class="small">Données actuellement dans OneDrive (${esc(state.onedrive.folder)}). ${i.migrated ? '<span class="pill warn">Le serveur contient déjà des données.</span>' : ''}</p>
+      <p class="small muted">La migration copie sur le serveur : ${n.societes} société(s), ${n.users} utilisateur(s), ${n.clients} client(s), ${n.entries} intervention(s),
+        ${n.bills} facture(s), ${n.tasks} tâche(s), les réglages, ton code PIN et ton chrono. Les fichiers OneDrive ne sont pas modifiés.
+        Ensuite, l'app (sur tous les appareils) travaille avec le serveur. Ouvre d'abord l'app une fois sur tes autres appareils pour qu'ils aient tout envoyé à OneDrive.</p>
+      ${i.migrated && ENV !== 'prod' ? '<label class="check"><input type="checkbox" id="srvReplace"> Remplacer les données du serveur (développement)</label>' : ''}
+      <button class="btn primary" id="srvMigrate" ${i.migrated && ENV === 'prod' ? 'disabled' : ''}>Migrer vers le serveur</button> <span class="small" id="srvMigRes"></span>`;
+    $('#srvMigrate').onclick = async () => {
+      const replace = !!$('#srvReplace')?.checked;
+      if (i.migrated && !replace) return alert('Le serveur contient déjà des données : coche « Remplacer » pour recommencer (développement).');
+      if (!confirm(`Migrer les données vers le serveur${replace ? ' (en REMPLAÇANT celles du serveur)' : ''} ?`)) return;
+      const out = $('#srvMigRes'); out.textContent = 'Synchro OneDrive puis envoi…';
+      try {
+        srvChecked = true;
+        if (!i.migrated) await sync();                            // dernière synchro OneDrive : données à jour
+        const c = await migrateToServer(replace);
+        toast('Migration faite : ' + Object.entries(c).map(([k, v]) => `${v} ${k}`).join(', '));
+        render(); sync();
+      } catch (e) { out.innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
+    };
+  }).catch(e => { el.innerHTML = `<p class="small"><span class="pill warn">Serveur : ${esc(e.message)}</span></p>`; });
 }
 
 // Suppression "douce" : le client disparaît des listes, ses interventions gardent son nom dans l'historique.
@@ -1823,6 +2110,7 @@ document.addEventListener('visibilitychange', () => {
 
 (async () => {
   state = await DB.load();
+  if (srvOn()) HOME = state.srv.me?.societeId || HOME;
   normalizeSettings();
   OneDrive.configure(() => state.onedrive);
   // Réglages Billit synchronisés (mode, PartyID) + clés API de cet appareil.
