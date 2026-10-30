@@ -2,7 +2,7 @@
 // Incrémenter CACHE à chaque mise à jour publiée (même nom = le navigateur garde l'ancienne copie).
 const CACHE = 'heures-v42';
 const LOCAL = [
-  './', 'index.html', 'styles.css', 'db.js', 'csv.js', 'xlsx.js', 'onedrive.js', 'billit.js', 'copie-billit.js', 'pdf-fournisseurs.js', 'achats.js', 'taches.js', 'app.js',
+  './', 'index.html', 'styles.css', 'db.js', 'csv.js', 'xlsx.js', 'onedrive.js', 'serveur.js', 'billit.js', 'copie-billit.js', 'pdf-fournisseurs.js', 'achats.js', 'taches.js', 'app.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
   'lib/pdf.min.mjs', 'lib/pdf.worker.min.mjs', 'lib/exceljs.min.js'
 ];
@@ -26,5 +26,6 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = e.request.url;
   if (e.request.method !== 'GET' || !url.startsWith(self.location.origin)) return;
+  if (/^\/api(-dev)?\//.test(new URL(url).pathname)) return;   // serveur OVH : jamais en cache
   e.respondWith((async () => (await caches.match(e.request, { ignoreSearch: true })) || fetch(e.request))());
 });

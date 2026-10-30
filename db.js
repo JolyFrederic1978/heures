@@ -2,6 +2,10 @@
 // En développement : données dans Compta-DEV, Billit en sandbox uniquement, bandeau DEV.
 const ENV = location.hostname === 'gestion.onelevelup.be' ? 'prod' : 'dev';
 const DEFAULT_FOLDER = ENV === 'prod' ? 'Compta/TimeSheet' : 'Compta-DEV/TimeSheet';
+// Serveur OVH (PHP + MySQL, dossier serveur/ du projet) : production = /api, développement = /api-dev.
+// En local seulement, autre adresse possible pour les tests (localStorage « heures.api », ex. http://localhost:8092/).
+const API_URL = ENV === 'prod' ? 'https://gestion.onelevelup.be/api/'
+  : (location.hostname === 'localhost' && localStorage.getItem('heures.api')) || 'https://gestion.onelevelup.be/api-dev/';
 
 // Cache local (IndexedDB) : l'app fonctionne hors ligne, OneDrive est synchronisé dès que possible.
 const DB = (() => {
@@ -47,6 +51,7 @@ const DB = (() => {
       // Propre à cet appareil
       // Inscription Entra « Heures OLU » (One Level UP sprl) – identifiants publics, pas des secrets.
       onedrive: { clientId: '0b486fd1-e8f9-4933-94cd-49c5df20d6d6', tenant: 'eb79b929-d806-4ec9-8282-a93399a8ca66', folder: DEFAULT_FOLDER },
+      billitKeys: { test: '', live: '' },   // clés API Billit : jamais envoyées sur OneDrive
       published: {}, lastClientId: null, lastSync: 0
     };
   }

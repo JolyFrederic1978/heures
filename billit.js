@@ -3,7 +3,9 @@
 const Billit = (() => {
   const API = { test: 'https://api.sandbox.billit.be', live: 'https://api.billit.be' };
   const WEB = { test: 'https://my.sandbox.billit.be', live: 'https://my.billit.eu' };
-  let cfg = () => ({});
+  // cfg() : { mode, relay, test, live } (clés de cet appareil + PartyID synchronisés) ; onParty(mode, id) : enregistre un PartyID retrouvé.
+  // relay : les appels passent par le serveur OVH (serveur.js), qui garde la clé API ; les clés de l'appareil ne servent plus.
+  let cfg = () => ({}), onParty = () => {};
 
   // En développement (voir ENV dans db.js), toujours le sandbox, même si les réglages disent « Réel ».
   const mode = () => ENV === 'prod' ? cfg().mode || 'test' : 'test';
@@ -11,19 +13,27 @@ const Billit = (() => {
 
   // m : mode du compte appelé (par défaut le mode courant). Seule readLive() appelle 'live' en développement, et uniquement en lecture.
   async function call(path, opts = {}, m = mode()) {
-    const k = keys(m);
-    if (!k.apiKey || (!k.partyId && !opts.noParty)) throw new Error(`Clé API / PartyID Billit (${m === 'live' ? 'réel' : 'test'}) manquants dans Réglages.`);
-    const headers = { ApiKey: k.apiKey, Accept: 'application/json' };
-    if (k.partyId) headers.PartyID = k.partyId;
-    if (opts.body) headers['Content-Type'] = 'application/json';
-    const r = await fetch(API[m] + path, { ...opts, headers });
+    const k = keys(m), relay = !!cfg().relay;
+    let r;
+    if (relay) {
+      if (!k.partyId && !opts.noParty) throw new Error(`PartyID Billit (${m === 'live' ? 'réel' : 'test'}) manquant dans Réglages.`);
+      r = await Serveur.call('billit', { method: opts.method || 'GET', body: opts.body, query: { mode: m, party: k.partyId || '', path } });
+    } else {
+      if (!k.apiKey || (!k.partyId && !opts.noParty)) throw new Error(`Clé API / PartyID Billit (${m === 'live' ? 'réel' : 'test'}) manquants dans Réglages.`);
+      const headers = { ApiKey: k.apiKey, Accept: 'application/json' };
+      if (k.partyId) headers.PartyID = k.partyId;
+      if (opts.body) headers['Content-Type'] = 'application/json';
+      r = await fetch(API[m] + path, { ...opts, headers });
+    }
     const text = await r.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch (_) { data = text; }
     if (!r.ok) {
+      // Relais : 424 = clé refusée par Billit ; erreur propre au serveur (droits, clé absente) = { error }.
+      if (relay && !r.headers.get('X-Billit-Status')) throw new Error(`Serveur (${r.status}) : ${data?.error || String(text).slice(0, 200)}`);
       const msg = typeof data === 'string' ? data
         : data?.Message || data?.message || data?.errors?.map(e => e.Description || e.Code).join(' ; ') || JSON.stringify(data);
-      throw new Error(`Billit (${r.status}) : ${String(msg || r.statusText).slice(0, 400)}`);
+      throw new Error(`Billit (${relay ? r.headers.get('X-Billit-Status') : r.status}) : ${String(msg || r.statusText).slice(0, 400)}`);
     }
     return data;
   }
@@ -45,9 +55,11 @@ const Billit = (() => {
   }
 
   return {
-    configure(fn) { cfg = fn; },
+    configure(fn, party) { cfg = fn; if (party) onParty = party; },
     mode,
-    ready: () => !!(keys().apiKey && keys().partyId),
+    relay: () => !!cfg().relay,
+    // Avec le serveur, la présence de la clé n'est connue qu'en l'appelant : seul le PartyID est contrôlé ici.
+    ready: () => !!((cfg().relay || keys().apiKey) && keys().partyId),
     orderUrl: id => `${WEB[mode()]}/Order/Income/Invoice/${id}/EditOrder`,
     partyName,
     // Fonctionne avec la clé seule : sert aussi à retrouver le PartyID de la société.
@@ -83,9 +95,9 @@ const Billit = (() => {
     fileRaw: id => call('/v1/files/' + encodeURIComponent(id)),
     // Billit réel en LECTURE SEULE : requêtes GET uniquement (aucune option transmise), pour copier vers le sandbox.
     live: {
-      ready: () => !!keys('live').apiKey,
+      ready: () => !!(cfg().relay || keys('live').apiKey),
       account: () => call('/v1/account/accountInformation', { noParty: true }, 'live'),
-      setPartyId(id) { keys('live').partyId = String(id); },
+      setPartyId(id) { onParty('live', id); },
       get: path => call(path, {}, 'live'),
       list: path => pages(path, 'live')
     }

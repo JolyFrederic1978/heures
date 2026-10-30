@@ -1,6 +1,6 @@
 // Connexion Microsoft 365 (OAuth2 code + PKCE, sans bibliothèque) et accès OneDrive via Microsoft Graph.
 const OneDrive = (() => {
-  const TK = 'heures.tokens', PK = 'heures.pkce';
+  const TK = 'heures.tokens', PK = 'heures.pkce', AK = 'heures.apitk';
   const SCOPE = 'openid profile offline_access Files.ReadWrite';
   let cfg = () => ({});
 
@@ -25,7 +25,7 @@ const OneDrive = (() => {
     location.assign(`${authBase()}/authorize?${p}`);
   }
 
-  function logout() { localStorage.removeItem(TK); }
+  function logout() { localStorage.removeItem(TK); localStorage.removeItem(AK); }
 
   async function tokenRequest(params) {
     const r = await fetch(`${authBase()}/token`, {
@@ -62,6 +62,29 @@ const OneDrive = (() => {
     if (!t.refresh) throw new NeedLogin();
     try { return (await tokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh })).access; }
     catch (e) { if (e.invalid) { logout(); throw new NeedLogin(); } throw e; }   // hors ligne : on garde le jeton
+  }
+
+  // Jeton pour le serveur OVH (portée api://<client ID>/access_as_user, « Exposer une API » dans Entra),
+  // obtenu avec le jeton d'actualisation de la connexion (pas de nouvelle page Microsoft). Le jeton Graph ne peut pas servir au serveur.
+  async function apiToken() {
+    let a = null;
+    try { a = JSON.parse(localStorage.getItem(AK)); } catch (_) { }
+    if (a?.exp > Date.now()) return a.access;
+    const t = tokens();
+    if (!t?.refresh) throw new NeedLogin();
+    const r = await fetch(`${authBase()}/token`, {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: cfg().clientId, scope: `api://${cfg().clientId}/access_as_user`, grant_type: 'refresh_token', refresh_token: t.refresh })
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      const m = j.error_description || j.error || '';
+      throw new Error(/AADSTS65001|AADSTS500011|AADSTS70011/.test(m)
+        ? 'Serveur OVH pas encore autorisé dans Entra (« Exposer une API » → access_as_user, puis consentement administrateur).'
+        : 'Jeton du serveur : ' + m.split('\n')[0]);
+    }
+    localStorage.setItem(AK, JSON.stringify({ access: j.access_token, exp: Date.now() + (j.expires_in - 120) * 1000 }));
+    return j.access_token;
   }
 
   async function graph(path, opts = {}) {
@@ -134,7 +157,7 @@ const OneDrive = (() => {
   }
 
   return {
-    NeedLogin, login, logout, handleRedirect, get, put, list, mkdir, move, redirectUri,
+    NeedLogin, login, logout, handleRedirect, get, put, list, mkdir, move, redirectUri, apiToken,
     configure(fn) { cfg = fn; },
     configured: () => !!cfg().clientId,
     signedIn: () => !!tokens(),

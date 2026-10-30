@@ -189,6 +189,15 @@ function normalizeSettings() {
   Object.assign(r.partner, { hRef: 'mai-001', mRef: 'mai-002', depRef: 'dep-001', ...pick(r.partner) });
   r.zone1.depRef ||= 'dep-003';
   state.settings.billit ||= { mode: 'test', test: { apiKey: '', partyId: '' }, live: { apiKey: '', partyId: '' } };
+  // Clés API Billit : propres à chaque appareil (state.billitKeys, jamais écrites dans heures-data.json, effacées à la déconnexion).
+  // Une clé encore présente dans les réglages synchronisés (versions ≤ v42) est reprise ici puis retirée : la synchro suivante réécrit le fichier sans elle.
+  state.billitKeys ||= { test: '', live: '' };
+  for (const k of ['test', 'live']) {
+    const b = state.settings.billit[k] ||= { apiKey: '', partyId: '' };
+    if (b.apiKey) { state.billitKeys[k] ||= b.apiKey; b.apiKey = ''; }
+  }
+  // Clés sur le serveur OVH (réglage synchronisé) : celles de l'appareil sont effacées.
+  if (state.settings.billit.relay) state.billitKeys = { test: '', live: '' };
   ensureSocietes();
 }
 // Échéance des factures Billit (jours) : 15 j pour les clients, celle du commanditaire sinon (Alescom 10 j) ; à modifier au besoin dans Billit.
@@ -1328,10 +1337,18 @@ function viewSettings() {
         <label class="check grow"><input type="radio" name="bMode" value="live" ${Billit.mode() === 'live' ? 'checked' : ''} ${ENV === 'prod' ? '' : 'disabled'}> Réel</label>
       </div>
       ${ENV === 'prod' ? '' : '<p class="small"><span class="pill warn">Version de développement : Billit toujours en Test (sandbox), le mode Réel est bloqué.</span></p>'}
+      <label class="check" style="margin-top:8px"><input type="checkbox" id="bRelay" ${s.billit.relay ? 'checked' : ''}> Clés API sur le serveur OVH (recommandé)</label>
       ${['test', 'live'].map(k => `<div class="grid2">
-        <div><label>Clé API (${k === 'live' ? 'réel' : 'test'})</label><input type="password" autocomplete="off" data-bk="${k}.apiKey" value="${esc(s.billit[k].apiKey)}"></div>
+        <div><label>Clé API (${k === 'live' ? 'réel' : 'test'})</label>${s.billit.relay
+          ? `<div class="row"><input type="password" autocomplete="off" data-sk="${k}" placeholder="Saisir pour remplacer" style="flex:1">
+              <button class="btn" data-skdel="${k}">Effacer</button></div><span class="small" data-skst="${k}">Serveur…</span>`
+          : `<input type="password" autocomplete="off" data-bk="${k}.apiKey" value="${esc(state.billitKeys[k])}">`}</div>
         <div><label>PartyID (${k === 'live' ? 'réel' : 'test'})</label><input inputmode="numeric" data-bk="${k}.partyId" value="${esc(s.billit[k].partyId)}"></div>
       </div>`).join('')}
+      <p class="small muted">${s.billit.relay
+        ? `🔒 Les clés API sont sur le serveur OVH (${esc(new URL(API_URL).host + new URL(API_URL).pathname)}), chiffrées : jamais sur les appareils ni sur OneDrive.
+          Une clé saisie ici est contrôlée par Billit puis enregistrée sur le serveur, une seule fois pour tous les appareils.`
+        : '🔒 Les clés API restent sur cet appareil (jamais sur OneDrive) : à saisir une fois sur chaque appareil, effacées à la déconnexion.'}</p>
       <div class="row" style="margin-top:10px"><button class="btn" id="bTest">Tester la connexion</button><span class="small" id="bTestRes"></span></div>
       ${ENV === 'prod' ? '' : `<h3 style="margin:16px 0 4px">Copier Billit réel → sandbox</h3>
       <p class="small muted">Clients, articles (catégories par leur nom) et factures de vente et d'achat des 3 derniers mois, avec leurs fournisseurs.
@@ -1339,8 +1356,8 @@ function viewSettings() {
         Relancer ne crée pas de doublon. Pour que l'onglet Achats importe les factures d'achat copiées, ouvre-le une fois <em>avant</em> la copie.</p>
       <div class="row"><button class="btn" id="cpGo">Préparer la copie</button><button class="btn" id="cpArt">Copier les articles seulement</button></div>
       <pre class="recap hidden" id="cpLog"></pre>`}
-      <p class="small muted">Clé API : dans Billit, menu de ton profil → API. Laisse le PartyID vide puis clique « Tester la connexion » : il est retrouvé automatiquement. Ils sont enregistrés dans tes données OneDrive
-        (protégées par ta connexion Microsoft et ton code PIN), jamais sur GitHub. La clé donne accès à tout ton Billit : tu peux la révoquer à tout moment dans Billit.</p>
+      <p class="small muted">Clé API : dans Billit, menu de ton profil → API. Laisse le PartyID vide puis clique « Tester la connexion » : il est retrouvé automatiquement.
+        La clé donne accès à tout ton Billit : tu peux la révoquer à tout moment dans Billit.</p>
     </div>
 
     <div class="card"><h2>Code PIN</h2>
@@ -1391,9 +1408,55 @@ function viewSettings() {
     if (x.value === 'live' && !confirm('Passer en mode RÉEL ?\nLes factures seront créées dans ta vraie comptabilité Billit.')) { render(); return; }
     s.billit.mode = x.value; await saveSettings(); render();
   });
+  $('#bRelay').onchange = async ev => {
+    if (ev.target.checked && !confirm('Mettre les clés API Billit sur le serveur OVH ?\n\nLes clés enregistrées sur les appareils seront effacées (sur tous les appareils, à leur prochaine synchro).'
+      + '\nSaisis ensuite chaque clé ici une seule fois : elle est enregistrée sur le serveur.')) { ev.target.checked = false; return; }
+    if (!ev.target.checked && !confirm('Revenir aux clés API sur chaque appareil ?\nIl faudra ressaisir la clé sur chaque appareil (celles du serveur restent, efface-les au besoin avant).')) { ev.target.checked = true; return; }
+    s.billit.relay = ev.target.checked;
+    normalizeSettings(); await saveSettings(); render();
+  };
+  // Clés du serveur : état (date, auteur) lu sur le serveur ; saisie = contrôle par Billit puis enregistrement.
+  const srvKeyState = (k, b) => {
+    const el = $(`[data-skst="${k}"]`);
+    if (!el) return;
+    el.innerHTML = !b?.access ? '<span class="pill warn">Non autorisé sur ce serveur</span>'
+      : b.key ? `<span class="pill ok">✓ Sur le serveur${b.access === 'ro' ? ' (lecture seule)' : ''}</span> <span class="muted">${esc(frDate(String(b.at).slice(0, 10)))} · ${esc(b.by || '')}</span>`
+      : '<span class="pill warn">Aucune clé sur le serveur</span>';
+  };
+  if (s.billit.relay) Serveur.me()
+    .then(i => { if (!i.admin) throw new Error('réservé aux administrateurs'); ['test', 'live'].forEach(k => srvKeyState(k, i.billit[k])); })
+    .catch(e => $$('[data-skst]').forEach(el => el.innerHTML = `<span class="pill warn">${esc(e.message)}</span>`));
+  $$('[data-sk]').forEach(inp => inp.onchange = async () => {
+    const k = inp.dataset.sk, v = inp.value.trim();
+    if (!v) return;
+    $(`[data-skst="${k}"]`).textContent = 'Contrôle par Billit…';
+    try {
+      const r = await Serveur.saveBillitKey(k, v);
+      inp.value = '';
+      srvKeyState(k, r.billit);
+      const cos = r.companies || [];
+      if (!s.billit[k].partyId && cos.length) {
+        let co = cos[0];
+        if (cos.length > 1) {
+          const i = prompt('Plusieurs sociétés pour cette clé :\n' + cos.map((c, n) => `${n + 1}. ${c.Name} (PartyID ${c.PartyID})`).join('\n') + '\n\nNuméro de la société :', '1');
+          co = cos[(+i || 1) - 1] || cos[0];
+        }
+        s.billit[k].partyId = String(co.PartyID);
+        await saveSettings(); render();
+      }
+      toast('Clé enregistrée sur le serveur');
+    } catch (e) { inp.value = ''; $(`[data-skst="${k}"]`).innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
+  });
+  $$('[data-skdel]').forEach(b => b.onclick = async () => {
+    const k = b.dataset.skdel;
+    if (!confirm(`Effacer la clé API Billit (${k === 'live' ? 'réel' : 'test'}) du serveur ?\nPlus aucun appareil ne pourra appeler Billit dans ce mode.`)) return;
+    try { srvKeyState(k, (await Serveur.saveBillitKey(k, '')).billit); toast('Clé effacée du serveur'); }
+    catch (e) { $(`[data-skst="${k}"]`).innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
+  });
   $$('[data-bk]').forEach(inp => inp.onchange = () => {
     const [k, fld] = inp.dataset.bk.split('.');
-    s.billit[k][fld] = inp.value.trim(); saveSettings();
+    if (fld === 'apiKey') { state.billitKeys[k] = inp.value.trim(); DB.save(state); }   // clé : cet appareil seulement
+    else { s.billit[k][fld] = inp.value.trim(); saveSettings(); }
   });
   $('#bTest').onclick = async () => {
     const out = $('#bTestRes'); out.textContent = 'Connexion…';
@@ -1735,7 +1798,11 @@ document.addEventListener('visibilitychange', () => {
   state = await DB.load();
   normalizeSettings();
   OneDrive.configure(() => state.onedrive);
-  Billit.configure(() => state.settings.billit);
+  // Réglages Billit synchronisés (mode, PartyID) + clés API de cet appareil.
+  Billit.configure(() => {
+    const b = state.settings.billit, k = state.billitKeys || {};
+    return { mode: b.mode, relay: !!b.relay, test: { ...b.test, apiKey: k.test || '' }, live: { ...b.live, apiKey: k.live || '' } };
+  }, (m, id) => { state.settings.billit[m].partyId = String(id); });
   if (mergeRemoteClients()) await DB.save(state);
   let justLoggedIn = false;
   try { if ((justLoggedIn = await OneDrive.handleRedirect())) toast('Connecté'); }
