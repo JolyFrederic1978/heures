@@ -5,7 +5,7 @@
 // Utilise les outils de app.js ($, esc, uid, touch, state, client, me, canSee, openEntry…) : chargé avant lui, appelé après le démarrage.
 const Taches = (() => {
   let T = null, busy = false, msg = '';
-  let filter = 'today', fClient = '', fTech = '';
+  let filter = 'open', fClient = '', fTech = '';          // filtre par défaut : « Toutes » (demande de Fred, 30/10)
 
   // --- cache local (base IndexedDB à part) ---
   function idb(mode, fn) {

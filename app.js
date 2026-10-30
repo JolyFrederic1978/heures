@@ -412,10 +412,11 @@ function clientOptions(sel) {
 }
 // Sur site, commanditaire et technicien (x : intervention ou chrono ; p : préfixe des id des champs).
 // Technicien = l'utilisateur connecté pour une nouvelle intervention, celui d'origine pour une intervention existante : jamais modifiable (demande de Fred).
+// Commanditaire = société du client (fiche client), suit le client choisi : pas modifiable à la main non plus (demande de Fred, 30/10).
 const flags = (x, p) => `
   <label class="check"><input type="checkbox" id="${p}Site" ${x.onSite ? 'checked' : ''}> Sur site</label>
   <div class="grid2">
-    <div><label>Commanditaire</label><select id="${p}Cmd">${socOptions(cmdOf(x))}</select></div>
+    <div><label>Commanditaire</label><select id="${p}Cmd" disabled title="Société du client (fiche client)">${socOptions(cmdOf(x))}</select></div>
     <div><label>Technicien</label><input id="${p}Tech" data-id="${esc(techOf(x))}" value="${esc(userLabel(user(techOf(x))))}" disabled></div>
   </div>`;
 const readWho = p => { const cmdId = $(`#${p}Cmd`).value; return { cmdId, techId: $(`#${p}Tech`).dataset.id, alescom: cmdId === 'alescom' }; };
@@ -573,7 +574,6 @@ function viewToday() {
     };
     $('#tDesc').onchange = ev => { t.description = ev.target.value; save(); };
     $('#tSite').onchange = ev => { t.onSite = ev.target.checked; save(); };
-    $('#tCmd').onchange = () => { Object.assign(t, readWho('t')); save(); };
     $('#tPause').onclick = async () => {
       t.description = $('#tDesc').value;
       if (t.pausedAt) { t.pausedMs = (t.pausedMs || 0) + (Date.now() - new Date(t.pausedAt)); t.pausedAt = null; }
@@ -672,7 +672,7 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft 
         install: $('#fInst').value, flat: flat() };
       const back = x => openEntry(entry, preset, fromTimer, onSaved, x);
       editClient(null, { onSaved: c => back({ ...d, clientId: c.id, ...(entry ? {} : { cmdId: clientSoc(c), alescom: clientSoc(c) === 'alescom' }) }), onCancel: () => back(d) });
-    } else if (!entry) $('#fCmd').value = clientSoc(client(ev.target.value));
+    } else $('#fCmd').value = clientSoc(client(ev.target.value));
   };
   if ($('#fDel')) $('#fDel').onclick = async () => {
     if (!confirm('Supprimer cette intervention ?')) return;
@@ -751,7 +751,7 @@ function openForfait(entry, kind, pre = {}) {
     const c = client(ev.target.value);
     $('#kHint').textContent = hint(c);
     if (kind === 'update') $('#kDur').value = fmtDur(updateMinutes(c));
-    if (!entry) $('#kCmd').value = clientSoc(c);
+    $('#kCmd').value = clientSoc(c);
   };
   if ($('#kDel')) $('#kDel').onclick = async () => {
     if (!confirm('Supprimer cette intervention ?')) return;
