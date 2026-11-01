@@ -89,9 +89,15 @@ const Achats = (() => {
   const saleTotal = l => { const u = lineUnit(l); return u == null ? null : round2(u * l.qty); };
   // N° de facture : celui de la facture de l'app (onglet Facturer) si la ligne y est, sinon celui saisi ici.
   const billRefOf = l => l.billId ? (bill(l.billId)?.ref || '') : (l.billRef || '');
+  // Facture à traiter (importée depuis le 01/11, pas encore validée) : ses articles n'apparaissent nulle part dans Facturer.
+  // Factures plus anciennes (sans statut) : considérées comme validées, rien ne change pour elles.
+  const toTreat = i => i?.status === 'todo';
+  // pending = facture pas encore validée ; stock = mis en stock (vendu ensuite dans Billit, pas de stock géré ici) ;
   // todo = client, article Billit ou marge manquant ; ready = prêt à refacturer.
   function lineState(l) {
     if (l.status === 'billed') return 'billed';
+    if (toTreat(inv(l.invoiceId))) return 'pending';
+    if (l.status === 'stock') return 'stock';
     if (l.status === 'ignored' || mapOf(l)?.ignore) return 'ignored';
     return l.clientId && mapOf(l)?.billitRef && saleUnit(l) != null ? 'ready' : 'todo';
   }
@@ -167,6 +173,58 @@ const Achats = (() => {
   }
   const payload = () => JSON.stringify({ version: 1, ...Object.fromEntries(KINDS.map(k => [k, A[k]])) });
 
+  // --- achats sur le serveur (phase 3b) : la société est sur le serveur → achats dans MySQL, propres à la société (?r=achats) ---
+  // Sans serveur (production actuelle) : achats-data.json dans OneDrive, comme avant. Même principe que la synchro du pointage (app.js, srvSync) :
+  // envoi de tout objet dont l'empreinte a changé depuis la dernière version reçue (A.srv.ack), réception de ce qui a changé depuis A.srv.rev.
+  const onServer = () => srvOn();
+  const fpo = o => hash(JSON.stringify(o));
+  const achApi = body => Serveur.json('achats', { method: 'POST', body });
+  async function serverSync() {
+    const S = A.srv ||= { init: false, rev: 0, ack: {} };
+    if (!S.init) {
+      // 1re fois : si la société n'a encore aucun achat sur le serveur, reprise de achats-data.json (OneDrive du compte) + ce que cet appareil a déjà.
+      if (!(await achApi({ op: 'state' })).count) {
+        if (await OneDrive.hasDrive().catch(() => null)) {
+          const cur = await OneDrive.get(path.data()).catch(() => null);
+          if (cur) merge(JSON.parse(cur.data));
+        }
+        if (KINDS.some(k => k !== 'suppliers' && alive(A[k]).length)) {
+          await achApi({ op: 'import', data: Object.fromEntries(KINDS.map(k => [k, A[k]])) });
+          for (const k of KINDS) S.ack[k] = Object.fromEntries(A[k].map(o => [o.id, fpo(o)]));
+          toast('Achats repris sur le serveur');
+        }
+      }
+      S.init = true; S.rev = 0;
+    }
+    const changes = [];
+    for (const k of KINDS) {
+      const ack = S.ack[k] ||= {};
+      for (const o of A[k]) { const f = fpo(o); if (ack[o.id] !== f) changes.push({ t: k, id: o.id, updatedAt: o.updatedAt || 0, deleted: !!o.deleted, data: o, f }); }
+    }
+    const res = await achApi({ op: 'sync', since: S.rev, changes: changes.map(({ f, ...c }) => c) });
+    const refused = new Set(res.rejected.map(x => x.t + ':' + x.id));
+    for (const c of changes) if (!refused.has(c.t + ':' + c.id)) S.ack[c.t][c.id] = c.f;
+    let ch = false;
+    const apply = r => {
+      const list = A[r.t];
+      if (!list) return;
+      const i = list.findIndex(o => o.id === r.id), o = r.deleted ? { ...r.data, deleted: true } : r.data;
+      if (i >= 0) list[i] = o; else list.push(o);
+      (S.ack[r.t] ||= {})[r.id] = fpo(o); ch = true;
+    };
+    for (const r of res.rows) {
+      // Modifié ici depuis (et plus récent) : gardé, envoyé à la prochaine synchro.
+      const loc = A[r.t]?.find(o => o.id === r.id);
+      if (loc && S.ack[r.t]?.[r.id] !== fpo(loc) && (loc.updatedAt || 0) > r.updatedAt) continue;
+      apply(r);
+    }
+    res.rejected.forEach(x => x.row && apply(x.row));
+    S.rev = res.rev;
+    return ch;
+  }
+  // Boîte « Entrant » : seulement si les fichiers de la société vont dans OneDrive (sinon : « Importer un PDF » et les factures reçues dans Billit).
+  let inboxOn = true;
+
   // Appelé par la synchro du pointage (app.js) quand elle a réussi. force = vérifier le dossier Entrant tout de suite.
   async function sync(force = false) {
     await load();
@@ -174,16 +232,20 @@ const Achats = (() => {
     busy = true;
     let redraw = false;
     try {
-      let ch = false, cur = await OneDrive.get(path.data());
-      if (cur) ch = merge(JSON.parse(cur.data));
+      let ch = false, cur = null;
+      if (onServer()) ch = await serverSync();
+      else { cur = await OneDrive.get(path.data()); if (cur) ch = merge(JSON.parse(cur.data)); }
+      inboxOn = (await Fichiers.where()) === 'onedrive';
       ch = assignClients() || ch;
       let billitErr = '';
       if (force || Date.now() - lastCheck > CHECK_EVERY) {
-        lastCheck = Date.now(); ch = (await checkInbox()) || ch;
-        // Une erreur Billit n'empêche pas d'enregistrer le reste dans OneDrive.
+        lastCheck = Date.now();
+        if (inboxOn) ch = (await checkInbox()) || ch;
+        // Une erreur Billit n'empêche pas d'enregistrer le reste.
         try { ch = (await checkBillit()) || ch; } catch (e) { billitErr = 'Billit : ' + e.message; }
       }
-      for (let i = 0; i < 3; i++) {
+      if (onServer()) ch = (await serverSync()) || ch;             // envoie ce qui vient d'être importé ou rattaché
+      else for (let i = 0; i < 3; i++) {
         const body = payload();
         if (cur && hash(cur.data) === hash(body)) break;           // rien de neuf à écrire
         const r = await OneDrive.put(path.data(), body, { etag: cur?.etag, type: 'application/json' });
@@ -199,6 +261,7 @@ const Achats = (() => {
     } catch (e) {
       msg = e instanceof OneDrive.NeedLogin ? '' : e.message;
       redraw = true;
+      await save().catch(() => {});                               // garde ce qui a déjà été reçu ou envoyé (A.srv)
     } finally { busy = false; }
     if (redraw && tab === 'achats' && !$('#dlg').open) render();
     // Page Aujourd'hui : seul le bandeau est redessiné (pas toute la page, pour ne pas effacer une saisie en cours).
@@ -212,9 +275,10 @@ const Achats = (() => {
     const fresh = alive(A.invoices).filter(i => i.seen === false).length;
     const todo = alive(A.lines).filter(l => lineState(l) === 'todo').length;
     const ready = alive(A.lines).filter(l => lineState(l) === 'ready');
+    const treat = alive(A.invoices).filter(toTreat).length;
     el.innerHTML = `<div class="l">Achats ›</div>
       <div class="v">${fresh ? `${fresh} nouv.` : ready.length ? `${ready.length} prêt(s)` : '—'}</div>
-      <div class="small muted">${[todo && `<span class="warnc">${todo} à compléter</span>`, `${ready.length} prêt(s) à refacturer`,
+      <div class="small muted">${[treat && `<span class="warnc">${treat} facture(s) à traiter</span>`, todo && `<span class="warnc">${todo} à compléter</span>`, `${ready.length} prêt(s) à refacturer`,
         ready.length && eur(ready.reduce((s, l) => s + (forBilling(l).total || 0), 0))].filter(Boolean).join(' · ')}</div>`;
   }
 
@@ -227,11 +291,12 @@ const Achats = (() => {
     const ids = new Set(fresh.map(i => i.id));
     const todo = alive(A.lines).filter(l => ids.has(l.invoiceId) && lineState(l) === 'todo').length;
     const ready = alive(A.lines).filter(l => ids.has(l.invoiceId) && lineState(l) === 'ready').length;
+    const treat = fresh.filter(toTreat).length;
     const names = fresh.slice(0, 3).map(i => `${i.supplier} ${i.number || ''}`.trim()).join(', ') + (fresh.length > 3 ? ', …' : '');
     el.innerHTML = `<div class="notifbar tap" id="achNotifGo" title="Ouvrir l'onglet Achats">
       <span class="ico">📥</span>
       <div class="txt"><strong>${fresh.length === 1 ? '1 nouvelle facture' : `${fresh.length} nouvelles factures`}</strong> <span class="small muted">· ${esc(names)}</span>
-        <div class="small state">${[todo && `${todo} article(s) à compléter`, ready && `${ready} prêt(s) à refacturer`].filter(Boolean).join(' · ') || 'rien à refacturer'}</div></div>
+        <div class="small state">${[treat && `${treat} facture(s) à traiter`, todo && `${todo} article(s) à compléter`, ready && `${ready} prêt(s) à refacturer`].filter(Boolean).join(' · ') || 'rien à refacturer'}</div></div>
       <span class="go">›</span>
       <button class="x" id="achNotifX" title="Marquer comme vues">✕</button></div>`;
     $('#achNotifGo', el).onclick = () => { tab = 'achats'; render(); };
@@ -363,8 +428,9 @@ const Achats = (() => {
     let stored = fold(name).startsWith(fold(`${sup} - `)) ? name : `${sup} - ${name}`;
     if (fromInbox) stored = await OneDrive.move(`${path.inbox()}/${name}`, path.done(year), stored) || stored;
     else {
-      const up = await OneDrive.put(`${path.done(year)}/${stored}`, buffer, { type: 'application/pdf' });
-      if (!up.ok && up.status !== 412) throw new Error(`OneDrive (${up.status}) : copie de ${name} dans Traités impossible.`);
+      // PDF importé à la main ou reçu dans Billit : rangé là où vont les fichiers de la société (OneDrive ou serveur).
+      const up = await Fichiers.put(`${path.done(year)}/${stored}`, buffer, { type: 'application/pdf' });
+      if (!up.ok && up.status !== 412) throw new Error(`${Fichiers.label(up.where)} (${up.status}) : copie de ${name} dans Traités impossible.`);
     }
     if (rec) { rec.deleted = true; touch(rec); }
     // Articles à 0 € : pas pris en compte. Lignes « skip » (Alescom) : frais de transport jamais refacturés,
@@ -375,7 +441,8 @@ const Achats = (() => {
       .map(([k, t]) => { const x = skips.filter(l => l.skip === k); return x.length ? `${x.length} ${t} (${eur(x.reduce((s, l) => s + l.total, 0))})` : ''; }).filter(Boolean);
     const invoice = touch({ id: uid('ai'), supplier: i.supplier, number: i.number, date: i.date, totalExcl: i.totalExcl,
       // seen: false = signalée par le bandeau de la page Aujourd'hui jusqu'au ✕ (factures importées avant le 26/10 : pas de champ = déjà vues).
-      file: `${path.done(year)}/${stored}`, importedAt: Date.now(), seen: false, skipped: zero, notes, warn: totalWarn(i, r.billitTotal),
+      // status « todo » : à traiter en entier puis valider (Factures à traiter) avant que ses articles soient refacturables.
+      file: `${path.done(year)}/${stored}`, importedAt: Date.now(), seen: false, status: 'todo', skipped: zero, notes, warn: totalWarn(i, r.billitTotal),
       interventions: (i.interventions || []).map(x => ({ id: uid('aw'), ...x, clientId: clientByName(x.client)?.id || null, entryId: null, dismissed: false })) });
     A.invoices.push(invoice);
     for (const l of kept) {
@@ -438,8 +505,8 @@ const Achats = (() => {
     for (const [k, p, make, data] of jobs) {
       const sig = hash(JSON.stringify(data) + p);
       if (A.published[k] === sig) continue;
-      const r = await OneDrive.put(p, await make(), { type: Xlsx.MIME, overwrite: true });
-      if (!r.ok) throw new Error(`OneDrive (${r.status}) : écriture de ${p.split('/').pop()} impossible.`);
+      const r = await Fichiers.put(p, await make(), { type: Xlsx.MIME, overwrite: true });
+      if (!r.ok) throw new Error(`${Fichiers.label(r.where)} (${r.status}) : écriture de ${p.split('/').pop()} impossible.`);
       A.published[k] = sig;
     }
   }
@@ -471,6 +538,8 @@ const Achats = (() => {
     const ls = alive(A.lines);
     const todo = ls.filter(l => lineState(l) === 'todo').sort(byClient);
     const ready = ls.filter(l => lineState(l) === 'ready');
+    const treat = alive(A.invoices).filter(toTreat).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    const stock = ls.filter(l => lineState(l) === 'stock').sort((a, b) => (inv(b.invoiceId).date || '').localeCompare(inv(a.invoiceId).date || ''));
     const groups = [...new Set(ready.map(l => l.clientId))].map(id => ({ id, ls: ready.filter(l => l.clientId === id) }))
       .sort((a, b) => client(a.id).name.localeCompare(client(b.id).name));
     const invoices = alive(A.invoices).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -484,12 +553,24 @@ const Achats = (() => {
     const gaps = ready.filter(l => priceGap(l)).length;
     $('#view').innerHTML = `
       <div class="kpis"><div class="kpi"><div class="v">${eur(ready.reduce((s, l) => s + saleTotal(l), 0))}</div><div class="l">${ready.length} article(s) prêt(s) à refacturer (HTVA)</div></div>
-        <div class="kpi"><div class="v">${todo.length}</div><div class="l">article(s) à compléter</div></div></div>
+        <div class="kpi"><div class="v">${treat.length}</div><div class="l">facture(s) à traiter</div></div></div>
+      ${treat.length ? `<div class="card"><h2>Factures à traiter (${treat.length})</h2>
+        <p class="small muted" style="margin-top:0">Choisis la destination de chaque article (client, stock ou interne), puis valide la facture :
+          ses articles ne sont proposés dans Facturer qu'après la validation.</p>
+        <ul class="list">${treat.map(i => { const n = ls.filter(l => l.invoiceId === i.id).length; return `<li class="tap" data-treat="${i.id}"><div class="grow" style="flex:1;min-width:0">
+          ${supPill(i.supplier)} <strong>${esc(i.number)}</strong> ${toCheck(i) ? '<span class="pill warn">⚠ total</span>' : ''}
+          <div class="small muted">${frDate(i.date)} · ${n} article(s)</div></div>
+          <div class="dur">${i.totalExcl != null ? eur(i.totalExcl) : ''}</div><button class="btn chip primary" data-treat="${i.id}">Traiter</button></li>`; }).join('')}</ul></div>` : ''}
       ${works.length ? `<div class="card"><h2>Interventions à ajouter au pointage (${works.length})</h2>
         <p class="small muted" style="margin-top:0">Lues sur les factures Alescom (lignes « Intervention ») : elles ne sont pas refacturées comme achats.
           « Ajouter » ouvre l'intervention préremplie ; vérifie-la puis enregistre.</p>
         <ul class="list">${works.map(({ i, x }) => workLi(i, x)).join('')}</ul></div>` : ''}
       ${todo.length ? `<div class="card"><h2>À compléter (${todo.length})</h2><ul class="list">${todo.map(lineLi).join('')}</ul></div>` : ''}
+      ${stock.length ? `<div class="card"><h2>Mis en stock (${stock.length})</h2>
+        <p class="small muted" style="margin-top:0">Articles achetés d'avance : leur vente se fait dans Billit (pas de stock géré dans LevelDesk). Valeur d'achat : ${eur(stock.reduce((s, l) => s + l.total, 0))}.</p>
+        <ul class="list">${stock.slice(0, 50).map(l => `<li class="tap" data-inv="${l.invoiceId}"><div class="grow" style="flex:1;min-width:0">${supPill(l.supplier)} <strong>${esc(l.label)}</strong>
+          <div class="small muted">${[inv(l.invoiceId).number, frDate(inv(l.invoiceId).date), `${l.qty} × ${eur(l.unit)}`].filter(Boolean).map(esc).join(' · ')}</div></div>
+          <div class="dur">${eur(l.total)}</div></li>`).join('')}</ul></div>` : ''}
       <div class="card"><h2>Prêt à refacturer</h2>
         <p class="small muted" style="margin-top:0">Ces articles sont proposés dans l'onglet <strong>Facturer</strong>, sur la facture du client (avec ses interventions).</p>
         ${gaps ? `<p class="small"><span class="pill warn">${gaps} article(s) dont le prix Billit diffère du prix calculé : ouvre le client pour ajuster.</span></p>` : ''}
@@ -513,12 +594,12 @@ const Achats = (() => {
       <div class="card"><h2>Factures fournisseurs</h2>
         <p class="small muted" style="margin-top:0">À l'ouverture de l'app, puis toutes les heures et sur « Vérifier maintenant », l'app lit :</p>
         <ul class="small muted" style="margin:0 0 8px;padding-left:18px">
-          <li>les PDF déposés dans OneDrive <code>${esc(path.inbox())}</code> ;</li>
+          <li>${inboxOn ? `les PDF déposés dans OneDrive <code>${esc(path.inbox())}</code>` : 'pas de dossier Entrant (pas de OneDrive) : importe les PDF avec « Importer un PDF » ci-dessous'} ;</li>
           <li>${Compta.ready() ? `les nouvelles factures ${BILLIT_SUP.map(x => x[1]).join(', ').replace(/, ([^,]+)$/, ' et $1')} reçues dans Billit${billitFrom() ? ` depuis le ${frDate(billitFrom())}` : ''}
             (${Compta.mode() === 'live' ? 'réel' : 'test'}, lecture seule ; les anciennes ne sont pas reprises)${bdone.length
               ? ` : ${bdone.filter(b => b.status === 'imported').length} importée(s), ${bdone.filter(b => b.status === 'known').length} déjà présente(s)` : ''}.`
             : 'les factures reçues dans Billit : clé API Billit absente (Réglages).'}</li></ul>
-        <p class="small muted">Les factures sont rangées dans <code>${esc(base())}/Traités</code>. Les articles à 0 € sont ignorés.${A.lastSync ? ` Dernière vérification : ${new Date(lastCheck || A.lastSync).toLocaleTimeString('fr-BE', { hour: '2-digit', minute: '2-digit' })}.` : ''}</p>
+        <p class="small muted">Les factures sont rangées dans <code>${esc(base())}/Traités</code>${inboxOn ? '' : ' (serveur LevelDesk)'}. Les articles à 0 € sont ignorés.${A.lastSync ? ` Dernière vérification : ${new Date(lastCheck || A.lastSync).toLocaleTimeString('fr-BE', { hour: '2-digit', minute: '2-digit' })}.` : ''}</p>
         ${msg ? `<p class="small"><span class="pill warn">${esc(msg)}</span></p>` : ''}
         ${checks.length ? `<p class="small" style="margin:0 0 4px"><strong style="color:var(--warn)">⚠ ${checks.length} facture(s) dont le total des articles ne correspond pas au total de la facture :</strong>
             ouvre-la, compare avec le PDF, puis corrige ou confirme.</p>
@@ -553,6 +634,7 @@ const Achats = (() => {
     $$('[data-pretry]').forEach(b => b.onclick = async () => { const p = A.files.find(x => x.id === b.dataset.pretry); p.status = 'retry'; touch(p); await save(); sync(true); });
     $$('[data-aclient]').forEach(li => li.onclick = () => billClient(li.dataset.aclient));
     $$('[data-inv]').forEach(li => li.onclick = () => showInvoice(inv(li.dataset.inv)));
+    $$('[data-treat]').forEach(el => el.onclick = ev => { ev.stopPropagation(); treatInvoice(inv(el.dataset.treat)); });
     $$('[data-ipdf]').forEach(b => b.onclick = ev => { ev.stopPropagation(); showPdf(inv(b.dataset.ipdf)); });
     // Recherche / filtre fournisseur, sans redessiner l'écran. Sans critère : les 15 plus récentes.
     const filterInv = () => {
@@ -849,8 +931,8 @@ const Achats = (() => {
     try {
       let buf = pdfCache.get(i.id);
       if (!buf) {
-        const got = await OneDrive.get(i.file, 'buffer');
-        if (!got) throw new Error(`${name} introuvable dans ${i.file.split('/').slice(0, -1).join('/')} (déplacé ou renommé dans OneDrive ?).`);
+        const got = await Fichiers.get(i.file, 'buffer');
+        if (!got) throw new Error(`${name} introuvable dans ${i.file.split('/').slice(0, -1).join('/')} (déplacé ou renommé ?).`);
         pdfCache.set(i.id, buf = got.data);
       }
       if (!$('#pPages')) return;                     // dialogue fermé ou changé entre-temps
@@ -862,7 +944,149 @@ const Achats = (() => {
     } catch (e) { if ($('#pMsg')) $('#pMsg').innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
   }
 
+  // --- traitement d'une facture fournisseur en entier (demande de Fred, 01/11) ---
+  // Chaque article reçoit une destination : Client (refacturé), Stock (acheté d'avance ; vendu ensuite dans Billit, aucun stock géré ici)
+  // ou Interne (jamais refacturé). « Valider » seulement quand tout est complet ; avant, rien n'apparaît dans Facturer. Ensuite : récapitulatif.
+  const DEST = { client: 'Client', stock: 'Stock', interne: 'Interne' };
+  const destOf = l => l.status === 'stock' ? 'stock' : (l.status === 'ignored' || mapOf(l)?.ignore) ? 'interne' : 'client';
+  const setLarge = on => $('#dlg').classList.toggle('large', on);
+  async function treatInvoice(i, drafts = null) {
+    await loadProducts(0);
+    const ls = alive(A.lines).filter(l => l.invoiceId === i.id);
+    const editable = ls.filter(l => l.status !== 'billed');
+    // Brouillon par ligne : destination, client, article, marge (préremplis : domaine / contact, correspondance, « ne jamais refacturer »).
+    const d = drafts || Object.fromEntries(ls.map(l => {
+      const m = mapOf(l) || findMap(l.supplier, l.key);
+      return [l.id, { dest: destOf({ ...l, mapId: l.mapId || m?.id }), clientId: l.clientId || '', ref: m?.billitRef || '', margin: m?.margin ?? '' }];
+    }));
+    const tmpMap = x => ({ billitRef: x.ref, margin: x.margin });
+    const f = $('#dlgForm');
+    f.innerHTML = `<h2>Traiter la facture ${esc(i.supplier)} ${esc(i.number)}</h2>
+      <p class="small muted" style="margin-top:0">Du ${frDate(i.date)} · total HTVA ${i.totalExcl != null ? eur(i.totalExcl) : '?'} · ${ls.length} article(s)
+        ${i.file ? ' · <button class="link" id="tPdf">📄 voir le PDF</button>' : ''}</p>
+      ${toCheck(i) ? `<p class="small"><span class="pill warn">⚠ ${esc(i.warn)}</span></p>` : ''}
+      <div class="treatbar">
+        <select id="tAllC"><option value="">Même client pour toutes les lignes…</option>${clientOptions('')}</select>
+        <button class="btn chip" id="tAllS">Tout en stock</button><button class="btn chip" id="tAllI">Tout interne</button></div>
+      <ul class="list treat">${ls.map(l => { const x = d[l.id], billed = l.status === 'billed'; return `<li data-tl="${l.id}">
+        <div class="grow" style="flex:1;min-width:0">
+          <div><strong>${esc(l.label)}</strong> ${billed ? '<span class="pill ok">déjà facturé</span>' : ''}</div>
+          <div class="small muted">${[whereOf(l), l.from && `du ${frDate(l.from)} au ${frDate(l.to)}`, `${l.qty} × ${eur(l.unit)} = ${eur(l.total)}`].filter(Boolean).map(esc).join(' · ')}</div>
+          <div class="row tdest">${Object.entries(DEST).map(([k, n]) => `<label class="check"><input type="radio" name="td_${l.id}" value="${k}" ${x.dest === k ? 'checked' : ''} ${billed ? 'disabled' : ''}> ${n}</label>`).join('')}</div>
+          <div class="tclient ${x.dest === 'client' ? '' : 'hidden'}">
+            <select data-tc="${l.id}" ${billed ? 'disabled' : ''}><option value="">— client —</option>${clientOptions(x.clientId)}</select>
+            ${productSelect('tr_' + l.id, x.ref)}
+            <input type="number" step="0.1" data-tm="${l.id}" value="${esc(x.margin)}" placeholder="marge fournisseur" title="Marge de l'article en % (vide = marge du fournisseur)" ${billed ? 'disabled' : ''}>
+          </div>
+          <div class="small" data-tp="${l.id}"></div>
+        </div></li>`; }).join('')}</ul>
+      <div class="card" style="margin:10px 0 0;padding:10px" id="tTot"></div>
+      <p class="small" id="tErr"></p>
+      <div class="actions"><button class="btn" id="tKeep" style="margin-right:auto">Enregistrer sans valider</button>
+        <button class="btn" value="cancel">Fermer</button><button class="btn primary" id="tOk">✓ Valider la facture</button></div>`;
+    setLarge(true);
+    $('#dlg').addEventListener('close', () => setLarge(false), { once: true });
+    if ($('#tPdf')) $('#tPdf').onclick = ev => { ev.preventDefault(); setLarge(false); showPdf(i); };
+    const read = () => {
+      for (const l of editable) {
+        const x = d[l.id];
+        x.dest = $(`input[name="td_${l.id}"]:checked`)?.value || x.dest;
+        x.clientId = $(`[data-tc="${l.id}"]`).value;
+        x.ref = ($(`#tr_${l.id}`).value || '').trim();
+        x.margin = $(`[data-tm="${l.id}"]`).value.trim();
+      }
+    };
+    // Ce qui manque à une ligne « Client » pour être refacturable.
+    const lacks = l => { const x = d[l.id]; return x.dest !== 'client' || l.status === 'billed' ? [] : [!x.clientId && 'client', !x.ref && 'article', saleUnit(l, tmpMap(x)) == null && 'marge'].filter(Boolean); };
+    const draw = () => {
+      read();
+      const sum = { client: 0, sale: 0, stock: 0, interne: 0 };
+      for (const l of ls) {
+        const x = d[l.id], el = $(`[data-tp="${l.id}"]`);
+        $(`[data-tl="${l.id}"] .tclient`).classList.toggle('hidden', x.dest !== 'client');
+        if (x.dest === 'client') {
+          const u = l.status === 'billed' ? lineUnit(l) : saleUnit(l, tmpMap(x)), miss = lacks(l);
+          sum.client += l.total; sum.sale += u != null ? round2(u * l.qty) : 0;
+          el.innerHTML = miss.length ? `<span class="pill warn">${miss.join(' + ')} à choisir</span>` : `→ refacturé ${eur(round2(u * l.qty))} HTVA (${l.qty} × ${eur(u)})`;
+        } else { sum[x.dest] += l.total; el.innerHTML = `<span class="muted">${x.dest === 'stock' ? '→ mis en stock' : '→ usage interne, non refacturé'}</span>`; }
+      }
+      const all = round2(sum.client + sum.stock + sum.interne), off = i.totalExcl != null && Math.abs(all - i.totalExcl) > 0.02;
+      $('#tTot').innerHTML = `<div class="small">Refacturé : achat <strong>${eur(sum.client)}</strong> → vente <strong>${eur(sum.sale)}</strong> HTVA</div>
+        <div class="small">Stock : <strong>${eur(sum.stock)}</strong> · Interne : <strong>${eur(sum.interne)}</strong></div>
+        <div class="small ${off ? 'warnc' : 'muted'}">Total des articles ${eur(all)}${i.totalExcl != null ? ` · facture ${eur(i.totalExcl)}${off ? ' : écart à vérifier' : ' ✓'}` : ''}</div>`;
+      $('#tErr').innerHTML = '';
+    };
+    const box = $('ul.treat', f);
+    box.oninput = box.onchange = draw;
+    $('#tAllC').onchange = ev => { const c = ev.target.value; if (!c) return; read(); editable.forEach(l => { d[l.id].dest = 'client'; d[l.id].clientId = c; }); treatInvoice(i, d); };
+    $('#tAllS').onclick = () => { read(); editable.forEach(l => { d[l.id].dest = 'stock'; }); treatInvoice(i, d); };
+    $('#tAllI').onclick = () => { read(); editable.forEach(l => { d[l.id].dest = 'interne'; }); treatInvoice(i, d); };
+    // Enregistre les choix dans les lignes et les correspondances (valables pour les prochaines factures du même article).
+    const apply = () => {
+      read();
+      for (const l of editable) {
+        const x = d[l.id];
+        let mp = mapOf(l) || findMap(l.supplier, l.key);
+        if (x.dest === 'client') {
+          if (!mp && (x.ref || x.margin !== '')) A.mapping.push(mp = { id: uid('am'), supplier: l.supplier, key: l.key, label: l.label, createdAt: Date.now() });
+          if (mp) Object.assign(touch(mp), { billitRef: x.ref, margin: x.margin === '' ? '' : +x.margin, ignore: false });
+        }
+        Object.assign(touch(l), { clientId: x.dest === 'client' ? x.clientId || null : l.clientId, mapId: mp?.id || l.mapId || null,
+          status: { client: 'open', stock: 'stock', interne: 'ignored' }[x.dest] });
+      }
+    };
+    $('#tKeep').onclick = async ev => { ev.preventDefault(); apply(); $('#dlg').close(); await changed(); toast('Choix enregistrés (facture pas encore validée)'); };
+    $('#tOk').onclick = async ev => {
+      ev.preventDefault(); draw();
+      const bad = ls.map(l => [l, lacks(l)]).filter(([, m]) => m.length);
+      if (bad.length) {
+        $('#tErr').innerHTML = `<span class="pill warn">À compléter avant de valider :</span> ${bad.map(([l, m]) => `${esc(l.label)} (${m.join(', ')})`).join(' ; ')}`;
+        return $(`[data-tl="${bad[0][0].id}"]`).scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+      apply();
+      Object.assign(touch(i), { status: 'done', validatedAt: Date.now(), validatedBy: me().id, seen: true });
+      await changed(); toast('Facture validée');
+      invoiceRecap(i);
+    };
+    draw();
+    openDlg();
+  }
+
+  // Récapitulatif du traitement d'une facture validée : ce qui sera fait de chaque article. « Rouvrir » tant que rien n'est facturé.
+  function invoiceRecap(i) {
+    const ls = alive(A.lines).filter(l => l.invoiceId === i.id);
+    const what = l => {
+      const st = lineState(l);
+      if (st === 'billed') return `<span class="pill ok">facturé ${frDate(l.billedAt)}${billRefOf(l) ? ' · ' + esc(billRefOf(l)) : ''}</span> ${esc(clientName(l))} · ${eur(saleTotal(l))}`;
+      if (st === 'stock') return '📦 Mis en stock (vente à faire dans Billit)';
+      if (st === 'ignored') return '🏢 Usage interne, non refacturé';
+      if (st === 'ready') return `💶 Refacturé à <strong>${esc(clientName(l))}</strong> sur sa prochaine facture : ${esc(mapOf(l).billitRef)} · ${eur(saleTotal(l))} HTVA`;
+      return `<span class="pill warn">${missing(l).join(' + ')} à compléter</span>`;
+    };
+    const tot = st => round2(ls.filter(l => lineState(l) === st).reduce((s, l) => s + l.total, 0));
+    const f = $('#dlgForm');
+    f.innerHTML = `<h2>Traitement : ${esc(i.supplier)} ${esc(i.number)}</h2>
+      <p class="small muted" style="margin-top:0">Facture du ${frDate(i.date)} · ${i.totalExcl != null ? eur(i.totalExcl) + ' HTVA' : ''}
+        ${i.validatedAt ? ` · validée le ${frDate(isoDate(new Date(i.validatedAt)))}${i.validatedBy ? ' par ' + esc(user(i.validatedBy).name) : ''}` : ''}</p>
+      <ul class="list">${ls.map(l => `<li><div class="grow" style="flex:1;min-width:0"><strong>${esc(l.label)}</strong>
+        <div class="small muted">${[whereOf(l), `${l.qty} × ${eur(l.unit)} = ${eur(l.total)}`].filter(Boolean).map(esc).join(' · ')}</div>
+        <div class="small">${what(l)}</div></div></li>`).join('')}</ul>
+      <p class="small">Refacturé (achat) : <strong>${eur(round2(tot('ready') + tot('billed')))}</strong> · Stock : <strong>${eur(tot('stock'))}</strong> · Interne : <strong>${eur(tot('ignored'))}</strong></p>
+      <div class="actions">${i.file ? '<button class="btn" id="rPdf" style="margin-right:auto">📄 PDF</button>' : ''}
+        ${!ls.some(l => l.status === 'billed') ? '<button class="btn" id="rOpen">↺ Rouvrir</button>' : ''}
+        <button class="btn primary" id="rOk">Fermer</button></div>`;
+    setLarge(false);
+    $('#rOk').onclick = ev => { ev.preventDefault(); $('#dlg').close(); };
+    if ($('#rPdf')) $('#rPdf').onclick = () => showPdf(i);
+    if ($('#rOpen')) $('#rOpen').onclick = async () => {
+      if (!confirm(`Rouvrir ${i.supplier} ${i.number} ?\nSes articles ne seront plus proposés dans Facturer jusqu'à une nouvelle validation.`)) return;
+      Object.assign(touch(i), { status: 'todo' }); await save(); scheduleSync(); treatInvoice(i);
+    };
+    openDlg();
+  }
+
   function showInvoice(i) {
+    if (toTreat(i)) return treatInvoice(i);
     const ls = alive(A.lines).filter(l => l.invoiceId === i.id);
     // Marqués « facturé » à la main (« Déjà refacturée », « Marquer comme facturé ») : annulable ; une facture de l'onglet Facturer s'annule là-bas.
     const manual = ls.filter(l => l.status === 'billed' && !l.billId);
@@ -882,11 +1106,13 @@ const Achats = (() => {
       ${i.interventions?.length ? `<p class="small" style="margin:12px 0 0"><strong>Interventions (pointage)</strong></p>
         <ul class="list" id="iWorks">${i.interventions.map(x => workLi(i, x)).join('')}</ul>` : ''}
       <div class="actions"><button class="btn danger" id="iDel" style="margin-right:auto">Supprimer l'import</button>
+        <button class="btn" id="iRecap">Traitement</button>
         ${ls.some(l => ['todo', 'ready'].includes(lineState(l))) ? '<button class="btn" id="iDone">Déjà refacturée</button>' : ''}
         ${manual.length ? `<button class="btn" id="iUndo">↩ Remettre à facturer (${manual.length})</button>` : ''}
         <button class="btn" value="cancel">Fermer</button></div>`;
     bindLines(f);
     if ($('#iPdf')) $('#iPdf').onclick = () => showPdf(i);
+    $('#iRecap').onclick = () => invoiceRecap(i);
     bindWorks(f);
     if ($('#iUndo')) $('#iUndo').onclick = async ev => {
       ev.preventDefault();

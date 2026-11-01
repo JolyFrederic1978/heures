@@ -535,7 +535,7 @@ async function srvSync() {
     // Excel de facturation : OneDrive du compte, sinon le serveur (module Fichiers, Réglages → Ma société → Fichiers).
     if (isAdmin() && mod('facturation')) publishExcel().catch(e => setSync('err', 'Excel : ' + e.message));
     // Achats : encore dans OneDrive jusqu'à la phase 3b ; compte sans OneDrive → rien, sans erreur.
-    if (isAdmin() && mod('achats') && await OneDrive.hasDrive().catch(() => null)) Achats.sync();
+    if (isAdmin() && mod('achats')) Achats.sync();      // achats de la société dans MySQL (achats.js, ?r=achats)
     if (mod('taches')) Taches.sync();
   } catch (e) {
     if (e instanceof OneDrive.NeedLogin) { setSync('login', 'Session expirée : reconnecte-toi.'); render(); }
