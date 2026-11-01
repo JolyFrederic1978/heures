@@ -324,18 +324,19 @@ function mergeRemote(remote) {
   return before !== JSON.stringify([state.entries, state.clients, state.bills, state.timer, state.settings, state.societes, state.users]);
 }
 
-// Régénère les fichiers Excel seulement si leur contenu a changé.
+// Régénère les fichiers Excel seulement si leur contenu (ou leur emplacement : OneDrive / serveur) a changé.
 async function publishExcel() {
+  const w = await Fichiers.where();
   const open = sortEntries(live().filter(e => !e.billId && billable(e))).map(xrow);
   const arch = sortEntries(live().filter(e => e.billId && bill(e.billId))).map(e => {
     const b = bill(e.billId); return { ...xrow(e), billDate: b.date, billRef: b.ref, amount: entryAmount(e) };
   }).sort((a, b) => (a.billDate + a.client + a.date + a.start).localeCompare(b.billDate + b.client + b.date + b.start));
   const jobs = [['open', open, Xlsx.openList, P.open()], ['archive', arch, Xlsx.archive, P.archive()]];
   for (const [k, rows, make, path] of jobs) {
-    const sig = hash(JSON.stringify(rows) + path);
+    const sig = hash(JSON.stringify(rows) + path + w);
     if (state.published[k] === sig) continue;
-    const r = await OneDrive.put(path, await make(rows), { type: Xlsx.MIME, overwrite: true });
-    if (!r.ok) throw new Error(`OneDrive (${r.status}) : écriture de ${path.split('/').pop()} impossible.`);
+    const r = await Fichiers.put(path, await make(rows), { type: Xlsx.MIME, overwrite: true });
+    if (!r.ok) throw new Error(`${r.where === 'server' ? 'Serveur' : 'OneDrive'} (${r.status}) : écriture de ${path.split('/').pop()} impossible.`);
     state.published[k] = sig;
   }
 }
@@ -350,9 +351,9 @@ async function sync() {
   if (syncing) { syncAgain = true; return; }
   // Une fois par ouverture : la société est-elle sur le serveur ? (sinon, fichiers OneDrive comme avant)
   if (!srvOn() && !srvChecked) {
-    srvChecked = true;
     try {
       const i = (await Serveur.me()).data;
+      srvChecked = true;
       if (i?.migrated) {
         // Appareil jamais synchronisé : ses données locales ne sont que les valeurs par défaut (Vedi, administrateur…), à ne pas envoyer.
         if (!state.lastSync) {
@@ -361,7 +362,12 @@ async function sync() {
         }
         state.srv = { on: true, rev: 0, ack: {}, me: i }; srvFull = true; HOME = i.societeId || HOME; await DB.save(state);
       }
-    } catch (_) { /* serveur injoignable : on continue avec OneDrive */ }
+    } catch (e) {
+      // Serveur injoignable ou en erreur. Appareil déjà synchronisé avec OneDrive (production actuelle) : on continue avec OneDrive.
+      // Appareil neuf : on ne bascule PAS vers OneDrive (un compte sans OneDrive, comme un technicien, n'y a rien) ; réessai à la synchro suivante.
+      if (!state.lastSync) { setSync('err', 'Serveur LevelDesk indisponible, nouvel essai dans une minute : ' + e.message); setTimeout(scheduleSync, 60000); return; }
+      srvChecked = true;
+    }
   }
   if (srvOn()) return srvSync();
   syncing = true; setSync('busy');
@@ -526,9 +532,10 @@ async function srvSync() {
     if (why.length) toast('Refusé par le serveur : ' + [...new Set(why)].join(', '));
     if (changed && !$('#dlg').open) render();
     if (!S.me.member) { render(); return; }
-    // Fichiers OneDrive : seulement pour un administrateur connecté à OneDrive (Excel de facturation, module Achats).
+    // Excel de facturation : OneDrive du compte, sinon le serveur (module Fichiers, Réglages → Ma société → Fichiers).
     if (isAdmin() && mod('facturation')) publishExcel().catch(e => setSync('err', 'Excel : ' + e.message));
-    if (isAdmin() && mod('achats')) Achats.sync();
+    // Achats : encore dans OneDrive jusqu'à la phase 3b ; compte sans OneDrive → rien, sans erreur.
+    if (isAdmin() && mod('achats') && await OneDrive.hasDrive().catch(() => null)) Achats.sync();
     if (mod('taches')) Taches.sync();
   } catch (e) {
     if (e instanceof OneDrive.NeedLogin) { setSync('login', 'Session expirée : reconnecte-toi.'); render(); }
@@ -1192,10 +1199,10 @@ async function showBill(b, justCreated = false) {
   if (justCreated && es.length) {
     const el = $('#bFile');
     try {
-      if (!OneDrive.signedIn()) throw new Error('OneDrive non connecté');
-      const r = await OneDrive.put(P.prest(b), await prestationsFile(b), { type: Xlsx.MIME, overwrite: true });
-      if (!r.ok) throw new Error(`OneDrive (${r.status})`);
-      if (el) el.innerHTML = `<span class="pill ok">✓ ${esc(prestationsName(b))} créé dans A facturer</span>`;
+      if (!OneDrive.signedIn()) throw new Error('non connecté');
+      const r = await Fichiers.put(P.prest(b), await prestationsFile(b), { type: Xlsx.MIME, overwrite: true });
+      if (!r.ok) throw new Error(`${Fichiers.label(r.where)} (${r.status})`);
+      if (el) el.innerHTML = `<span class="pill ok">✓ ${esc(prestationsName(b))} créé dans A facturer (${esc(Fichiers.label(r.where))})</span>`;
     } catch (e) {
       if (el) el.innerHTML = `<span class="pill warn">Fichier non envoyé (${esc(e.message)}) : utilise « ⬇ Prestations ».</span>`;
     }
@@ -1269,6 +1276,36 @@ function bindComptaCard() {
     const k = b.dataset.cx;
     if (confirm(`Effacer le connecteur ${k === 'live' ? 'réel' : 'test'} de ta société ?\nPlus aucune facture ne pourra être envoyée dans ce mode.`)) save(k, { clear: true }, 'Connecteur effacé');
   });
+}
+
+// Réglages → Ma société → Fichiers : emplacement (réglage de la société) et fichiers rangés sur le serveur (téléchargement, suppression).
+function bindFilesCard() {
+  const size = n => n > 1048576 ? `${(n / 1048576).toFixed(1)} Mo` : `${Math.max(1, Math.round(n / 1024))} Ko`;
+  Fichiers.where().then(w => { if ($('#fsWhere')) $('#fsWhere').innerHTML = `Pour ce compte : <strong>${esc(Fichiers.label(w))}</strong>`; });
+  const draw = async () => {
+    const el = $('#fsList');
+    if (!el) return;
+    try {
+      const r = await Fichiers.serverList();
+      el.innerHTML = (r.files.length ? `<ul class="list compact">${r.files.map(f => `<li><span class="grow" style="flex:1;min-width:0">${esc(f.path)}
+          <span class="muted"> · ${size(f.size)} · ${esc(frDate(f.at.slice(0, 10)))}</span></span>
+          <button class="btn chip" data-fsget="${esc(f.path)}" title="Télécharger">⬇</button><button class="btn danger chip" data-fsdel="${esc(f.path)}" title="Supprimer">🗑</button></li>`).join('')}</ul>`
+        : '<p class="muted">Aucun fichier sur le serveur.</p>') + `<p class="muted">${size(r.used)} utilisés sur ${size(r.quota)}.</p>`;
+      $$('[data-fsget]', el).forEach(b => b.onclick = async () => {
+        try { const f = await Fichiers.serverDownload(b.dataset.fsget); download(f.blob, f.name); } catch (e) { alert(e.message); }
+      });
+      $$('[data-fsdel]', el).forEach(b => b.onclick = async () => {
+        if (!confirm(`Supprimer ${b.dataset.fsdel} du serveur ?\n(Un fichier Excel de facturation est recréé à la prochaine synchro.)`)) return;
+        try { await Fichiers.serverDelete(b.dataset.fsdel); delete state.published.open; delete state.published.archive; draw(); } catch (e) { alert(e.message); }
+      });
+    } catch (e) { el.innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
+  };
+  draw();
+  $('#fsStore').onchange = async ev => {
+    state.settings.fileStore = ev.target.value; state.settingsAt = Date.now();
+    state.published = {};                      // Excel réécrits au nouvel emplacement
+    await DB.save(state); scheduleSync(); toast('Enregistré'); render();
+  };
 }
 
 // Lien d'un client (ou d'une société commanditaire) avec sa fiche dans le logiciel de facturation, par connecteur et par mode.
@@ -1626,34 +1663,9 @@ function viewSettings() {
       <div><label>€ / minute</label><input type="number" step="0.01" data-rate="${k}.m" value="${r[k].m}"></div>
       <div><label>€ déplacement</label><input type="number" step="0.01" data-rate="${k}.dep" value="${r[k].dep}"></div></div>`;
   const partners = activeSocs().filter(x => x.id !== HOME);
-  // Trois niveaux (architecture.md, section 4) : Mes réglages (moi), Ma société (administrateur), Plateforme et données.
+  // Trois niveaux (architecture.md, section 4) : Ma société (administrateur, clients en premier, demande de Fred), Mes réglages (moi), Plateforme et données.
   $('#view').innerHTML = `
     ${installPrompt ? '<button class="btn primary big" id="install" style="margin-bottom:12px">Installer l\'application</button>' : ''}
-    <h3 class="secth">Mes réglages</h3>
-    <div class="card"><h2>${srvOn() ? 'Mon compte' : 'OneDrive'}</h2>
-      <p class="small" id="odStatus">${esc(statusText())}</p>
-      ${OneDrive.signedIn() ? `<p class="small muted">Compte : ${esc(OneDrive.user())}${srvOn() && state.srv.me?.societe ? ' · ' + esc(state.srv.me.societe) : ''}</p>` : ''}
-      <div class="row">
-        ${OneDrive.signedIn()
-          ? '<button class="btn" id="odSync">Synchroniser</button><button class="btn danger" id="odOut">Se déconnecter</button>'
-          : `<button class="btn primary" id="odIn" ${od.clientId ? '' : 'disabled'}>Se connecter à Microsoft 365</button>`}
-      </div>
-      <details style="margin-top:10px" ${od.clientId ? '' : 'open'}><summary class="small">Configuration${srvOn() ? ' (OneDrive : fichiers Excel, Prestations, Achats)' : ''}</summary>
-        <label>ID d'application (client ID Entra)</label><input id="odClient" value="${esc(od.clientId)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
-        <label>Tenant (ID ou domaine, sinon "organizations")</label><input id="odTenant" value="${esc(od.tenant)}">
-        <label>Dossier TimeSheet dans OneDrive</label><input id="odFolder" value="${esc(od.folder)}">
-        <p class="small muted">URI de redirection à déclarer (plateforme « Application monopage ») :<br><code>${esc(OneDrive.redirectUri())}</code></p>
-        <p class="small muted">Fichiers générés (ne pas les modifier à la main, ils sont réécrits par l'app) :<br>
-          <code>${esc(P.open())}</code><br><code>${esc(P.archive())}</code><br><code>${esc(od.folder)}/A facturer/Prestations - …xlsx</code></p>
-      </details>
-    </div>
-    <div class="card"><h2>Code PIN</h2>
-      <p class="small muted">${state.settings.pin ? 'Un code PIN est demandé à l\'ouverture de l\'app et après 5 minutes en arrière-plan, sur tous tes appareils.'
-        : 'Aucun code PIN : l\'app s\'ouvre dès que tu es connecté à Microsoft 365.'}</p>
-      <div class="row"><button class="btn" id="pinSet">${state.settings.pin ? 'Changer le code PIN' : 'Définir un code PIN'}</button>
-        ${state.settings.pin ? '<button class="btn danger" id="pinDel">Supprimer le code PIN</button>' : ''}</div>
-    </div>
-
     <h3 class="secth">Ma société${srvOn() && state.srv.me?.societe ? ' · ' + esc(state.srv.me.societe) : ''}</h3>
     <div class="card"><div class="row"><h2 class="grow" style="margin:0">Clients (${state.clients.filter(c => !c.deleted).length})</h2>
       ${isAdmin() ? '<button class="btn" id="addrImport" title="Remplit les adresses vides avec celles des clients Billit reliés">📍 Adresses Billit</button>' : ''}<button class="btn" id="addClient">+ Ajouter</button></div>
@@ -1676,6 +1688,13 @@ function viewSettings() {
       <ul class="list">${partners.map(x => { const p = partnerOf(x.id); return `<li class="tap" data-partner="${x.id}"><div class="grow"><strong>${esc(x.name)}</strong>
         <div class="small muted">${esc(p.billitName)} · ${eur(p.rates.h)} / h · ${eur(p.rates.m)} / min · déplacement ${eur(p.rates.dep)} · échéance ${p.due} j</div></div>
         <span class="chev">›</span></li>`; }).join('') || '<li class="small muted">Aucun partenaire.</li>'}</ul></div>` : ''}
+    ${srvOn() ? `<div class="card"><h2>Fichiers</h2>
+      <p class="small muted" style="margin-top:0">Excel de facturation et fichiers Prestations (les PDF des achats suivront).</p>
+      <label>Où ranger les fichiers de la société</label>
+      <select id="fsStore">${[['auto', 'Automatique : OneDrive si le compte en a un, sinon le serveur'], ['onedrive', 'OneDrive du compte connecté'], ['server', 'Serveur LevelDesk']]
+        .map(([v, l]) => `<option value="${v}" ${(s.fileStore || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <p class="small" id="fsWhere">…</p>
+      <h3 style="margin:12px 0 4px">Sur le serveur</h3><div id="fsList" class="small muted">Chargement…</div></div>` : ''}
 
     <div class="card"><h2>${srvOn() ? 'Connecteur de facturation' : 'Billit'}</h2>
       <div class="row">
@@ -1705,6 +1724,31 @@ function viewSettings() {
       <pre class="recap hidden" id="cpLog"></pre>`}
       <p class="small muted">Clé API : dans Billit, menu de ton profil → API. Laisse le PartyID vide puis clique « Tester la connexion » : il est retrouvé automatiquement.
         La clé donne accès à tout ton Billit : tu peux la révoquer à tout moment dans Billit.</p>
+    </div>
+
+    <h3 class="secth">Mes réglages</h3>
+    <div class="card"><h2>${srvOn() ? 'Mon compte' : 'OneDrive'}</h2>
+      <p class="small" id="odStatus">${esc(statusText())}</p>
+      ${OneDrive.signedIn() ? `<p class="small muted">Compte : ${esc(OneDrive.user())}${srvOn() && state.srv.me?.societe ? ' · ' + esc(state.srv.me.societe) : ''}</p>` : ''}
+      <div class="row">
+        ${OneDrive.signedIn()
+          ? '<button class="btn" id="odSync">Synchroniser</button><button class="btn danger" id="odOut">Se déconnecter</button>'
+          : `<button class="btn primary" id="odIn" ${od.clientId ? '' : 'disabled'}>Se connecter à Microsoft 365</button>`}
+      </div>
+      <details style="margin-top:10px" ${od.clientId ? '' : 'open'}><summary class="small">Configuration${srvOn() ? ' (OneDrive : fichiers Excel, Prestations, Achats)' : ''}</summary>
+        <label>ID d'application (client ID Entra)</label><input id="odClient" value="${esc(od.clientId)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+        <label>Tenant (ID ou domaine, sinon "organizations")</label><input id="odTenant" value="${esc(od.tenant)}">
+        <label>Dossier TimeSheet dans OneDrive</label><input id="odFolder" value="${esc(od.folder)}">
+        <p class="small muted">URI de redirection à déclarer (plateforme « Application monopage ») :<br><code>${esc(OneDrive.redirectUri())}</code></p>
+        <p class="small muted">Fichiers générés (ne pas les modifier à la main, ils sont réécrits par l'app) :<br>
+          <code>${esc(P.open())}</code><br><code>${esc(P.archive())}</code><br><code>${esc(od.folder)}/A facturer/Prestations - …xlsx</code></p>
+      </details>
+    </div>
+    <div class="card"><h2>Code PIN</h2>
+      <p class="small muted">${state.settings.pin ? 'Un code PIN est demandé à l\'ouverture de l\'app et après 5 minutes en arrière-plan, sur tous tes appareils.'
+        : 'Aucun code PIN : l\'app s\'ouvre dès que tu es connecté à Microsoft 365.'}</p>
+      <div class="row"><button class="btn" id="pinSet">${state.settings.pin ? 'Changer le code PIN' : 'Définir un code PIN'}</button>
+        ${state.settings.pin ? '<button class="btn danger" id="pinDel">Supprimer le code PIN</button>' : ''}</div>
     </div>
 
     <h3 class="secth">Plateforme et données</h3>
@@ -1753,7 +1797,7 @@ function viewSettings() {
     if (x.value === 'live' && !confirm(`Passer en mode RÉEL ?\nLes factures seront créées dans ta vraie comptabilité ${Compta.label()}.`)) { render(); return; }
     s.billit.mode = x.value; await saveSettings(); render();
   });
-  if (srvOn()) bindComptaCard();
+  if (srvOn()) { bindComptaCard(); bindFilesCard(); }
   if ($('#bRelay')) $('#bRelay').onchange = async ev => {
     if (ev.target.checked && !confirm('Mettre les clés API Billit sur le serveur OVH ?\n\nLes clés enregistrées sur les appareils seront effacées (sur tous les appareils, à leur prochaine synchro).'
       + '\nSaisis ensuite chaque clé ici une seule fois : elle est enregistrée sur le serveur.')) { ev.target.checked = false; return; }
@@ -2314,6 +2358,8 @@ document.addEventListener('visibilitychange', () => {
     const b = state.settings.billit, k = state.billitKeys || {};
     return { mode: b.mode, relay: !!b.relay || srvOn(), test: { ...b.test, apiKey: k.test || '' }, live: { ...b.live, apiKey: k.live || '' } };
   }, (m, id) => { state.settings.billit[m].partyId = String(id); });
+  // Fichiers de la société (fichiers.js) : OneDrive du compte ou serveur, selon Réglages → Ma société → Fichiers.
+  Fichiers.configure(() => ({ srv: srvOn(), store: state.settings.fileStore || 'auto', folder: state.onedrive.folder }));
   // Connecteur de facturation (compta.js) : celui de la société sur le serveur, sinon Billit depuis cet appareil.
   Compta.configure(() => ({ srv: srvOn(), admin: srvOn() && isAdmin(), mode: state.settings.billit?.mode, partyId: state.settings.billit?.[state.settings.billit?.mode || 'test']?.partyId }));
   if (mergeRemoteClients()) await DB.save(state);

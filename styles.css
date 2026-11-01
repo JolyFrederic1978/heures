@@ -185,7 +185,8 @@ details.opts[open] summary { margin-bottom: 4px; }
 .secth { margin: 22px 4px 8px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .secth:first-child, #install + .secth { margin-top: 4px; }
 /* Navigation (téléphone) : bouton en bas d'Aujourd'hui, puis Waze / Google Maps côte à côte. */
-.navbtn { display: block; width: 100%; margin: 4px 0 14px; }
+button.btn.navbtn { display: block; width: 100%; margin: 4px 0 14px; background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent); font-weight: 600; }
 .navgo { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .navgo a.btn { display: block; text-align: center; text-decoration: none; font-size: 17px; padding: 14px 8px; border-radius: 12px;
   border: 1px solid var(--line); background: var(--card); color: var(--text); }

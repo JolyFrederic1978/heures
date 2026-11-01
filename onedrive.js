@@ -108,6 +108,19 @@ const OneDrive = (() => {
     });
   }
 
+  // Le compte connecté a-t-il un OneDrive ? (un technicien d'une autre société, sans licence OneDrive, n'en a pas : Graph répond 403 / 404).
+  // Vérifié une fois par compte et par ouverture de l'app ; erreur réseau → on ne sait pas (null), on réessaiera.
+  let drive = null, driveUser = '';
+  async function hasDrive() {
+    if (driveUser === (tokens()?.user || '') && drive !== null) return drive;
+    const r = await graph('/me/drive?$select=id');
+    if (r.ok) drive = true;
+    else if ([400, 403, 404].includes(r.status)) drive = false;
+    else return null;
+    driveUser = tokens()?.user || '';
+    return drive;
+  }
+
   async function graph(path, opts = {}) {
     const tk = await accessToken();
     return fetch('https://graph.microsoft.com/v1.0' + path, { ...opts, headers: { Authorization: 'Bearer ' + tk, ...(opts.headers || {}) } });
@@ -178,7 +191,7 @@ const OneDrive = (() => {
   }
 
   return {
-    NeedLogin, login, logout, handleRedirect, get, put, list, mkdir, move, redirectUri, apiToken, calendar,
+    NeedLogin, login, logout, handleRedirect, get, put, list, mkdir, move, redirectUri, apiToken, calendar, hasDrive,
     // Page Microsoft pour autoriser l'agenda (une fois par personne), puis retour dans l'app.
     calendarConsent: () => login(CAL_SCOPE),
     configure(fn) { cfg = fn; },
