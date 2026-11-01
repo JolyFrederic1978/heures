@@ -1,7 +1,8 @@
 // Connexion Microsoft 365 (OAuth2 code + PKCE, sans bibliothèque) et accès OneDrive via Microsoft Graph.
 const OneDrive = (() => {
-  const TK = 'heures.tokens', PK = 'heures.pkce', AK = 'heures.apitk';
+  const TK = 'heures.tokens', PK = 'heures.pkce', AK = 'heures.apitk', CK = 'heures.caltk';
   const SCOPE = 'openid profile offline_access Files.ReadWrite';
+  const CAL_SCOPE = 'https://graph.microsoft.com/Calendars.ReadWrite';
   let cfg = () => ({});
 
   class NeedLogin extends Error { constructor() { super('Connexion OneDrive requise.'); } }
@@ -11,21 +12,22 @@ const OneDrive = (() => {
   const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const tokens = () => { try { return JSON.parse(localStorage.getItem(TK)); } catch (_) { return null; } };
 
-  async function login() {
+  // extra : permission en plus, demandée sur la page Microsoft (ex. agenda Outlook).
+  async function login(extra = '') {
     if (!cfg().clientId) throw new Error("Renseigne d'abord l'ID d'application (client ID) dans Réglages.");
     const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
     const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
     const st = b64url(crypto.getRandomValues(new Uint8Array(12)));
     localStorage.setItem(PK, JSON.stringify({ verifier, st }));
     const p = new URLSearchParams({
-      client_id: cfg().clientId, response_type: 'code', redirect_uri: redirectUri(), scope: SCOPE,
+      client_id: cfg().clientId, response_type: 'code', redirect_uri: redirectUri(), scope: extra ? `${SCOPE} ${extra}` : SCOPE,
       code_challenge: challenge, code_challenge_method: 'S256', state: st, response_mode: 'query'
     });
     if (tokens()?.user) p.set('login_hint', tokens().user);
     location.assign(`${authBase()}/authorize?${p}`);
   }
 
-  function logout() { localStorage.removeItem(TK); localStorage.removeItem(AK); }
+  function logout() { [TK, AK, CK].forEach(k => localStorage.removeItem(k)); }
 
   async function tokenRequest(params) {
     const r = await fetch(`${authBase()}/token`, {
@@ -66,25 +68,43 @@ const OneDrive = (() => {
 
   // Jeton pour le serveur OVH (portée api://<client ID>/access_as_user, « Exposer une API » dans Entra),
   // obtenu avec le jeton d'actualisation de la connexion (pas de nouvelle page Microsoft). Le jeton Graph ne peut pas servir au serveur.
-  async function apiToken() {
+  // Jeton pour une autre portée, gardé sous la clé « key » ; e.consent = autorisation pas encore donnée (AADSTS65001…).
+  async function scopedToken(key, scope) {
     let a = null;
-    try { a = JSON.parse(localStorage.getItem(AK)); } catch (_) { }
+    try { a = JSON.parse(localStorage.getItem(key)); } catch (_) { }
     if (a?.exp > Date.now()) return a.access;
     const t = tokens();
     if (!t?.refresh) throw new NeedLogin();
     const r = await fetch(`${authBase()}/token`, {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ client_id: cfg().clientId, scope: `api://${cfg().clientId}/access_as_user`, grant_type: 'refresh_token', refresh_token: t.refresh })
+      body: new URLSearchParams({ client_id: cfg().clientId, scope, grant_type: 'refresh_token', refresh_token: t.refresh })
     });
     const j = await r.json();
     if (!r.ok) {
       const m = j.error_description || j.error || '';
-      throw new Error(/AADSTS65001|AADSTS500011|AADSTS70011/.test(m)
-        ? 'Serveur OVH pas encore autorisé dans Entra (« Exposer une API » → access_as_user, puis consentement administrateur).'
-        : 'Jeton du serveur : ' + m.split('\n')[0]);
+      const e = new Error(m.split('\n')[0]);
+      e.consent = /AADSTS65001|AADSTS500011|AADSTS70011|consent_required|interaction_required/.test(m + ' ' + (j.error || ''));
+      throw e;
     }
-    localStorage.setItem(AK, JSON.stringify({ access: j.access_token, exp: Date.now() + (j.expires_in - 120) * 1000 }));
+    localStorage.setItem(key, JSON.stringify({ access: j.access_token, exp: Date.now() + (j.expires_in - 120) * 1000 }));
     return j.access_token;
+  }
+  async function apiToken() {
+    try { return await scopedToken(AK, `api://${cfg().clientId}/access_as_user`); }
+    catch (e) {
+      if (e instanceof NeedLogin) throw e;
+      throw new Error(e.consent ? 'Serveur OVH pas encore autorisé dans Entra (« Exposer une API » → access_as_user, puis consentement administrateur).'
+        : 'Jeton du serveur : ' + e.message);
+    }
+  }
+
+  // Agenda Outlook de la personne connectée (permission Calendars.ReadWrite, demandée à la 1re utilisation : voir calendarConsent).
+  // Renvoie la réponse Graph (Response) ; err.consent = autorisation à donner.
+  async function calendar(method, path, body) {
+    const tk = await scopedToken(CK, CAL_SCOPE);
+    return fetch('https://graph.microsoft.com/v1.0' + path, {
+      method, headers: { Authorization: 'Bearer ' + tk, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body && JSON.stringify(body)
+    });
   }
 
   async function graph(path, opts = {}) {
@@ -157,7 +177,9 @@ const OneDrive = (() => {
   }
 
   return {
-    NeedLogin, login, logout, handleRedirect, get, put, list, mkdir, move, redirectUri, apiToken,
+    NeedLogin, login, logout, handleRedirect, get, put, list, mkdir, move, redirectUri, apiToken, calendar,
+    // Page Microsoft pour autoriser l'agenda (une fois par personne), puis retour dans l'app.
+    calendarConsent: () => login(CAL_SCOPE),
     configure(fn) { cfg = fn; },
     configured: () => !!cfg().clientId,
     signedIn: () => !!tokens(),

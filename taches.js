@@ -340,6 +340,7 @@ const Taches = (() => {
       <div class="actions" style="flex-wrap:wrap">
         ${t && edit ? '<button class="btn danger" id="kDel" style="margin-right:auto">Supprimer</button>' : ''}
         ${t && canTake(t) ? '<button class="btn" id="kTake">🙋 Me l\'attribuer</button>' : ''}
+        ${(!t || isOpen(t)) && edit ? `<button class="btn" id="kOut" title="Rendez-vous de 1 h à l'heure de la tâche, sinon journée entière">📅 ${t?.outlook?.[me().id] ? 'Mettre à jour Outlook' : 'Agenda Outlook'}</button>` : ''}
         ${t && isOpen(t) && edit ? (t.kind === 'upd' || isPrivate(t) ? '' : '<button class="btn" id="kTimer">▶ Chrono</button><button class="btn" id="kEntry">+ Intervention</button>') + '<button class="btn" id="kDone">✓ Terminer</button>' : ''}
         ${t && !isOpen(t) && edit ? '<button class="btn" id="kReopen">↺ Rouvrir</button>' : ''}
         <button class="btn" value="cancel">${edit ? 'Annuler' : 'Fermer'}</button>
@@ -416,6 +417,10 @@ const Taches = (() => {
       t.deleted = true; touch(t); dlg.close(); await changed(); toast('Tâche supprimée');
     };
     // Chrono / intervention / terminer : les modifications en cours sont d'abord enregistrées.
+    if ($('#kOut')) $('#kOut').onclick = async () => {
+      if (!$('#kDue').value) return alert("Ajoute d'abord une échéance (date) à la tâche.");
+      const x = await store(); if (x) toOutlook(x);
+    };
     if ($('#kTimer')) $('#kTimer').onclick = async () => { const x = await store(); if (x) startTimer(x); };
     if ($('#kEntry')) $('#kEntry').onclick = async () => { const x = await store(); if (x) addEntry(x); };
     if ($('#kDone')) $('#kDone').onclick = async () => { const x = await store(); if (x) finish(x); };
@@ -423,6 +428,45 @@ const Taches = (() => {
     $$('[data-tke]', f).forEach(li => li.onclick = () => openEntry(state.entries.find(e => e.id === li.dataset.tke)));
     if (!dlg.open) dlg.showModal();
     if (!t) $('#kTitle').focus();
+  }
+
+  // --- agenda Outlook (taches.md, section 7) ---
+  // Dans l'agenda de la personne connectée : rendez-vous de 1 h à l'heure de la tâche, sinon journée entière.
+  // L'événement est gardé par personne (t.outlook[userId]) : cliquer à nouveau le met à jour (date, titre…) au lieu d'en créer un autre.
+  // Une tâche dans l'agenda de son technicien est « planifiée » : pas d'e-mail de rappel la veille (serveur, cron.php).
+  const TZ = 'Romance Standard Time';   // Bruxelles, nom attendu par Outlook
+  const localDT = d => `${isoDate(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
+  async function toOutlook(t) {
+    if (!t.due) return alert("Ajoute d'abord une échéance (date) à la tâche.");
+    const c = t.clientId && state.clients.find(x => x.id === t.clientId);
+    const start = new Date(`${t.due}T${t.time || '00:00'}`);
+    const end = t.time ? new Date(start.getTime() + 3600e3) : new Date(new Date(`${t.due}T12:00`).getTime() + 864e5);
+    const ev = {
+      subject: t.title + (c ? ` – ${c.name}` : ''),
+      body: { contentType: 'text', content: [t.notes, ...(t.checklist || []).map(x => (x.done ? '☑ ' : '☐ ') + x.text),
+        'Tâche LevelDesk : ' + location.origin + location.pathname].filter(Boolean).join('\n') },
+      start: { dateTime: t.time ? localDT(start) : `${t.due}T00:00:00`, timeZone: TZ },
+      end: { dateTime: t.time ? localDT(end) : `${isoDate(end)}T00:00:00`, timeZone: TZ },
+      isAllDay: !t.time, showAs: t.time ? 'busy' : 'free'
+    };
+    const known = t.outlook?.[me().id];
+    try {
+      let r = known ? await OneDrive.calendar('PATCH', '/me/events/' + encodeURIComponent(known), ev) : null;
+      if (!r || r.status === 404) r = await OneDrive.calendar('POST', '/me/events', ev);   // supprimé dans Outlook : recréé
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(/MailboxNotEnabled/i.test(j.error?.code || '') ? "Ton compte Microsoft n'a pas de boîte Outlook : pas d'agenda disponible."
+        : `Outlook (${r.status}) : ${j.error?.message || r.statusText}`);
+      t.outlook = { ...(t.outlook || {}), [me().id]: j.id }; touch(t);
+      await save(); scheduleSync();
+      toast(known ? 'Rendez-vous mis à jour dans Outlook' : 'Tâche ajoutée à ton agenda Outlook');
+      editTask(t);
+    } catch (e) {
+      if (e.consent) {
+        if (confirm("Pour ajouter tes tâches à ton agenda, LevelDesk doit y avoir accès (page Microsoft, une seule fois).\nLa tâche est déjà enregistrée : reclique sur « Agenda Outlook » au retour.\n\nContinuer ?")) OneDrive.calendarConsent();
+        return;
+      }
+      alert(e instanceof OneDrive.NeedLogin ? 'Session Microsoft expirée : reconnecte-toi.' : e.message);
+    }
   }
 
   // --- liens avec le pointage (app.js) ---

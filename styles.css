@@ -180,6 +180,16 @@ details.opts summary { cursor: pointer; color: var(--muted); font-size: 13px; li
 details.opts summary::before { content: '⚙ '; }
 details.opts summary::-webkit-details-marker { display: none; }
 details.opts[open] summary { margin-bottom: 4px; }
+/* Réglages en trois niveaux : Mes réglages, Ma société, Plateforme et données. */
+.secth { margin: 22px 4px 8px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.secth:first-child, #install + .secth { margin-top: 4px; }
+/* Navigation (téléphone) : bouton en bas d'Aujourd'hui, puis Waze / Google Maps côte à côte. */
+.navbtn { display: block; width: 100%; margin: 4px 0 14px; }
+.navgo { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.navgo a.btn { display: block; text-align: center; text-decoration: none; font-size: 17px; padding: 14px 8px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--card); color: var(--text); }
+.navgo a.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+@media (prefers-color-scheme: dark) { .navgo a.btn.primary { color: #0d1a24; } }
 .qa { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
 .qa .btn { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 6px; border-radius: var(--radius);
   box-shadow: var(--shadow); font-size: 13px; font-weight: 600; }

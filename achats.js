@@ -101,15 +101,16 @@ const Achats = (() => {
   const supCls = s => ({ ovh: 'sup-ovh', mgk: 'sup-mgk', 'lisam.cloud': 'sup-lisam', alescom: 'sup-alescom', dsd: 'sup-dsd' })[String(s || '').toLowerCase()] || 'sup-autre';
   const supPill = s => `<span class="pill sup-p ${supCls(s)}">${esc(s)}</span>`;
 
-  // --- articles Billit ---
-  const product = ref => ref && products?.find(p => fold(p.Reference) === fold(ref));
-  const productPrice = p => p ? +(p.AmountExcl ?? p.UnitPriceExcl ?? 0) : null;
-  // Relue si plus vieille que maxAge (ms) : les prix peuvent être changés dans Billit pendant que l'app est ouverte.
-  // Les dialogues (article, client, fiche d'un article Billit) demandent une liste fraîche (maxAge 0).
+  // --- articles du logiciel de facturation (connecteur de la société, compta.js ; format LevelDesk { id, ref, name, price, vat, buy, catId, catName }) ---
+  const product = ref => ref && products?.find(p => fold(p.ref) === fold(ref));
+  const productPrice = p => p ? +(p.price ?? 0) : null;
+  // Relue si plus vieille que maxAge (ms) : les prix peuvent être changés dans le logiciel pendant que l'app est ouverte.
+  // Les dialogues (article, client, fiche d'un article) demandent une liste fraîche (maxAge 0).
   async function loadProducts(maxAge = 60000) {
-    if (!Billit.ready()) { products = null; productsErr = 'Clé API Billit absente (Réglages) : prix Billit non vérifiés.'; return; }
-    if (products && productsMode === Billit.mode() && Date.now() - productsAt < maxAge) return;
-    try { products = await Billit.products(); productsErr = ''; productsMode = Billit.mode(); productsAt = Date.now(); }
+    try { await Compta.loadConfig(); } catch (_) { /* erreur affichée par l'appel suivant */ }
+    if (!Compta.ready()) { products = null; productsErr = `Connecteur ${Compta.label()} non configuré (Réglages) : prix non vérifiés.`; return; }
+    if (products && productsMode === Compta.mode() && Date.now() - productsAt < maxAge) return;
+    try { products = await Compta.articles(); productsErr = ''; productsMode = Compta.mode(); productsAt = Date.now(); }
     catch (e) { products = null; productsErr = e.message; }
   }
   // Écart entre le prix calculé et le prix de l'article dans Billit (null si pas d'écart ou pas vérifiable).
@@ -117,13 +118,10 @@ const Achats = (() => {
     const p = product(m?.billitRef), u = saleUnit(l, m);
     return p && u != null && Math.abs(productPrice(p) - u) > 0.005 ? { p, billit: productPrice(p), calc: u } : null;
   }
-  // Champs connus d'un article Billit, à renvoyer en entier lors d'une mise à jour.
-  const productBody = p => Object.fromEntries(['ProductID', 'Reference', 'Description', 'AmountExcl', 'VAT', 'Unit', 'GroupID',
-    'BuyExcl', 'StockQuantity', 'MinimumBilledQuantity', 'InternalInformation'].filter(k => p[k] != null).map(k => [k, p[k]]));
-  // buy : prix d'achat de la dernière facture fournisseur, enregistré aussi dans Billit (BuyExcl).
+  // buy : prix d'achat de la dernière facture fournisseur, enregistré aussi dans le logiciel. Le connecteur renvoie l'article complet (rien n'est effacé).
   async function setBillitPrice(p, price, buy) {
-    if (!confirm(`Changer le prix de l'article ${p.Reference} dans Billit (${Billit.mode() === 'live' ? 'réel' : 'test'}) :\n${eur(productPrice(p))} → ${eur(price)} HTVA ?`)) return false;
-    try { await Billit.saveProduct({ ...productBody(p), AmountExcl: price, ...(buy != null ? { BuyExcl: buy } : {}) }); await loadProducts(0); toast('Prix mis à jour dans Billit'); return true; }
+    if (!confirm(`Changer le prix de l'article ${p.ref} dans ${Compta.label()} (${Compta.mode() === 'live' ? 'réel' : 'test'}) :\n${eur(productPrice(p))} → ${eur(price)} HTVA ?`)) return false;
+    try { await Compta.saveArticle({ id: p.id, price, ...(buy != null ? { buy } : {}) }); await loadProducts(0); toast(`Prix mis à jour dans ${Compta.label()}`); return true; }
     catch (e) { alert(e.message); return false; }
   }
 
@@ -269,23 +267,25 @@ const Achats = (() => {
   // présentes dans Billit sont notées « old » sans être importées ; ensuite, toute facture qui apparaît est nouvelle.
   // (Les dates de Billit n'ont pas de fuseau horaire : une comparaison de dates ne serait pas sûre.)
   // Date de la mise en service, synchronisée (Réglages de l'app) : sert aussi à ne demander à Billit que les factures modifiées depuis.
-  const billitFrom = () => state.settings.achatsBillitFrom?.[Billit.mode()] || '';
-  // Fournisseur Billit (nom de la société) → nom du lecteur.
+  // Factures d'achat lues par le connecteur de la société (compta.js, format LevelDesk { id, number, supplier, date, total, pdfId }).
+  const billitFrom = () => state.settings.achatsBillitFrom?.[Compta.mode()] || '';
+  // Fournisseur (nom de la société dans le logiciel) → nom du lecteur.
   const BILLIT_SUP = [[/\bovh\b/i, 'OVH'], [/\bmgk\b/i, 'MGK'], [/lisam/i, 'lisam.cloud'], [/alescom/i, 'Alescom'], [/\bdsd\b/i, 'DSD']];
-  const supOf = o => BILLIT_SUP.find(([re]) => re.test(o.CounterParty?.DisplayName || ''))?.[1];
-  // Date « AAAA-MM-JJ » d'un champ Billit (tout autre contenu est ignoré : il est affiché dans l'app).
+  const supOf = o => BILLIT_SUP.find(([re]) => re.test(o.supplier || ''))?.[1];
+  // Date « AAAA-MM-JJ » (tout autre contenu est ignoré : il est affiché dans l'app).
   const dayOf = s => /^\d{4}-\d{2}-\d{2}/.exec(String(s || ''))?.[0] || '';
   async function checkBillit() {
-    if (!Billit.ready()) return false;
-    const mode = Billit.mode(), from = billitFrom(), bid = o => `bd_${mode}_${o.OrderID}`;   // même id sur tous les appareils
+    try { await Compta.loadConfig(); } catch (_) { return false; }
+    if (!Compta.ready()) return false;
+    const mode = Compta.mode(), from = billitFrom(), bid = o => `bd_${mode}_${o.id}`;   // même id sur tous les appareils
     // Fournisseurs déjà mis en service dans ce mode (les 3 premiers l'ont été en même temps que la date de départ).
     // Un fournisseur ajouté plus tard (Alescom) : ses factures déjà dans Billit sont notées « old » à sa première vérification.
     const done = state.settings.achatsBillitSups?.[mode] || (from ? ['OVH', 'MGK', 'lisam.cloud'] : []);
     const todo = BILLIT_SUP.map(x => x[1]).filter(s => !done.includes(s));
     if (todo.length) {
-      for (const o of await Billit.costInvoices('2000-01-01')) {
+      for (const o of await Compta.purchases('2000-01-01')) {
         if (todo.includes(supOf(o)) && !A.bdocs.some(x => x.id === bid(o)))
-          A.bdocs.push(touch({ id: bid(o), orderId: o.OrderID, mode, supplier: supOf(o), number: o.OrderNumber || '', date: dayOf(o.OrderDate), status: 'old' }));
+          A.bdocs.push(touch({ id: bid(o), orderId: o.id, mode, supplier: supOf(o), number: o.number || '', date: dayOf(o.date), status: 'old' }));
       }
       state.settings.achatsBillitFrom = { ...state.settings.achatsBillitFrom, [mode]: from || today() };
       state.settings.achatsBillitSups = { ...state.settings.achatsBillitSups, [mode]: [...done, ...todo] };
@@ -294,15 +294,15 @@ const Achats = (() => {
       return true;
     }
     let ch = false;
-    for (const o of await Billit.costInvoices(from)) {
+    for (const o of await Compta.purchases(from)) {
       const sup = supOf(o);
       if (!sup) continue;
       const id = bid(o);
       let rec = A.bdocs.find(x => x.id === id);
       // Déjà traitée ; une erreur est réessayée seulement sur « Réessayer » ou quand un lecteur a été ajouté.
       if (rec && rec.status !== 'retry' && !(rec.status === 'error' && rec.readers !== readersSig())) continue;
-      if (!rec) A.bdocs.push(rec = { id, orderId: o.OrderID, mode });
-      Object.assign(rec, { supplier: sup, number: o.OrderNumber || '', date: dayOf(o.OrderDate), total: o.TotalExcl ?? null });
+      if (!rec) A.bdocs.push(rec = { id, orderId: o.id, mode });
+      Object.assign(rec, { supplier: sup, number: o.number || '', date: dayOf(o.date), total: o.total ?? null });
       let res;
       try { res = await importBillit(o, sup); } catch (e) { res = { status: 'error', msg: e.message }; }
       Object.assign(touch(rec), { text: '', ...res, readers: readersSig() });
@@ -310,33 +310,33 @@ const Achats = (() => {
     }
     return ch;
   }
-  // Une facture Billit : PDF de la facture, sinon PDF d'origine joint à l'e-facture, sinon lignes de l'e-facture.
+  // Une facture reçue : PDF de la facture, sinon PDF d'origine joint à l'e-facture, sinon lignes de l'e-facture.
   async function importBillit(o, sup) {
     const ok = r => r && !r.error && r.invoice?.supplier === sup;
     const tryPdf = async (buffer, name) => { try { return await Fournisseurs.read(buffer.slice(0), name); } catch (e) { return { error: e.message, rows: [] }; } };
     let pdf = null, r = null;
-    if (o.OrderPDF?.FileID) { const f = await Billit.file(o.OrderPDF.FileID); pdf = f.buffer; r = await tryPdf(pdf, f.FileName); }
+    if (o.pdfId) { const f = await Compta.file(o.pdfId); pdf = f.buffer; r = await tryPdf(pdf, f.name); }
     const firstErr = r;
     if (!ok(r)) {
-      const xmlAtt = ((await Billit.getOrder(o.OrderID))?.Attachments || []).find(a => /\.xml$/i.test(a.FileName || '') || /xml/i.test(a.MimeType || ''));
-      const xml = xmlAtt ? new TextDecoder().decode((await Billit.file(xmlAtt.FileID)).buffer) : '';
+      const xmlAtt = ((await Compta.purchase(o.id))?.files || []).find(a => /\.xml$/i.test(a.name || '') || /xml/i.test(a.mime || ''));
+      const xml = xmlAtt ? new TextDecoder().decode((await Compta.file(xmlAtt.id)).buffer) : '';
       for (const e of xml ? Fournisseurs.ublPdfs(xml) : []) {
         const x = await tryPdf(e.buffer, e.name);
         if (ok(x)) { r = x; pdf = e.buffer; break; }
       }
       if (!ok(r) && xml && pdf) { const x = Fournisseurs.fromUbl(xml, sup); if (ok(x)) r = x; }
     }
-    if (!ok(r)) return { status: 'error', msg: (r?.error || firstErr?.error || 'Facture non reconnue.') + ' (facture reçue dans Billit)',
+    if (!ok(r)) return { status: 'error', msg: (r?.error || firstErr?.error || 'Facture non reconnue.') + ` (facture reçue dans ${Compta.label()})`,
       text: (firstErr?.rows || []).map(x => x.cells.join(' | ')).join('\n').slice(0, 30000) };
     const i = r.invoice;
     if (!i.lines.length) return { status: 'error', msg: `Facture ${sup} lue, mais aucun article trouvé.` };
-    const dup = alive(A.invoices).find(x => x.supplier === sup && ((i.number && x.number === i.number) || x.billitOrderId === o.OrderID));
+    const dup = alive(A.invoices).find(x => x.supplier === sup && ((i.number && x.number === i.number) || String(x.billitOrderId) === o.id));
     if (dup) return { status: 'known', msg: `déjà importée (${dup.number || 'sans n°'})` };
     const before = A.invoices.length;
-    const name = `Facture_${String(i.number || o.OrderNumber || o.OrderID).replace(/[#\\/:*?"<>|]/g, '-')}.pdf`;
-    const m = await importPdf(pdf, name, pdf.byteLength, false, { ...r, billitTotal: o.TotalExcl ?? null });
+    const name = `Facture_${String(i.number || o.number || o.id).replace(/[#\\/:*?"<>|]/g, '-')}.pdf`;
+    const m = await importPdf(pdf, name, pdf.byteLength, false, { ...r, billitTotal: o.total ?? null });
     if (A.invoices.length === before) return { status: 'error', msg: m };
-    Object.assign(touch(A.invoices[A.invoices.length - 1]), { billitOrderId: o.OrderID, via: r.reader?.id === 'ubl' ? 'billit-ubl' : 'billit' });
+    Object.assign(touch(A.invoices[A.invoices.length - 1]), { billitOrderId: o.id, via: r.reader?.id === 'ubl' ? 'billit-ubl' : 'billit' });
     return { status: 'imported', msg: m };
   }
 
@@ -466,7 +466,7 @@ const Achats = (() => {
 
   function view() {
     if (!A) { $('#view').innerHTML = '<div class="empty">Chargement…</div>'; load().then(() => tab === 'achats' && render()); return; }
-    if (Billit.ready() && !productsErr && (!products || Date.now() - productsAt > 60000)) loadProducts().then(() => tab === 'achats' && !$('#dlg').open && render());
+    if (Compta.ready() && !productsErr && (!products || Date.now() - productsAt > 60000)) loadProducts().then(() => tab === 'achats' && !$('#dlg').open && render());
     const ls = alive(A.lines);
     const todo = ls.filter(l => lineState(l) === 'todo').sort(byClient);
     const ready = ls.filter(l => lineState(l) === 'ready');
@@ -479,7 +479,7 @@ const Achats = (() => {
       ...alive(A.lines).filter(l => l.invoiceId === i.id).flatMap(l => [clientName(l), whereOf(l), l.label])].join(' '));
     const problems = alive(A.files), checks = invoices.filter(toCheck);
     const works = invoices.flatMap(i => (i.interventions || []).filter(x => !x.entryId && !x.dismissed).map(x => ({ i, x })));
-    const bdone = alive(A.bdocs).filter(b => b.mode === Billit.mode()), bErr = bdone.filter(b => b.status === 'error');
+    const bdone = alive(A.bdocs).filter(b => b.mode === Compta.mode()), bErr = bdone.filter(b => b.status === 'error');
     const gaps = ready.filter(l => priceGap(l)).length;
     $('#view').innerHTML = `
       <div class="kpis"><div class="kpi"><div class="v">${eur(ready.reduce((s, l) => s + saleTotal(l), 0))}</div><div class="l">${ready.length} article(s) prêt(s) à refacturer (HTVA)</div></div>
@@ -513,8 +513,8 @@ const Achats = (() => {
         <p class="small muted" style="margin-top:0">À l'ouverture de l'app, puis toutes les heures et sur « Vérifier maintenant », l'app lit :</p>
         <ul class="small muted" style="margin:0 0 8px;padding-left:18px">
           <li>les PDF déposés dans OneDrive <code>${esc(path.inbox())}</code> ;</li>
-          <li>${Billit.ready() ? `les nouvelles factures ${BILLIT_SUP.map(x => x[1]).join(', ').replace(/, ([^,]+)$/, ' et $1')} reçues dans Billit${billitFrom() ? ` depuis le ${frDate(billitFrom())}` : ''}
-            (${Billit.mode() === 'live' ? 'réel' : 'test'}, lecture seule ; les anciennes ne sont pas reprises)${bdone.length
+          <li>${Compta.ready() ? `les nouvelles factures ${BILLIT_SUP.map(x => x[1]).join(', ').replace(/, ([^,]+)$/, ' et $1')} reçues dans Billit${billitFrom() ? ` depuis le ${frDate(billitFrom())}` : ''}
+            (${Compta.mode() === 'live' ? 'réel' : 'test'}, lecture seule ; les anciennes ne sont pas reprises)${bdone.length
               ? ` : ${bdone.filter(b => b.status === 'imported').length} importée(s), ${bdone.filter(b => b.status === 'known').length} déjà présente(s)` : ''}.`
             : 'les factures reçues dans Billit : clé API Billit absente (Réglages).'}</li></ul>
         <p class="small muted">Les factures sont rangées dans <code>${esc(base())}/Traités</code>. Les articles à 0 € sont ignorés.${A.lastSync ? ` Dernière vérification : ${new Date(lastCheck || A.lastSync).toLocaleTimeString('fr-BE', { hour: '2-digit', minute: '2-digit' })}.` : ''}</p>
@@ -614,7 +614,7 @@ const Achats = (() => {
     openDlg();
   }
 
-  const productOptions = () => (products || []).map(p => `<option value="${esc(p.Reference)}">${esc(p.Description || '')} · ${eur(productPrice(p))}</option>`).join('');
+  const productOptions = () => (products || []).map(p => `<option value="${esc(p.ref)}">${esc(p.name || '')} · ${eur(productPrice(p))}</option>`).join('');
 
   // Une ligne : client + correspondance avec l'article Billit (valable pour tous les articles du même type).
   // draft : valeurs saisies à conserver (retour de la création d'article).
@@ -638,7 +638,7 @@ const Achats = (() => {
         <strong class="small">Pour tous les articles « ${esc(l.label)} » de ${esc(l.supplier)}</strong>
         <label>Article Billit (référence)</label>
         <div class="row"><input id="mRef" class="grow" style="flex:1" value="${esc(d.ref)}" list="billitRefs" placeholder="ex. int-004" autocapitalize="off">
-          <button class="btn" id="mNew" ${Billit.ready() ? '' : 'disabled'}>+ Créer</button></div>
+          <button class="btn" id="mNew" ${Compta.ready() ? '' : 'disabled'}>+ Créer</button></div>
         <datalist id="billitRefs">${productOptions()}</datalist>
         <label>Marge de l'article en % (vide = marge fournisseur : ${s && isSet(s.margin) ? pct(s.margin) : 'non définie'})</label>
         <input type="number" step="0.1" id="mMargin" value="${esc(d.margin)}">
@@ -666,20 +666,20 @@ const Achats = (() => {
       $('#mCalc').innerHTML = (u == null ? '<span class="pill warn">Aucune marge : définis la marge de l\'article ou du fournisseur.</span>'
         : `Prix de vente : <strong>${eur(u)}</strong> HTVA (marge ${g.from} ${pct(g.pct)})`)
         + (!v.ref ? '' : !products ? '' : !p ? `<br><span class="pill warn">${esc(v.ref)} n'existe pas dans Billit : utilise « + Créer ».</span>`
-          : `<br>Billit : ${esc(p.Description || '')} · ${eur(productPrice(p))}` + (gap ? ` <span class="pill warn">≠ prix calculé</span> <button class="btn chip" id="mFix">Mettre ${eur(gap.calc)} dans Billit</button>` : ' <span class="pill ok">✓ identique</span>'));
+          : `<br>Billit : ${esc(p.name || '')} · ${eur(productPrice(p))}` + (gap ? ` <span class="pill warn">≠ prix calculé</span> <button class="btn chip" id="mFix">Mettre ${eur(gap.calc)} dans Billit</button>` : ' <span class="pill ok">✓ identique</span>'));
       if ($('#mFix')) $('#mFix').onclick = async () => { if (await setBillitPrice(gap.p, gap.calc, l.unit)) calc(); };
     };
     ['#mRef', '#mMargin'].forEach(s => $(s).oninput = calc);
     calc();
     $('#mNew').onclick = () => {
       const v = read();
-      createArticle({ Reference: v.ref, Description: l.label, AmountExcl: saleUnit(l, { margin: v.margin }) ?? '', BuyExcl: l.unit },
+      createArticle({ ref: v.ref, name: l.label, price: saleUnit(l, { margin: v.margin }) ?? '', buy: l.unit },
         ref => editLine(l, { ...v, ref: ref || v.ref }));
     };
     $('#lSave').onclick = async ev => {
       ev.preventDefault();
       const v = read();
-      if (v.ref && products && !product(v.ref) && !confirm(`L'article ${v.ref} n'existe pas dans Billit (${Billit.mode() === 'live' ? 'réel' : 'test'}).\n\nEnregistrer quand même ? (Annuler pour le créer avec « + Créer »)`)) return;
+      if (v.ref && products && !product(v.ref) && !confirm(`L'article ${v.ref} n'existe pas dans Billit (${Compta.mode() === 'live' ? 'réel' : 'test'}).\n\nEnregistrer quand même ? (Annuler pour le créer avec « + Créer »)`)) return;
       let mp = m;
       if (!mp && (v.ref || v.margin !== '' || v.ignore)) A.mapping.push(mp = { id: uid('am'), supplier: l.supplier, key: l.key, label: l.label, createdAt: Date.now() });
       if (mp) {
@@ -704,9 +704,9 @@ const Achats = (() => {
   // Catégories Billit (GroupID / GroupName des articles existants : l'API ne les liste pas à part).
   function categories() {
     const m = new Map();
-    for (const p of products || []) if (p.GroupID) {
-      const g = m.get(p.GroupID) || m.set(p.GroupID, { id: p.GroupID, name: p.GroupName || `Catégorie ${p.GroupID}`, refs: [] }).get(p.GroupID);
-      g.refs.push(p.Reference);
+    for (const p of products || []) if (p.catId) {
+      const g = m.get(p.catId) || m.set(p.catId, { id: p.catId, name: p.catName || `Catégorie ${p.catId}`, refs: [] }).get(p.catId);
+      g.refs.push(p.ref);
     }
     return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
@@ -718,7 +718,7 @@ const Achats = (() => {
   function nextRef(g) {
     const p = refPrefix(g);
     if (!p) return '';
-    const used = (products || []).map(x => new RegExp(`^${p}-(\\d+)$`, 'i').exec(x.Reference || '')?.[1]).filter(Boolean).map(Number);
+    const used = (products || []).map(x => new RegExp(`^${p}-(\\d+)$`, 'i').exec(x.ref || '')?.[1]).filter(Boolean).map(Number);
     return `${p}-${String(Math.max(0, ...used) + 1).padStart(3, '0')}`;
   }
 
@@ -726,15 +726,15 @@ const Achats = (() => {
   function createArticle(pre = {}, back = backToArticles) {
     const f = $('#dlgForm');
     f.innerHTML = `<h2>Nouvel article Billit</h2>
-      <p class="small muted">Créé dans Billit en mode ${Billit.mode() === 'live' ? 'réel' : 'test (sandbox)'}.</p>
+      <p class="small muted">Créé dans Billit en mode ${Compta.mode() === 'live' ? 'réel' : 'test (sandbox)'}.</p>
       <label>Catégorie Billit (obligatoire)</label><select id="pGroup"><option value="">— choisir —</option>
-        ${categories().map(g => `<option value="${g.id}" ${String(g.id) === String(pre.GroupID ?? '') ? 'selected' : ''}>${esc(g.name)} (${g.refs.length})</option>`).join('')}</select>
-      <label>Référence</label><input id="pRef" value="${esc(pre.Reference)}" placeholder="ex. int-005" autocapitalize="off">
+        ${categories().map(g => `<option value="${g.id}" ${String(g.id) === String(pre.catId ?? '') ? 'selected' : ''}>${esc(g.name)} (${g.refs.length})</option>`).join('')}</select>
+      <label>Référence</label><input id="pRef" value="${esc(pre.ref)}" placeholder="ex. int-005" autocapitalize="off">
       <p class="small muted" id="pRefHint" style="margin:4px 0 0"></p>
-      <label>Description</label><input id="pDesc" value="${esc(pre.Description)}">
-      <div class="grid2"><div><label>Prix d'achat HTVA</label><input type="number" step="0.01" id="pBuy" value="${esc(pre.BuyExcl)}"></div>
-        <div><label>Prix de vente HTVA</label><input type="number" step="0.01" id="pPrice" value="${esc(pre.AmountExcl)}"></div></div>
-      <div class="grid2"><div><label>TVA %</label><input type="number" step="1" id="pVat" value="${esc(pre.VAT ?? 21)}"></div>
+      <label>Description</label><input id="pDesc" value="${esc(pre.name)}">
+      <div class="grid2"><div><label>Prix d'achat HTVA</label><input type="number" step="0.01" id="pBuy" value="${esc(pre.buy)}"></div>
+        <div><label>Prix de vente HTVA</label><input type="number" step="0.01" id="pPrice" value="${esc(pre.price)}"></div></div>
+      <div class="grid2"><div><label>TVA %</label><input type="number" step="1" id="pVat" value="${esc(pre.vat ?? 21)}"></div>
         <div><label>Marge</label><p class="small muted" id="pMargin" style="margin:10px 0 0"></p></div></div>
       <div class="actions"><button class="btn" id="pBack">Retour</button><button class="btn primary" id="pSave">Créer dans Billit</button></div>`;
     const showMargin = () => {
@@ -756,20 +756,20 @@ const Achats = (() => {
     $('#pBack').onclick = () => back();
     $('#pSave').onclick = async ev => {
       ev.preventDefault();
-      const item = { Reference: $('#pRef').value.trim(), Description: $('#pDesc').value.trim(), AmountExcl: +$('#pPrice').value, VAT: +$('#pVat').value,
-        ...($('#pBuy').value !== '' ? { BuyExcl: +$('#pBuy').value } : {}), GroupID: +$('#pGroup').value };
+      const item = { ref: $('#pRef').value.trim(), name: $('#pDesc').value.trim(), price: +$('#pPrice').value, vat: +$('#pVat').value,
+        ...($('#pBuy').value !== '' ? { buy: +$('#pBuy').value } : {}), catId: $('#pGroup').value };
       if (!$('#pGroup').value) return alert('Choisis la catégorie Billit de l\'article.');
-      if (!item.Reference || !item.Description) return alert('Référence et description requises.');
-      if (!(item.AmountExcl >= 0) || $('#pPrice').value === '') return alert('Prix requis.');
+      if (!item.ref || !item.name) return alert('Référence et description requises.');
+      if (!(item.price >= 0) || $('#pPrice').value === '') return alert('Prix requis.');
       await loadProducts(0);
-      if (product(item.Reference)) return alert(`L'article ${item.Reference} existe déjà dans Billit.`);
+      if (product(item.ref)) return alert(`L'article ${item.ref} existe déjà dans Billit.`);
       const btn = $('#pSave'); btn.disabled = true;
       try {
-        await Billit.saveProduct(item);
+        await Compta.saveArticle(item);
         await loadProducts(0);
-        if (!product(item.Reference)) throw new Error("Billit n'a pas renvoyé d'erreur, mais l'article n'apparaît pas dans la liste. Vérifie dans Billit.");
-        toast(`Article ${item.Reference} créé dans Billit`);
-        back(item.Reference);
+        if (!product(item.ref)) throw new Error("Billit n'a pas renvoyé d'erreur, mais l'article n'apparaît pas dans la liste. Vérifie dans Billit.");
+        toast(`Article ${item.ref} créé dans Billit`);
+        back(item.ref);
       } catch (e) { alert(e.message); if (btn.isConnected) btn.disabled = false; }
     };
     openDlg();
@@ -803,8 +803,8 @@ const Achats = (() => {
         const asked = new Set();
         for (const l of chosen) {
           const gap = priceGap(l);
-          if (!gap || asked.has(gap.p.ProductID)) continue;
-          asked.add(gap.p.ProductID);
+          if (!gap || asked.has(gap.p.id)) continue;
+          asked.add(gap.p.id);
           await setBillitPrice(gap.p, gap.calc, l.unit);
         }
         const ref = prompt('N° de la facture Billit (optionnel) :', '');
@@ -916,10 +916,10 @@ const Achats = (() => {
   const backToArticles = () => { if ($('#dlg').open) $('#dlg').close(); render(); };
   function articles() {
     if (!A) { $('#view').innerHTML = '<div class="empty">Chargement…</div>'; load().then(() => tab === 'articles' && render()); return; }
-    if (Billit.ready() && !productsErr && (!products || Date.now() - productsAt > 60000)) loadProducts().then(() => tab === 'articles' && !$('#dlg').open && render());
-    if (!Billit.ready() && !productsErr) productsErr = 'Clé API Billit absente (Réglages).';
-    const cats = categories(), catOf = p => p.GroupID ? cats.find(g => g.id === p.GroupID)?.name || p.GroupName || '' : '';
-    const prods = (products || []).slice().sort((a, b) => String(a.Reference).localeCompare(String(b.Reference)));
+    if (Compta.ready() && !productsErr && (!products || Date.now() - productsAt > 60000)) loadProducts().then(() => tab === 'articles' && !$('#dlg').open && render());
+    if (!Compta.ready() && !productsErr) productsErr = `Connecteur ${Compta.label()} non configuré (Réglages).`;
+    const cats = categories(), catOf = p => p.catId ? cats.find(g => g.id === p.catId)?.name || p.catName || '' : '';
+    const prods = (products || []).slice().sort((a, b) => String(a.ref).localeCompare(String(b.ref)));
     const maps = alive(A.mapping).sort((a, b) => (a.supplier + a.label).localeCompare(b.supplier + b.label));
     const sups = alive(A.suppliers).sort((a, b) => a.name.localeCompare(b.name));
     const hints = alive(A.hints).sort((a, b) => a.label.localeCompare(b.label));
@@ -933,18 +933,18 @@ const Achats = (() => {
           : '<div class="empty">Vide : elle se remplit quand tu complètes les articles importés (onglet Achats).</div>'}
       </div>
       <div class="card"><div class="row"><h2 class="grow" style="margin:0;border:0;padding:0">Articles Billit (${products ? products.length : '?'})</h2>
-          <button class="btn primary" id="pNew" ${Billit.ready() && products ? '' : 'disabled'}>+ Nouvel article</button></div>
-        <p class="small muted" style="margin:6px 0 10px">Billit ${Billit.mode() === 'live' ? 'réel' : 'test (sandbox)'}. Touche un article pour le modifier (nom, prix, TVA, catégorie).</p>
+          <button class="btn primary" id="pNew" ${Compta.ready() && products ? '' : 'disabled'}>+ Nouvel article</button></div>
+        <p class="small muted" style="margin:6px 0 10px">Billit ${Compta.mode() === 'live' ? 'réel' : 'test (sandbox)'}. Touche un article pour le modifier (nom, prix, TVA, catégorie).</p>
         ${productsErr ? `<p class="small"><span class="pill warn">${esc(productsErr)}</span></p>` : ''}
         ${products ? `<div class="grid2"><input type="search" id="artFind" placeholder="Rechercher : référence, nom…" value="${esc(artFind)}">
           <select id="artCat"><option value="">Toutes les catégories</option>
             ${cats.map(g => `<option value="${g.id}" ${String(g.id) === artCat ? 'selected' : ''}>${esc(g.name)} (${g.refs.length})</option>`).join('')}
-            <option value="none" ${artCat === 'none' ? 'selected' : ''}>Sans catégorie (${prods.filter(p => !p.GroupID).length})</option></select></div>
-          <div class="artbox"><ul class="list compact" id="artList">${prods.map(p => `<li class="tap" data-prod="${esc(p.ProductID)}" data-cat="${esc(p.GroupID || 'none')}"
-              data-find="${esc(fold([p.Reference, p.Description, catOf(p)].join(' ')))}"
-              title="${esc([catOf(p) || 'sans catégorie', p.VAT != null ? `TVA ${p.VAT} %` : ''].filter(Boolean).join(' · '))}">
-            <strong class="ref">${esc(p.Reference || '(sans réf.)')}</strong>
-            <span class="name">${esc(p.Description || '')}${catOf(p) ? '' : ' <span class="pill warn">sans catégorie</span>'}</span>
+            <option value="none" ${artCat === 'none' ? 'selected' : ''}>Sans catégorie (${prods.filter(p => !p.catId).length})</option></select></div>
+          <div class="artbox"><ul class="list compact" id="artList">${prods.map(p => `<li class="tap" data-prod="${esc(p.id)}" data-cat="${esc(p.catId || 'none')}"
+              data-find="${esc(fold([p.ref, p.name, catOf(p)].join(' ')))}"
+              title="${esc([catOf(p) || 'sans catégorie', p.vat != null ? `TVA ${p.vat} %` : ''].filter(Boolean).join(' · '))}">
+            <strong class="ref">${esc(p.ref || '(sans réf.)')}</strong>
+            <span class="name">${esc(p.name || '')}${catOf(p) ? '' : ' <span class="pill warn">sans catégorie</span>'}</span>
             <span class="dur">${eur(productPrice(p))}</span></li>`).join('')}</ul></div>
           <p class="small muted" id="artMore" style="margin:6px 0 0"></p>` : !productsErr ? '<div class="empty">Chargement des articles Billit…</div>' : ''}
       </div>
@@ -973,8 +973,8 @@ const Achats = (() => {
       $('#artCat').onchange = ev => { artCat = ev.target.value; filterArt(); };
       filterArt();
     }
-    $('#pNew').onclick = () => createArticle(artCat && artCat !== 'none' ? { GroupID: artCat } : {}, backToArticles);
-    $$('[data-prod]').forEach(li => li.onclick = () => editProduct(products.find(p => String(p.ProductID) === li.dataset.prod)));
+    $('#pNew').onclick = () => createArticle(artCat && artCat !== 'none' ? { catId: artCat } : {}, backToArticles);
+    $$('[data-prod]').forEach(li => li.onclick = () => editProduct(products.find(p => String(p.id) === li.dataset.prod)));
     $$('[data-map]').forEach(li => li.onclick = () => editMap(A.mapping.find(m => m.id === li.dataset.map)));
     $$('[data-smargin]').forEach(inp => inp.onchange = async () => {
       const s = A.suppliers.find(x => x.id === inp.dataset.smargin);
@@ -1000,10 +1000,10 @@ const Achats = (() => {
   // Liste Billit indisponible (pas de clé, erreur) : saisie de la référence à la main.
   function productSelect(id, sel) {
     if (!products) return `<input id="${id}" value="${esc(sel)}" autocapitalize="off" placeholder="ex. int-004">`;
-    const ps = products.slice().sort((a, b) => String(a.Reference).localeCompare(String(b.Reference)));
-    const opt = p => `<option value="${esc(p.Reference)}" ${fold(p.Reference) === fold(sel) ? 'selected' : ''}>${esc(p.Reference)} · ${esc(p.Description || '')} · ${eur(productPrice(p))}</option>`;
-    const groups = categories().map(g => ({ name: g.name, ps: ps.filter(p => p.GroupID === g.id) }))
-      .concat([{ name: 'Sans catégorie', ps: ps.filter(p => !p.GroupID) }]).filter(g => g.ps.length);
+    const ps = products.slice().sort((a, b) => String(a.ref).localeCompare(String(b.ref)));
+    const opt = p => `<option value="${esc(p.ref)}" ${fold(p.ref) === fold(sel) ? 'selected' : ''}>${esc(p.ref)} · ${esc(p.name || '')} · ${eur(productPrice(p))}</option>`;
+    const groups = categories().map(g => ({ name: g.name, ps: ps.filter(p => p.catId === g.id) }))
+      .concat([{ name: 'Sans catégorie', ps: ps.filter(p => !p.catId) }]).filter(g => g.ps.length);
     return `<select id="${id}"><option value="">— aucun article —</option>
       ${sel && !product(sel) ? `<option value="${esc(sel)}" selected>${esc(sel)} (inconnu dans Billit)</option>` : ''}
       ${groups.map(g => `<optgroup label="${esc(g.name)}">${g.ps.map(opt).join('')}</optgroup>`).join('')}</select>`;
@@ -1014,7 +1014,7 @@ const Achats = (() => {
     const f = $('#dlgForm'), s = supplierOf(m.supplier);
     f.innerHTML = `<h2>${esc(m.label)}</h2><p class="small muted">${esc(m.supplier)} · clé « ${esc(m.key)} »</p>
       <label>Nom du produit (affiché dans l'app et les fichiers Excel)</label><input id="mLabel" value="${esc(m.label)}">
-      <label>Article Billit (${Billit.mode() === 'live' ? 'réel' : 'test'}, ${products ? products.length + ' articles' : 'liste indisponible'})</label>${productSelect('mRef', m.billitRef || '')}
+      <label>Article Billit (${Compta.mode() === 'live' ? 'réel' : 'test'}, ${products ? products.length + ' articles' : 'liste indisponible'})</label>${productSelect('mRef', m.billitRef || '')}
       ${productsErr ? `<p class="small muted">${esc(productsErr)}</p>` : ''}
       <label>Marge de l'article en % (vide = marge fournisseur : ${s && isSet(s.margin) ? pct(s.margin) : 'non définie'})</label>
       <input type="number" step="0.1" id="mMargin" value="${esc(m.margin ?? '')}">
@@ -1044,30 +1044,30 @@ const Achats = (() => {
   function editProduct(p) {
     if (!p) return;
     const f = $('#dlgForm');
-    f.innerHTML = `<h2>Article Billit ${esc(p.Reference || '')}</h2>
-      <p class="small muted">Modifié dans Billit en mode ${Billit.mode() === 'live' ? 'réel' : 'test (sandbox)'}.</p>
-      <label>Catégorie Billit</label><select id="pGroup"><option value="">${p.GroupID ? '— choisir —' : '— sans catégorie —'}</option>
-        ${categories().map(g => `<option value="${g.id}" ${g.id === p.GroupID ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
-      <label>Référence</label><input id="pRef" value="${esc(p.Reference)}" autocapitalize="off">
-      <label>Nom (description)</label><input id="pDesc" value="${esc(p.Description)}">
+    f.innerHTML = `<h2>Article Billit ${esc(p.ref || '')}</h2>
+      <p class="small muted">Modifié dans Billit en mode ${Compta.mode() === 'live' ? 'réel' : 'test (sandbox)'}.</p>
+      <label>Catégorie Billit</label><select id="pGroup"><option value="">${p.catId ? '— choisir —' : '— sans catégorie —'}</option>
+        ${categories().map(g => `<option value="${g.id}" ${g.id === p.catId ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
+      <label>Référence</label><input id="pRef" value="${esc(p.ref)}" autocapitalize="off">
+      <label>Nom (description)</label><input id="pDesc" value="${esc(p.name)}">
       <div class="grid2"><div><label>Prix de vente HTVA</label><input type="number" step="0.01" id="pPrice" value="${esc(productPrice(p))}"></div>
-        <div><label>TVA %</label><input type="number" step="1" id="pVat" value="${esc(p.VAT ?? 21)}"></div></div>
+        <div><label>TVA %</label><input type="number" step="1" id="pVat" value="${esc(p.vat ?? 21)}"></div></div>
       <div class="actions"><button class="btn" id="pBack">Retour</button><button class="btn primary" id="pSave">Enregistrer dans Billit</button></div>`;
     $('#pBack').onclick = backToArticles;
     $('#pSave').onclick = async ev => {
       ev.preventDefault();
-      const item = { ...productBody(p), Reference: $('#pRef').value.trim(), Description: $('#pDesc').value.trim(), AmountExcl: +$('#pPrice').value, VAT: +$('#pVat').value,
-        ...($('#pGroup').value ? { GroupID: +$('#pGroup').value } : {}) };
-      if (p.GroupID && !$('#pGroup').value) return alert('Choisis une catégorie (un article ne peut pas perdre sa catégorie).');
-      if (!item.Reference || !item.Description || $('#pPrice').value === '') return alert('Référence, nom et prix requis.');
-      if (item.Reference !== p.Reference && products.some(x => x !== p && fold(x.Reference) === fold(item.Reference))) return alert(`La référence ${item.Reference} existe déjà.`);
-      if (item.Reference !== p.Reference && alive(A.mapping).some(m => fold(m.billitRef) === fold(p.Reference))
-        && !confirm(`Des correspondances utilisent ${p.Reference}. Elles seront mises à jour vers ${item.Reference}. Continuer ?`)) return;
+      const item = { id: p.id, ref: $('#pRef').value.trim(), name: $('#pDesc').value.trim(), price: +$('#pPrice').value, vat: +$('#pVat').value,
+        ...($('#pGroup').value ? { catId: $('#pGroup').value } : {}) };
+      if (p.catId && !$('#pGroup').value) return alert('Choisis une catégorie (un article ne peut pas perdre sa catégorie).');
+      if (!item.ref || !item.name || $('#pPrice').value === '') return alert('Référence, nom et prix requis.');
+      if (item.ref !== p.ref && products.some(x => x !== p && fold(x.ref) === fold(item.ref))) return alert(`La référence ${item.ref} existe déjà.`);
+      if (item.ref !== p.ref && alive(A.mapping).some(m => fold(m.billitRef) === fold(p.ref))
+        && !confirm(`Des correspondances utilisent ${p.ref}. Elles seront mises à jour vers ${item.ref}. Continuer ?`)) return;
       const btn = $('#pSave'); btn.disabled = true;
       try {
-        await Billit.saveProduct(item);
-        if (item.Reference !== p.Reference) {
-          alive(A.mapping).forEach(m => { if (fold(m.billitRef) === fold(p.Reference)) { m.billitRef = item.Reference; touch(m); } });
+        await Compta.saveArticle(item);
+        if (item.ref !== p.ref) {
+          alive(A.mapping).forEach(m => { if (fold(m.billitRef) === fold(p.ref)) { m.billitRef = item.ref; touch(m); } });
           await save(); scheduleSync();
         }
         await loadProducts(0); toast('Article mis à jour dans Billit'); backToArticles();
@@ -1102,11 +1102,10 @@ const Achats = (() => {
   function orderLines(billId, prods) {
     const missing = [];
     const lines = ofBill(billId).map(x => {
-      const p = prods.find(p => fold(p.Reference) === fold(x.ref));
+      const p = prods.find(p => fold(p.ref) === fold(x.ref));
       if (!p) missing.push(x.ref);
-      const what = [p?.Description || x.label, x.domain, x.from && `du ${frDate(x.from)} au ${frDate(x.to)}`].filter(Boolean).join(' – ');
-      return { Quantity: x.qty, Reference: x.ref, Description: what, UnitPriceExcl: x.unit, VATPercentage: p?.VAT ?? 21,
-        ...(p?.ProductID ? { ProductID: p.ProductID } : {}) };
+      const what = [p?.name || x.label, x.domain, x.from && `du ${frDate(x.from)} au ${frDate(x.to)}`].filter(Boolean).join(' – ');
+      return { qty: x.qty, ref: x.ref, description: what, price: x.unit, vat: p?.vat ?? 21, articleId: p?.id || '' };
     });
     return { lines, missing };
   }

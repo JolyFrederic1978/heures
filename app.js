@@ -123,7 +123,16 @@ const techSoc = e => state.users.find(u => u.id === techOf(e))?.societeId || HOM
 const clientSoc = c => c?.societeId || (c?.defaultAlescom ? 'alescom' : HOME);
 // Facturé par One Level UP : commanditaire One Level UP (au client) ou technicien One Level UP pour un autre commanditaire (au commanditaire).
 const billable = e => cmdOf(e) === HOME || techSoc(e) === HOME;
-const socRates = s => s.rates || state.settings.rates.partner;
+// Tarifs, échéance et lien de facturation de MA société pour un commanditaire partenaire (Réglages → Ma société → Partenaires ; phase 2b).
+// Rangés dans les réglages de la société (privés), plus dans la fiche de la société partenaire : son propre administrateur les verrait.
+// Lecture : réglages d'abord, sinon les anciens champs de la fiche société (données pas encore migrées), sinon les tarifs partenaire par défaut.
+const PARTNER_FIELDS = ['rates', 'due', 'billitName', 'billitIds', 'ext'];
+const partnerCfg = id => ((state.settings.partners ||= {})[id] ||= {});
+function partnerOf(id) {
+  const s = soc(id), p = state.settings.partners?.[id] || {};
+  return { rates: p.rates || s.rates || state.settings.rates.partner, due: p.due ?? s.due ?? 15, billitName: p.billitName || s.billitName || s.name };
+}
+const socRates = s => partnerOf(s.id).rates;
 // Clients visibles par l'utilisateur connecté (réglés dans Administration, par société) ; un administrateur voit tout.
 function canSee(c) {
   if (isAdmin()) return true;
@@ -177,8 +186,8 @@ const groupKey = e => { const c = cmdOf(e); return c === HOME ? 'c:' + e.clientI
 function groupInfo(key) {
   const rates = state.settings.rates;
   if (!key.startsWith('c:')) {
-    const s = soc(key === 'alescom' ? 'alescom' : key.slice(2));
-    return { key, label: s.name, billitName: s.billitName || s.name, rates: socRates(s), partner: true, soc: s, due: s.due ?? 15 };
+    const s = soc(key === 'alescom' ? 'alescom' : key.slice(2)), p = partnerOf(s.id);
+    return { key, label: s.name, billitName: p.billitName, rates: p.rates, partner: true, soc: s, due: p.due };
   }
   const c = client(key.slice(2));
   // Client proche : le déplacement est facturé avec l'article zone 1 (dep-003).
@@ -211,6 +220,15 @@ function normalizeSettings() {
   // Clés sur le serveur OVH (réglage synchronisé) : celles de l'appareil sont effacées.
   if (state.settings.billit.relay) state.billitKeys = { test: '', live: '' };
   ensureSocietes();
+  // Tarifs partenaires de la fiche société → réglages de ma société (une fois, par un administrateur).
+  // Avec le serveur, ils sont ensuite retirés de la fiche société ; dans OneDrive, laissés pour les appareils en ancienne version.
+  if (!isAdmin()) return;
+  for (const s of state.societes) {
+    if (s.id === HOME || s.deleted || !PARTNER_FIELDS.some(k => s[k] != null)) continue;
+    const all = (state.settings.partners ||= {});
+    if (!all[s.id]) { all[s.id] = JSON.parse(JSON.stringify(Object.fromEntries(PARTNER_FIELDS.filter(k => s[k] != null).map(k => [k, s[k]])))); state.settingsAt = Date.now(); }
+    if (srvOn()) { PARTNER_FIELDS.forEach(k => delete s[k]); touch(s); }
+  }
 }
 // Échéance des factures Billit (jours) : 15 j pour les clients, celle du commanditaire sinon (Alescom 10 j) ; à modifier au besoin dans Billit.
 const dueDays = info => info.due ?? 15;
@@ -599,14 +617,19 @@ function entryLi(e, { showDate = false, showBill = true } = {}) {
         ${cmdOf(e) !== HOME ? `<span class="pill warn">${esc(soc(cmdOf(e)).name)}</span>` : ''}
         ${techOf(e) !== me().id ? `<span class="pill">👤 ${esc(user(techOf(e)).name)}</span>` : ''}
         ${e.taskId ? '<span class="pill" title="Faite pour une tâche">📋</span>' : ''}
-        ${showBill && b ? `<span class="pill ok">facturé ${frDate(b.date)}${b.ref ? ' · ' + esc(b.ref) : ''}</span>` : ''}</div>
+        ${showBill && b ? `<span class="pill ok">facturé ${frDate(b.date)}${b.ref ? ' · ' + esc(b.ref) : ''}</span>` : ''}
+        ${showBill && !b && e.locked && !isAdmin() ? '<span class="pill ok">facturée</span>' : ''}</div>
       <div class="small muted">${showDate ? frDate(e.date) + ' · ' : ''}${e.forfait || !e.start ? 'forfait' : `${esc(e.start)}–${esc(e.end)}`}${e.pauseMin ? ` · pause ${fmtDur(e.pauseMin)}` : ''}${e.install ? ' · ' + esc(e.install) : ''}</div>
       ${e.description ? `<div class="small">${esc(e.description)}</div>` : ''}
     </div>
     <div class="dur">${fmtDur(e.minutes)}</div></li>`;
 }
 function bindEdits(root = document) {
-  $$('[data-edit]', root).forEach(li => li.onclick = () => openEntry(state.entries.find(e => e.id === li.dataset.edit)));
+  // Facturée par une société (serveur : « locked ») : son technicien ne peut plus la modifier, elle s'ouvre en lecture seule.
+  $$('[data-edit]', root).forEach(li => li.onclick = () => {
+    const e = state.entries.find(x => x.id === li.dataset.edit);
+    e?.locked && !isAdmin() ? viewArchivedEntry(e) : openEntry(e);
+  });
 }
 // Le client choisi reste dans la liste même s'il est archivé ou supprimé : sinon le menu prendrait un autre client à l'enregistrement.
 // Seulement les clients visibles par l'utilisateur connecté (Administration).
@@ -644,6 +667,8 @@ const timerElapsed = t => Math.max(0, timerNow(t) - new Date(t.start) - timerPau
 const WIDE = window.matchMedia('(min-width: 1100px)');
 const wideToday = () => WIDE.matches;
 WIDE.addEventListener('change', () => { if (tab === 'today' && !$('#dlg').open && OneDrive.signedIn() && !locked) render(); });
+// Bouton « Navigation » seulement sur téléphone (PHONE, plus bas) : affiché ou retiré quand la largeur change.
+window.matchMedia('(max-width: 699px)').addEventListener('change', () => { if (tab === 'today' && !$('#dlg').open && OneDrive.signedIn() && !locked) render(); });
 
 // Barre latérale du tableau de bord : heures, à facturer, mises à jour serveur du mois, achats.
 function dashSide(todays, week, sum) {
@@ -750,9 +775,11 @@ function viewToday() {
       ${seesMoney() ? `<div class="tap money" id="goBill"><b>${eur(toBill)}</b><span>à facturer ›</span></div>`
         : `<div><b>${todays.length}</b><span>intervention(s)</span></div>`}
     </div>
-    <div class="card"><h2>Aujourd'hui <span class="tot">${fmtDur(sum(todays))}</span></h2>${dayList}</div>`;
+    <div class="card"><h2>Aujourd'hui <span class="tot">${fmtDur(sum(todays))}</span></h2>${dayList}</div>
+    ${PHONE.matches ? '<button class="btn big navbtn" id="goNav">🧭 Navigation</button>' : ''}`;
 
   $('#addManual').onclick = () => openEntry(null);
+  if ($('#goNav')) $('#goNav').onclick = openNav;
   if ($('#addMaint')) $('#addMaint').onclick = () => openForfait(null, 'maint');
   // Intervention rapide : forfait de 5 minutes (sans heures), il reste à choisir le client et à écrire la description.
   // Les mises à jour serveur passent par leurs tâches récurrentes (onglet Tâches), plus par un bouton ici (demande de Fred, 30/10).
@@ -1131,8 +1158,8 @@ async function showBill(b, justCreated = false) {
     <p class="small muted">Facturé le ${frDate(b.date)} · ${[es.length && `${es.length} interv. · du ${frDate(b.from)} au ${frDate(b.to)}`, ach.length && `${ach.length} achat(s)`].filter(Boolean).join(' · ')}</p>
     <p class="small" id="bFile">${justCreated && es.length ? 'Envoi du fichier Prestations vers OneDrive…' : ''}</p>
     <div class="card" style="margin:10px 0;padding:10px">
-      <div class="row"><strong class="grow">Billit</strong>
-        <button class="btn ${b.billit ? '' : 'primary'}" id="bSend">📤 ${b.billit ? 'Renvoyer' : 'Envoyer'} vers Billit (${Billit.mode() === 'live' ? 'réel' : 'test'})</button></div>
+      <div class="row"><strong class="grow">${esc(Compta.label())}</strong>
+        <button class="btn ${b.billit ? '' : 'primary'}" id="bSend">📤 ${b.billit ? 'Renvoyer' : 'Envoyer'} vers ${esc(Compta.label())} (${Compta.mode() === 'live' ? 'réel' : 'test'})</button></div>
       <div class="small" id="bBillitMsg" style="margin-top:6px">${billitStatus(b)}</div>
     </div>
     <label>N° de facture Billit</label><input id="bRef" value="${esc(b.ref)}">
@@ -1174,18 +1201,83 @@ async function showBill(b, justCreated = false) {
   }
 }
 
-// ---- Envoi vers Billit (API) ----
-// Crée la facture dans Billit avec les articles (mai-xxx, dep-xxx) et le fichier Prestations en pièce jointe.
+// ---- Envoi vers le logiciel de facturation (connecteur de la société, compta.js) ----
+// Crée la facture en brouillon avec les articles (mai-xxx, dep-xxx) et le fichier Prestations en pièce jointe.
 // L'API ne permet pas d'ajouter des lignes à une facture existante : si une facture non envoyée existe déjà
-// pour le client, on prévient et on laisse le choix.
+// pour le client, on prévient et on laisse le choix. (b.billit : nom gardé pour les factures déjà envoyées ; type = connecteur.)
 const billitModeLabel = m => m === 'live' ? 'réel' : 'test (sandbox)';
 function billitStatus(b) {
   const x = b.billit;
-  if (!x) return Billit.ready() ? '<span class="muted">Pas encore envoyée.</span>'
-    : '<span class="muted">Renseigne la clé API et le PartyID Billit dans Réglages.</span>';
+  if (!x) return Compta.ready() ? '<span class="muted">Pas encore envoyée.</span>'
+    : `<span class="muted">${srvOn() ? 'Configure le connecteur de facturation dans Réglages.' : 'Renseigne la clé API et le PartyID Billit dans Réglages.'}</span>`;
+  const soft = { billit: 'Billit', odoo: 'Odoo' }[x.type || 'billit'] || '';
   return `<span class="pill ok">✓ Envoyée (${billitModeLabel(x.mode)}) le ${new Date(x.at).toLocaleString('fr-BE', { dateStyle: 'short', timeStyle: 'short' })}</span>
     ${x.number ? ` · n° ${esc(x.number)}` : ''}${x.status ? ` · statut ${esc(x.status)}` : ''}
-    ${/^https:\/\//.test(x.url || '') ? `· <a href="${esc(x.url)}" target="_blank" rel="noopener">Ouvrir dans Billit</a>` : ''}`;
+    ${/^https:\/\//.test(x.url || '') ? `· <a href="${esc(x.url)}" target="_blank" rel="noopener">Ouvrir dans ${esc(soft)}</a>` : ''}`;
+}
+
+// Réglages → Connecteur de facturation (données sur le serveur) : logiciel, clé et PartyID par mode, gardés chiffrés sur le serveur pour la société.
+function comptaCard() {
+  return `<label>Logiciel de facturation</label>
+    <select id="cpType"><option value="billit">Billit</option><option value="odoo" disabled>Odoo (bientôt)</option></select>
+    ${['test', 'live'].map(k => `<div class="card" style="margin:10px 0;padding:10px">
+      <div class="row"><strong class="grow">${k === 'live' ? 'Réel' : 'Test (sandbox)'}</strong><span class="small" data-cst="${k}">Lecture…</span></div>
+      <div class="grid2"><div><label>Clé API</label><input type="password" autocomplete="off" data-ck="${k}" placeholder="Saisir pour remplacer"></div>
+        <div><label>Société (PartyID)</label><select data-cp="${k}" disabled><option value="">—</option></select></div></div>
+      <div class="row" style="margin-top:6px"><button class="btn" data-cx="${k}" disabled>Effacer</button></div></div>`).join('')}
+    <p class="small muted">🔒 Connecteur de ta société : clés chiffrées sur le serveur OVH, jamais sur les appareils ni dans OneDrive.
+      Une clé saisie est d'abord contrôlée par le logiciel ; la société (PartyID) est choisie seule s'il n'y en a qu'une.</p>`;
+}
+function bindComptaCard() {
+  const cos = {};   // sociétés liées à la clé, connues après un contrôle
+  const say = (k, h) => { const el = $(`[data-cst="${k}"]`); if (el) el.innerHTML = h; };
+  const draw = conf => {
+    for (const k of ['test', 'live']) {
+      const x = conf?.modes?.[k] || {}, sel = $(`[data-cp="${k}"]`);
+      if (!sel) return;
+      say(k, !x.access ? '<span class="pill warn">Non autorisé sur ce serveur</span>'
+        : x.key ? `<span class="pill ok">✓ ${esc(conf.types?.[x.type] || x.type)}${x.company ? ' · ' + esc(x.company) : ''}${x.access === 'ro' ? ' (lecture seule)' : ''}</span>
+            <span class="muted">${esc(frDate(String(x.at || '').slice(0, 10)))} · ${esc(x.by || '')}</span>`
+        : '<span class="pill warn">Pas configuré</span>');
+      const list = cos[k] || (x.partyId ? [{ id: x.partyId, name: x.company || '' }] : []);
+      sel.innerHTML = (x.partyId ? '' : '<option value="">— à choisir —</option>') + list.map(c => `<option value="${esc(c.id)}" ${c.id === x.partyId ? 'selected' : ''}>${esc(c.name)} (${esc(c.id)})</option>`).join('');
+      sel.disabled = !x.key || (list.length < 2 && !!x.partyId);
+      $(`[data-cx="${k}"]`).disabled = !x.key;
+      $(`[data-ck="${k}"]`).disabled = !x.access;
+    }
+    const t = Object.values(conf?.modes || {}).find(m => m.type)?.type;
+    if (t && $('#cpType')) $('#cpType').value = t;
+  };
+  const failAll = e => ['test', 'live'].forEach(k => say(k, `<span class="pill warn">${esc(e.message)}</span>`));
+  Compta.loadConfig(true).then(draw).catch(failAll);
+  const save = async (k, body, msg) => {
+    try {
+      const r = await Compta.saveConfig({ mode: k, type: $('#cpType').value, ...body });
+      if (r.companies?.length) cos[k] = r.companies;
+      draw(r); toast(msg);
+    } catch (e) { say(k, `<span class="pill warn">${esc(e.message)}</span>`); }
+  };
+  $$('[data-ck]').forEach(i => i.onchange = () => {
+    const k = i.dataset.ck, v = i.value.trim(); i.value = '';
+    if (!v) return;
+    say(k, 'Contrôle de la clé…');
+    save(k, { apiKey: v }, 'Clé enregistrée sur le serveur');
+  });
+  $$('[data-cp]').forEach(sel => sel.onchange = () => sel.value && save(sel.dataset.cp, { partyId: sel.value }, 'Société enregistrée'));
+  $$('[data-cx]').forEach(b => b.onclick = () => {
+    const k = b.dataset.cx;
+    if (confirm(`Effacer le connecteur ${k === 'live' ? 'réel' : 'test'} de ta société ?\nPlus aucune facture ne pourra être envoyée dans ce mode.`)) save(k, { clear: true }, 'Connecteur effacé');
+  });
+}
+
+// Lien d'un client (ou d'une société commanditaire) avec sa fiche dans le logiciel de facturation, par connecteur et par mode.
+// billitIds est encore lu et écrit pour Billit : les appareils en ancienne version (et la production en OneDrive) s'en servent.
+const extId = (o, m = Compta.mode()) => o?.ext?.[Compta.type()]?.[m] ?? (Compta.type() === 'billit' ? o?.billitIds?.[m] : undefined);
+function setExt(o, id, m = Compta.mode()) {
+  const t = Compta.type();
+  o.ext = { ...o.ext, [t]: { ...o.ext?.[t], [m]: String(id) } };
+  if (t === 'billit') o.billitIds = { ...o.billitIds, [m]: +id || id };
+  touch(o);
 }
 
 const toBase64 = blob => new Promise((resolve, reject) => {
@@ -1195,45 +1287,47 @@ const toBase64 = blob => new Promise((resolve, reject) => {
   r.readAsDataURL(blob);
 });
 
-// ID du client Billit (mémorisé par mode : les ID du sandbox et du réel sont différents).
+// ID du client dans le logiciel de facturation (mémorisé par connecteur et par mode : les ID du test et du réel sont différents).
 async function resolveBillitCustomer(info, say) {
-  const m = Billit.mode();
+  // Partenaire : lien gardé dans les réglages de ma société (Partenaires) ; ancien lien de la fiche société repris s'il existe.
   const c = info.partner ? null : client(info.key.slice(2));
-  const stored = info.partner ? info.soc.billitIds?.[m] : c.billitIds?.[m];
+  let owner = c;
+  if (info.partner) { owner = partnerCfg(info.soc.id); if (!owner.billitIds && info.soc.billitIds) owner.billitIds = { ...info.soc.billitIds }; }
+  const stored = extId(owner);
   if (stored) return stored;
-  say('Recherche du client dans Billit…');
-  const all = await Billit.customers();
+  const soft = Compta.label();
+  say(`Recherche du client dans ${esc(soft)}…`);
+  const all = await Compta.clients();
   const want = fold(info.billitName);
-  const exact = all.filter(p => [p.Name, p.CommercialName, p.DisplayName].some(n => n && fold(n) === want));
-  let id = exact.length === 1 ? exact[0].PartyID : null;
+  const exact = all.filter(p => [p.name, p.tradeName].some(n => n && fold(n) === want));
+  let id = exact.length === 1 ? exact[0].id : null;
   if (!id) {
     // Choix manuel : les correspondances partielles en premier.
-    const score = p => fold(Billit.partyName(p)).includes(want) || want.includes(fold(Billit.partyName(p))) ? 0 : 1;
-    const list = all.slice().sort((a, b) => score(a) - score(b) || Billit.partyName(a).localeCompare(Billit.partyName(b)));
-    if (!list.length) throw new Error('Aucun client trouvé dans Billit.');
-    say(`<label style="margin-top:0">Client Billit pour « ${esc(info.label)} »</label>
-      <select id="bCust">${list.map(p => `<option value="${p.PartyID}">${esc(Billit.partyName(p))}${p.VATNumber ? ' · ' + esc(p.VATNumber) : ''}</option>`).join('')}</select>
+    const score = p => fold(p.name).includes(want) || want.includes(fold(p.name)) ? 0 : 1;
+    const list = all.slice().sort((a, b) => score(a) - score(b) || a.name.localeCompare(b.name));
+    if (!list.length) throw new Error(`Aucun client trouvé dans ${soft}.`);
+    say(`<label style="margin-top:0">Client ${esc(soft)} pour « ${esc(info.label)} »</label>
+      <select id="bCust">${list.map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.vat ? ' · ' + esc(p.vat) : ''}</option>`).join('')}</select>
       <div class="row" style="margin-top:8px"><button class="btn" id="bCustNo">Annuler</button><button class="btn primary" id="bCustOk">Utiliser ce client</button></div>`);
     $$('#bCustNo, #bCustOk').forEach(x => x.type = 'button');
     id = await new Promise(res => { $('#bCustOk').onclick = () => res($('#bCust').value); $('#bCustNo').onclick = () => res(null); });
     if (!id) return null;
   }
-  if (info.partner) { info.soc.billitIds = { ...info.soc.billitIds, [m]: id }; touch(info.soc); }
-  else { c.billitIds = { ...c.billitIds, [m]: id }; touch(c); }
+  setExt(owner, id);
+  if (info.partner) state.settingsAt = Date.now();
   await DB.save(state); scheduleSync();
   return id;
 }
 
+// Lignes de la facture au format LevelDesk (compta.js) : articles du logiciel de facturation par référence, sinon prix de l'app.
 function billitLines(b, info, products) {
   const r = info.rates, t = totals(live().filter(e => e.billId === b.id), r);
-  const byRef = ref => products.find(p => fold(p.Reference) === fold(ref));
+  const byRef = ref => products.find(p => fold(p.ref) === fold(ref));
   const missing = [];
   const line = (qty, ref, label, price) => {
     const p = byRef(ref);
     if (!p) missing.push(ref);
-    return { Quantity: qty, Reference: ref, Description: p?.Description || label,
-      UnitPriceExcl: p?.AmountExcl ?? p?.UnitPriceExcl ?? price, VATPercentage: p?.VAT ?? p?.VATPercentage ?? 21,
-      ...(p?.ProductID ? { ProductID: p.ProductID } : {}) };
+    return { qty, ref, description: p?.name || label, price: p?.price ?? price, vat: p?.vat ?? 21, articleId: p?.id || '' };
   };
   const lines = [];
   if (t.h) lines.push(line(t.h, r.hRef, r.hLabel, r.h));
@@ -1247,56 +1341,50 @@ function billitLines(b, info, products) {
 
 async function sendToBillit(b) {
   const say = h => { const el = $('#bBillitMsg'); if (el) el.innerHTML = h; };
-  const info = groupInfo(b.key), m = Billit.mode();
+  const info = groupInfo(b.key), m = Compta.mode(), soft = Compta.label();
   try {
-    if (!Billit.ready()) throw new Error('Renseigne la clé API et le PartyID Billit dans Réglages.');
-    if (b.billit && !confirm(`Cette facture a déjà été envoyée vers Billit (${billitModeLabel(b.billit.mode)}).\nEn créer une nouvelle quand même ?`)) return;
+    await Compta.loadConfig();
+    if (!Compta.ready()) throw new Error(srvOn() ? 'Configure le connecteur de facturation dans Réglages.' : 'Renseigne la clé API et le PartyID Billit dans Réglages.');
+    if (b.billit && !confirm(`Cette facture a déjà été envoyée (${billitModeLabel(b.billit.mode)}).\nEn créer une nouvelle quand même ?`)) return;
     const customerId = await resolveBillitCustomer(info, say);
     if (!customerId) return say('Envoi annulé.');
 
     say('Vérification des factures non envoyées pour ce client…');
-    const open = await Billit.openInvoices(customerId);
+    const open = await Compta.openInvoices(customerId);
     if (open.length) {
-      const desc = open.map(o => `- ${o.OrderNumber || '(sans n°)'} du ${frDate(String(o.OrderDate || '').slice(0, 10))}${o.TotalExcl != null ? ` : ${eur(o.TotalExcl)} HTVA` : ''}`).join('\n');
-      if (!confirm(`${open.length} facture(s) non envoyée(s) existent déjà pour ${info.billitName} :\n${desc}\n\nL'API Billit ne permet pas d'y ajouter des lignes.\nCréer une NOUVELLE facture quand même ?\n(Annuler = compléter toi-même ou avec la tâche Claude)`)) {
-        return say('Envoi annulé. Factures existantes : ' + open.map(o => `<a href="${esc(Billit.orderUrl(o.OrderID))}" target="_blank" rel="noopener">${esc(o.OrderNumber || 'facture ' + o.OrderID)}</a>`).join(', '));
+      const desc = open.map(o => `- ${o.number || '(sans n°)'} du ${frDate(o.date)}${o.total != null ? ` : ${eur(o.total)} HTVA` : ''}`).join('\n');
+      if (!confirm(`${open.length} facture(s) non envoyée(s) existent déjà pour ${info.billitName} :\n${desc}\n\n${soft} ne permet pas d'y ajouter des lignes par l'API.\nCréer une NOUVELLE facture quand même ?\n(Annuler = compléter toi-même ou avec la tâche Claude)`)) {
+        return say('Envoi annulé. Factures existantes : ' + open.map(o => /^https:\/\//.test(o.url || '') ? `<a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.number || 'facture ' + o.id)}</a>` : esc(o.number || o.id)).join(', '));
       }
     }
 
-    say('Lecture des articles Billit…');
-    const { lines, missing } = billitLines(b, info, await Billit.products());
+    say(`Lecture des articles ${esc(soft)}…`);
+    const { lines, missing } = billitLines(b, info, await Compta.articles());
     if (!lines.length) throw new Error('Aucune ligne à facturer.');
-    const total = lines.reduce((s, l) => s + l.Quantity * l.UnitPriceExcl, 0);
+    const total = lines.reduce((s, l) => s + l.qty * l.price, 0);
     const inst = live().filter(e => e.billId === b.id && e.install);
     const days = dueDays(info), due = new Date(); due.setDate(due.getDate() + days);
-    const order = {
-      // Draft = « Projet » dans Billit (sans ce statut, la facture est numérotée tout de suite).
-      OrderType: 'Invoice', OrderDirection: 'Income', OrderStatus: 'Draft', Currency: 'EUR',
-      OrderDate: today(), ExpiryDate: isoDate(due), CustomerID: +customerId || customerId,
-      OrderTitle: billTitle(b),
-      OrderLines: lines,
+    // Toujours en brouillon (« Projet » dans Billit) : imposé aussi par le serveur et par compta.js.
+    const inv = {
+      customerId: String(customerId), date: today(), dueDate: isoDate(due), title: billTitle(b), lines,
       // Fichier Prestations seulement s'il y a des interventions (une facture peut ne contenir que des achats).
-      ...(b.from ? { Attachments: [{ FileName: prestationsName(b), FileContent: await toBase64(await prestationsFile(b)), MimeType: Xlsx.MIME }] } : {})
+      files: b.from ? [{ name: prestationsName(b), content: await toBase64(await prestationsFile(b)), mime: Xlsx.MIME }] : []
     };
-    const summary = lines.map(l => `- ${l.Reference} ${l.Description} : ${l.Quantity} × ${eur(l.UnitPriceExcl)}`).join('\n');
-    if (!confirm(`${m === 'live' ? '⚠ MODE RÉEL – vraie comptabilité' : 'Mode TEST (sandbox)'}\n\nFacture pour ${info.billitName}\n${order.OrderTitle}\n${summary}\nTotal HTVA : ${eur(total)}`
-      + `\nÉchéance : ${frDate(order.ExpiryDate)} (${days} jours)`
-      + (missing.length ? `\n\nArticles introuvables dans Billit (prix de l'app utilisé) : ${missing.join(', ')}` : '')
-      + (inst.length ? `\n\nInstallations NON ajoutées (à ajouter dans Billit) : ${inst.map(e => e.install).join(', ')}` : '')
+    const summary = lines.map(l => `- ${l.ref} ${l.description} : ${l.qty} × ${eur(l.price)}`).join('\n');
+    if (!confirm(`${m === 'live' ? '⚠ MODE RÉEL – vraie comptabilité' : 'Mode TEST (sandbox)'}\n\nFacture pour ${info.billitName}\n${inv.title}\n${summary}\nTotal HTVA : ${eur(total)}`
+      + `\nÉchéance : ${frDate(inv.dueDate)} (${days} jours)`
+      + (missing.length ? `\n\nArticles introuvables dans ${soft} (prix de l'app utilisé) : ${missing.join(', ')}` : '')
+      + (inst.length ? `\n\nInstallations NON ajoutées (à ajouter dans ${soft}) : ${inst.map(e => e.install).join(', ')}` : '')
       + '\n\nCréer la facture ?')) return say('Envoi annulé.');
 
     say('Création de la facture…');
-    const res = await Billit.createOrder(order);
-    const id = typeof res === 'object' && res ? (res.OrderID ?? res.id ?? res.Id) : res;
-    let o = null;
-    try { o = await Billit.getOrder(id); } catch (_) { /* la facture est créée, le détail est facultatif */ }
-    b.billit = { id, mode: m, at: Date.now(), url: Billit.orderUrl(id), number: o?.OrderNumber || '', status: o?.OrderStatus || '' };
+    const r = await Compta.draftInvoice(inv);
+    b.billit = { id: r.id, type: Compta.type(), mode: m, at: Date.now(), url: r.url || '', number: r.number || '', status: r.status || '' };
     touch(b); await persist();
-    const draft = /draft/i.test(b.billit.status);
-    say(billitStatus(b) + (draft
-      ? '<p class="small"><span class="pill ok">Créée en Projet</span> Vérifie-la dans Billit avant de la créer définitivement.</p>'
-      : `<p class="small"><span class="pill warn">Attention : Billit ne l'a pas créée en Projet (statut ${esc(b.billit.status || 'inconnu')}${b.billit.number ? ', n° ' + esc(b.billit.number) : ''}).</span></p>`));
-    toast('Facture créée dans Billit');
+    say(billitStatus(b) + (r.draft
+      ? `<p class="small"><span class="pill ok">Créée en brouillon</span> Vérifie-la dans ${esc(soft)} avant de la créer définitivement.</p>`
+      : `<p class="small"><span class="pill warn">Attention : ${esc(soft)} ne l'a pas créée en brouillon (statut ${esc(b.billit.status || 'inconnu')}${b.billit.number ? ', n° ' + esc(b.billit.number) : ''}).</span></p>`));
+    toast(`Facture créée dans ${soft}`);
   } catch (e) {
     say(`<span class="pill warn">${esc(e.message)}</span>`);
   }
@@ -1361,9 +1449,10 @@ function viewArchivedEntry(e) {
       ${row('Technicien', esc(userLabel(user(techOf(e)))))}
       ${row('Description', esc(e.description).replace(/\n/g, '<br>'))}
       ${row('Installation', esc(e.install))}
-      ${row('Montant HTVA', eur(entryAmount(e)))}
+      ${row('Montant HTVA', seesMoney() ? eur(entryAmount(e)) : '')}
     </table>
-    <p class="small muted">Les interventions facturées ne se modifient pas. Pour corriger : « Voir la facture » → « Annuler la facturation ».</p>
+    <p class="small muted">${seesMoney() ? 'Les interventions facturées ne se modifient pas. Pour corriger : « Voir la facture » → « Annuler la facturation ».'
+      : 'Intervention facturée : elle ne se modifie plus. Pour une correction, demande à ton administrateur.'}</p>
     <div class="actions">${e.taskId ? '<button class="btn" id="vTask">📋 Tâche d\'origine</button>' : ''}${b && b.key !== 'import' ? '<button class="btn" id="vBill">Voir la facture</button>' : ''}
       <button class="btn primary" id="vOk">Fermer</button></div>`;
   if ($('#vBill')) $('#vBill').onclick = () => showBill(b);
@@ -1383,11 +1472,10 @@ function viewAdmin() {
     : Object.entries(u.clients || {}).map(([k, v]) => v === 'all' ? `${soc(k).name} : tous` : v?.length ? `${soc(k).name} : ${v.length}` : '').filter(Boolean).join(', ') || 'aucun client';
   $('#view').innerHTML = `
     <div class="card"><div class="row"><h2 class="grow" style="margin:0;border:0;padding:0">Sociétés (${socs.length})</h2><button class="btn" id="socAdd">+ Société</button></div>
-      <p class="small muted" style="margin:6px 0 8px">One Level UP et les commanditaires pour qui tu interviens. Leurs tarifs, client Billit et échéance servent à facturer tes interventions pour eux.</p>
+      <p class="small muted" style="margin:6px 0 8px">Ta société et les sociétés partenaires (commanditaires). Les tarifs que tu leur appliques : Réglages → Ma société → Partenaires.</p>
       <ul class="list">${socs.map(s => `<li class="tap" data-soc="${s.id}"><div class="grow" style="flex:1;min-width:0"><strong>${esc(s.name)}</strong>
-          ${s.home ? '<span class="pill ok">ta société</span>' : ''}${s.active === false ? '<span class="pill">inactive</span>' : ''}
-          <div class="small muted">${(s.home ? ['tarifs clients : Réglages'] : [`Billit : ${s.billitName || '—'}`, `${eur(socRates(s).h)} / h`, `échéance ${s.due ?? 15} j`])
-            .concat([`${nUsers(s)} utilisateur(s)`, `${nClients(s)} client(s)`]).map(esc).join(' · ')}</div></div><span class="chev">›</span></li>`).join('')}</ul>
+          ${s.id === HOME ? '<span class="pill ok">ta société</span>' : ''}${s.active === false ? '<span class="pill">inactive</span>' : ''}
+          <div class="small muted">${[`${nUsers(s)} utilisateur(s)`, `${nClients(s)} client(s)`].map(esc).join(' · ')}</div></div><span class="chev">›</span></li>`).join('')}</ul>
     </div>
     <div class="card"><div class="row"><h2 class="grow" style="margin:0;border:0;padding:0">Utilisateurs (${us.length})</h2><button class="btn" id="usrAdd">+ Utilisateur</button></div>
       <p class="small muted" style="margin:6px 0 8px">Techniciens et responsables des sociétés, reconnus par leur adresse Microsoft 365.</p>
@@ -1411,27 +1499,21 @@ function viewAdmin() {
   $$('[data-usr]').forEach(li => li.onclick = () => editUser(user(li.dataset.usr)));
 }
 
+// Fiche d'une société (Admin) : nom, tenant, active, modules. Ses tarifs de partenaire sont dans Réglages → Ma société → Partenaires (editPartner).
 function editSoc(s) {
   const dlg = $('#dlg'), f = $('#dlgForm');
-  // Nouvelle société : tarifs et articles d'Alescom (partenaire) proposés.
-  const r = s ? socRates(s) : { ...socRates(soc('alescom')) }, home = !!s?.home;
-  const rate = (k, label, step = '0.01') => `<div><label>${label}</label><input type="number" step="${step}" id="s_${k}" value="${esc(r[k] ?? '')}"></div>`;
-  const txt = (k, label) => `<div><label>${label}</label><input id="s_${k}" value="${esc(r[k] ?? '')}" autocapitalize="off"></div>`;
+  const home = s ? s.id === HOME || !!s.home : false;
   f.innerHTML = `<h2>${s ? esc(s.name) : 'Nouvelle société'}</h2>
     <label>Nom</label><input id="sName" value="${esc(s?.name ?? '')}" placeholder="ex. Société X">
-    ${home ? `<p class="small muted">Ta société : ses tarifs (clients) se règlent dans Réglages.</p>
-    ${srvOn() && state.srv.me?.platform ? `<h3 style="margin:14px 0 0">Modules</h3>
-      <p class="small muted">Réglés par l'administrateur de la plateforme. Un module désactivé disparaît de l'app pour toute la société.</p>
-      ${MODULES.map(m => `<label class="check"><input type="checkbox" data-mod="${m}" ${s.modules?.[m] ? 'checked' : ''}> ${MODULE_NAMES[m]}</label>`).join('')}` : ''}` : `
+    ${s && srvOn() && state.srv.me?.platform ? `<h3 style="margin:14px 0 0">Modules</h3>
+      <p class="small muted">Réglés par l'administrateur de la plateforme. Un module désactivé disparaît de l'app pour tous les utilisateurs de cette société
+        ${home ? '' : '(ex. Tâches pour ses techniciens ; Achats, Articles et Facturer restent réservés aux administrateurs)'}.</p>
+      ${MODULES.map(m => `<label class="check"><input type="checkbox" data-mod="${m}" ${s.modules?.[m] ? 'checked' : ''}> ${MODULE_NAMES[m]}</label>`).join('')}` : ''}
+    ${home ? `<p class="small muted">Ta société : ses tarifs (clients) se règlent dans Réglages.</p>` : `
     <label>Tenant Microsoft 365 <span class="small">(domaine ou ID, pour la connexion de ses utilisateurs plus tard)</span></label>
     <input id="sTenant" value="${esc(s?.tenant ?? '')}" placeholder="ex. societe-x.be" autocapitalize="off">
-    <label>Nom du client dans Billit <span class="small">(à qui tu factures ton travail pour eux)</span></label>
-    <input id="sBillit" value="${esc(s?.billitName ?? '')}" placeholder="ex. SOCIETE X SRL">
-    <h3 style="margin:14px 0 0">Tes tarifs pour ce commanditaire</h3>
-    <div class="grid3">${rate('h', '€ / heure')}${rate('m', '€ / minute')}${rate('dep', '€ déplacement')}</div>
-    <div class="grid3">${txt('hRef', 'Article heure')}${txt('mRef', 'Article minute')}${txt('depRef', 'Article déplacement')}</div>
-    <label>Échéance des factures (jours)</label><input type="number" step="1" min="0" id="sDue" value="${esc(s?.due ?? 15)}" style="max-width:120px">
-    <label class="check"><input type="checkbox" id="sActive" ${s?.active === false ? '' : 'checked'}> Active (proposée comme commanditaire)</label>`}
+    <label class="check"><input type="checkbox" id="sActive" ${s?.active === false ? '' : 'checked'}> Active (proposée comme commanditaire)</label>
+    <p class="small muted">Tes tarifs pour cette société : Réglages → Ma société → Partenaires.</p>`}
     <div class="actions"><button class="btn" value="cancel">Annuler</button><button class="btn primary" id="sSave">Enregistrer</button></div>`;
   $('#sSave').onclick = async ev => {
     ev.preventDefault();
@@ -1440,17 +1522,39 @@ function editSoc(s) {
     if (liveSocs().some(x => x !== s && fold(x.name) === fold(name))) return alert('Cette société existe déjà.');
     const data = { name };
     if ($('[data-mod]')) data.modules = Object.fromEntries($$('[data-mod]').map(x => [x.dataset.mod, x.checked]));
-    if (!home) {
-      const num = k => { const v = parseFloat($('#s_' + k).value); return isNaN(v) ? 0 : v; };
-      const ref = k => $('#s_' + k).value.trim();
-      // Les libellés (recap, fichier Prestations) suivent le nom de la société et les articles.
-      const rates = { ...r, h: num('h'), m: num('m'), dep: num('dep'), hRef: ref('hRef'), mRef: ref('mRef'), depRef: ref('depRef') };
-      if (!s || s.id !== 'alescom') Object.assign(rates, { hLabel: `Main d'œuvre ${name} heure (${rates.hRef})`, mLabel: `Main d'œuvre ${name} minutes (${rates.mRef})`, depLabel: `Déplacement ${name} (${rates.depRef})` });
-      Object.assign(data, { tenant: $('#sTenant').value.trim(), billitName: $('#sBillit').value.trim(), rates,
-        due: Math.max(0, parseInt($('#sDue').value, 10) || 0), active: $('#sActive').checked });
-    }
-    if (s) Object.assign(touch(s), data); else state.societes.push(touch({ id: uid('s'), billitIds: {}, ...data }));
-    dlg.close(); await persist(); toast('Enregistré');
+    if (!home) Object.assign(data, { tenant: $('#sTenant').value.trim(), active: $('#sActive').checked });
+    let saved = s;
+    if (s) Object.assign(touch(s), data); else state.societes.push(saved = touch({ id: uid('s'), ...data }));
+    await persist(); toast('Enregistré');
+    // Nouvelle société partenaire : on règle tout de suite tes tarifs pour elle.
+    if (!s && mod('soustraitance')) editPartner(saved.id); else dlg.close();
+  };
+  if (!dlg.open) dlg.showModal();
+}
+
+// Réglages → Ma société → Partenaires : tes tarifs, articles, échéance et nom de facturation pour un commanditaire (privés, dans les réglages de ta société).
+function editPartner(id) {
+  const dlg = $('#dlg'), f = $('#dlgForm'), s = soc(id), p = partnerOf(id), r = p.rates;
+  const rate = (k, label) => `<div><label>${label}</label><input type="number" step="0.01" id="p_${k}" value="${esc(r[k] ?? '')}"></div>`;
+  const txt = (k, label) => `<div><label>${label}</label><input id="p_${k}" value="${esc(r[k] ?? '')}" autocapitalize="off"></div>`;
+  f.innerHTML = `<h2>Partenaire : ${esc(s.name)}</h2>
+    <p class="small muted" style="margin-top:0">Ce que <strong>ta</strong> société facture à ${esc(s.name)} pour le travail de tes techniciens. ${esc(s.name)} ne voit pas ces tarifs.</p>
+    <label>Nom du client dans ${esc(Compta.label())} <span class="small">(la société à qui tu factures)</span></label>
+    <input id="pBillit" value="${esc(p.billitName)}" placeholder="ex. SOCIETE X SRL">
+    <div class="grid3">${rate('h', '€ / heure')}${rate('m', '€ / minute')}${rate('dep', '€ déplacement')}</div>
+    <div class="grid3">${txt('hRef', 'Article heure')}${txt('mRef', 'Article minute')}${txt('depRef', 'Article déplacement')}</div>
+    <label>Échéance des factures (jours)</label><input type="number" step="1" min="0" id="pDue" value="${esc(p.due)}" style="max-width:120px">
+    <div class="actions"><button class="btn" value="cancel">Annuler</button><button class="btn primary" id="pSave">Enregistrer</button></div>`;
+  $('#pSave').onclick = async ev => {
+    ev.preventDefault();
+    const num = k => { const v = parseFloat($('#p_' + k).value); return isNaN(v) ? 0 : v; };
+    const ref = k => $('#p_' + k).value.trim();
+    const rates = { ...r, h: num('h'), m: num('m'), dep: num('dep'), hRef: ref('hRef'), mRef: ref('mRef'), depRef: ref('depRef') };
+    // Les libellés (récap, fichier Prestations) suivent le nom de la société et les articles (Alescom garde les siens).
+    if (id !== 'alescom') Object.assign(rates, { hLabel: `Main d'œuvre ${s.name} heure (${rates.hRef})`, mLabel: `Main d'œuvre ${s.name} minutes (${rates.mRef})`, depLabel: `Déplacement ${s.name} (${rates.depRef})` });
+    Object.assign(partnerCfg(id), { rates, billitName: $('#pBillit').value.trim() || s.name, due: Math.max(0, parseInt($('#pDue').value, 10) || 0) });
+    state.settingsAt = Date.now();
+    dlg.close(); await persist(); toast('Tarifs enregistrés');
   };
   if (!dlg.open) dlg.showModal();
 }
@@ -1520,9 +1624,38 @@ function viewSettings() {
       <div><label>€ / heure</label><input type="number" step="0.01" data-rate="${k}.h" value="${r[k].h}"></div>
       <div><label>€ / minute</label><input type="number" step="0.01" data-rate="${k}.m" value="${r[k].m}"></div>
       <div><label>€ déplacement</label><input type="number" step="0.01" data-rate="${k}.dep" value="${r[k].dep}"></div></div>`;
+  const partners = activeSocs().filter(x => x.id !== HOME);
+  // Trois niveaux (architecture.md, section 4) : Mes réglages (moi), Ma société (administrateur), Plateforme et données.
   $('#view').innerHTML = `
     ${installPrompt ? '<button class="btn primary big" id="install" style="margin-bottom:12px">Installer l\'application</button>' : ''}
-    <div class="card"><div class="row"><h2 class="grow" style="margin:0">Clients (${state.clients.filter(c => !c.deleted).length})</h2><button class="btn" id="addClient">+ Ajouter</button></div>
+    <h3 class="secth">Mes réglages</h3>
+    <div class="card"><h2>${srvOn() ? 'Mon compte' : 'OneDrive'}</h2>
+      <p class="small" id="odStatus">${esc(statusText())}</p>
+      ${OneDrive.signedIn() ? `<p class="small muted">Compte : ${esc(OneDrive.user())}${srvOn() && state.srv.me?.societe ? ' · ' + esc(state.srv.me.societe) : ''}</p>` : ''}
+      <div class="row">
+        ${OneDrive.signedIn()
+          ? '<button class="btn" id="odSync">Synchroniser</button><button class="btn danger" id="odOut">Se déconnecter</button>'
+          : `<button class="btn primary" id="odIn" ${od.clientId ? '' : 'disabled'}>Se connecter à Microsoft 365</button>`}
+      </div>
+      <details style="margin-top:10px" ${od.clientId ? '' : 'open'}><summary class="small">Configuration${srvOn() ? ' (OneDrive : fichiers Excel, Prestations, Achats)' : ''}</summary>
+        <label>ID d'application (client ID Entra)</label><input id="odClient" value="${esc(od.clientId)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+        <label>Tenant (ID ou domaine, sinon "organizations")</label><input id="odTenant" value="${esc(od.tenant)}">
+        <label>Dossier TimeSheet dans OneDrive</label><input id="odFolder" value="${esc(od.folder)}">
+        <p class="small muted">URI de redirection à déclarer (plateforme « Application monopage ») :<br><code>${esc(OneDrive.redirectUri())}</code></p>
+        <p class="small muted">Fichiers générés (ne pas les modifier à la main, ils sont réécrits par l'app) :<br>
+          <code>${esc(P.open())}</code><br><code>${esc(P.archive())}</code><br><code>${esc(od.folder)}/A facturer/Prestations - …xlsx</code></p>
+      </details>
+    </div>
+    <div class="card"><h2>Code PIN</h2>
+      <p class="small muted">${state.settings.pin ? 'Un code PIN est demandé à l\'ouverture de l\'app et après 5 minutes en arrière-plan, sur tous tes appareils.'
+        : 'Aucun code PIN : l\'app s\'ouvre dès que tu es connecté à Microsoft 365.'}</p>
+      <div class="row"><button class="btn" id="pinSet">${state.settings.pin ? 'Changer le code PIN' : 'Définir un code PIN'}</button>
+        ${state.settings.pin ? '<button class="btn danger" id="pinDel">Supprimer le code PIN</button>' : ''}</div>
+    </div>
+
+    <h3 class="secth">Ma société${srvOn() && state.srv.me?.societe ? ' · ' + esc(state.srv.me.societe) : ''}</h3>
+    <div class="card"><div class="row"><h2 class="grow" style="margin:0">Clients (${state.clients.filter(c => !c.deleted).length})</h2>
+      ${isAdmin() ? '<button class="btn" id="addrImport" title="Remplit les adresses vides avec celles des clients Billit reliés">📍 Adresses Billit</button>' : ''}<button class="btn" id="addClient">+ Ajouter</button></div>
       <input type="search" id="cSearch" placeholder="Rechercher un client…" style="margin-top:10px">
       <ul class="list" style="margin-top:8px;max-height:420px;overflow:auto">${state.clients.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name)).map(c => `
         <li data-name="${esc(fold(c.name + ' ' + (c.billitName || '') + ' ' + (c.domains || []).join(' ')))}">
@@ -1535,32 +1668,21 @@ function viewSettings() {
       <div class="grid2" style="margin-top:4px">
         <div><label>€ déplacement client proche (dep-003)</label><input type="number" step="0.01" data-rate="zone1.dep" value="${r.zone1.dep}"></div>
       </div>
-      <p class="small muted">Tarifs des commanditaires (Alescom…) : onglet Administration → Sociétés.</p></div>
-
-    <div class="card"><h2>OneDrive</h2>
-      <p class="small" id="odStatus">${esc(statusText())}</p>
-      ${OneDrive.signedIn() ? `<p class="small muted">Compte : ${esc(OneDrive.user())}</p>` : ''}
-      <div class="row">
-        ${OneDrive.signedIn()
-          ? '<button class="btn" id="odSync">Synchroniser</button><button class="btn danger" id="odOut">Se déconnecter</button>'
-          : `<button class="btn primary" id="odIn" ${od.clientId ? '' : 'disabled'}>Se connecter à Microsoft 365</button>`}
-      </div>
-      <details style="margin-top:10px" ${od.clientId ? '' : 'open'}><summary class="small">Configuration</summary>
-        <label>ID d'application (client ID Entra)</label><input id="odClient" value="${esc(od.clientId)}" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
-        <label>Tenant (ID ou domaine, sinon "organizations")</label><input id="odTenant" value="${esc(od.tenant)}">
-        <label>Dossier TimeSheet dans OneDrive</label><input id="odFolder" value="${esc(od.folder)}">
-        <p class="small muted">URI de redirection à déclarer (plateforme « Application monopage ») :<br><code>${esc(OneDrive.redirectUri())}</code></p>
-        <p class="small muted">Fichiers générés (ne pas les modifier à la main, ils sont réécrits par l'app) :<br>
-          <code>${esc(P.open())}</code><br><code>${esc(P.archive())}</code><br><code>${esc(od.folder)}/A facturer/Prestations - …xlsx</code></p>
-      </details>
     </div>
+    ${mod('soustraitance') ? `<div class="card"><h2>Partenaires (commanditaires)</h2>
+      <p class="small muted" style="margin-top:0">Sociétés pour qui tes techniciens interviennent : tu leur factures ce travail avec ces tarifs.
+        Ils restent privés (la société partenaire ne les voit pas). Ajouter une société : onglet Admin.</p>
+      <ul class="list">${partners.map(x => { const p = partnerOf(x.id); return `<li class="tap" data-partner="${x.id}"><div class="grow"><strong>${esc(x.name)}</strong>
+        <div class="small muted">${esc(p.billitName)} · ${eur(p.rates.h)} / h · ${eur(p.rates.m)} / min · déplacement ${eur(p.rates.dep)} · échéance ${p.due} j</div></div>
+        <span class="chev">›</span></li>`; }).join('') || '<li class="small muted">Aucun partenaire.</li>'}</ul></div>` : ''}
 
-    <div class="card"><h2>Billit</h2>
+    <div class="card"><h2>${srvOn() ? 'Connecteur de facturation' : 'Billit'}</h2>
       <div class="row">
-        <label class="check grow"><input type="radio" name="bMode" value="test" ${Billit.mode() !== 'live' ? 'checked' : ''}> Test (sandbox)</label>
-        <label class="check grow"><input type="radio" name="bMode" value="live" ${Billit.mode() === 'live' ? 'checked' : ''} ${ENV === 'prod' ? '' : 'disabled'}> Réel</label>
+        <label class="check grow"><input type="radio" name="bMode" value="test" ${Compta.mode() !== 'live' ? 'checked' : ''}> Test (sandbox)</label>
+        <label class="check grow"><input type="radio" name="bMode" value="live" ${Compta.mode() === 'live' ? 'checked' : ''} ${ENV === 'prod' ? '' : 'disabled'}> Réel</label>
       </div>
-      ${ENV === 'prod' ? '' : '<p class="small"><span class="pill warn">Version de développement : Billit toujours en Test (sandbox), le mode Réel est bloqué.</span></p>'}
+      ${ENV === 'prod' ? '' : '<p class="small"><span class="pill warn" style="white-space:normal">Version de développement : toujours en Test (sandbox), le mode Réel est en lecture seule.</span></p>'}
+      ${srvOn() ? comptaCard() : `
       <label class="check" style="margin-top:8px"><input type="checkbox" id="bRelay" ${s.billit.relay ? 'checked' : ''}> Clés API sur le serveur OVH (recommandé)</label>
       ${['test', 'live'].map(k => `<div class="grid2">
         <div><label>Clé API (${k === 'live' ? 'réel' : 'test'})</label>${s.billit.relay
@@ -1572,7 +1694,7 @@ function viewSettings() {
       <p class="small muted">${s.billit.relay
         ? `🔒 Les clés API sont sur le serveur OVH (${esc(new URL(API_URL).host + new URL(API_URL).pathname)}), chiffrées : jamais sur les appareils ni sur OneDrive.
           Une clé saisie ici est contrôlée par Billit puis enregistrée sur le serveur, une seule fois pour tous les appareils.`
-        : '🔒 Les clés API restent sur cet appareil (jamais sur OneDrive) : à saisir une fois sur chaque appareil, effacées à la déconnexion.'}</p>
+        : '🔒 Les clés API restent sur cet appareil (jamais sur OneDrive) : à saisir une fois sur chaque appareil, effacées à la déconnexion.'}</p>`}
       <div class="row" style="margin-top:10px"><button class="btn" id="bTest">Tester la connexion</button><span class="small" id="bTestRes"></span></div>
       ${ENV === 'prod' ? '' : `<h3 style="margin:16px 0 4px">Copier Billit réel → sandbox</h3>
       <p class="small muted">Clients, articles (catégories par leur nom) et factures de vente et d'achat des 3 derniers mois, avec leurs fournisseurs.
@@ -1584,13 +1706,7 @@ function viewSettings() {
         La clé donne accès à tout ton Billit : tu peux la révoquer à tout moment dans Billit.</p>
     </div>
 
-    <div class="card"><h2>Code PIN</h2>
-      <p class="small muted">${state.settings.pin ? 'Un code PIN est demandé à l\'ouverture de l\'app et après 5 minutes en arrière-plan, sur tous tes appareils.'
-        : 'Aucun code PIN : l\'app s\'ouvre dès que tu es connecté à Microsoft 365.'}</p>
-      <div class="row"><button class="btn" id="pinSet">${state.settings.pin ? 'Changer le code PIN' : 'Définir un code PIN'}</button>
-        ${state.settings.pin ? '<button class="btn danger" id="pinDel">Supprimer le code PIN</button>' : ''}</div>
-    </div>
-
+    <h3 class="secth">Plateforme et données</h3>
     <div class="card"><h2>Serveur LevelDesk</h2><div id="srvCard"></div></div>
 
     <div class="card"><h2>Reprise des données</h2>
@@ -1608,6 +1724,8 @@ function viewSettings() {
 
   if (installPrompt) $('#install').onclick = async () => { installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; render(); };
   $('#addClient').onclick = () => editClient(null);
+  $$('[data-partner]').forEach(li => li.onclick = () => editPartner(li.dataset.partner));
+  if ($('#addrImport')) $('#addrImport').onclick = () => importAddresses().catch(e => alert('Adresses Billit : ' + e.message));
   $$('[data-client]').forEach(li => li.onclick = () => editClient(state.clients.find(c => c.id === li.dataset.client)));
   $$('[data-delclient]').forEach(b => b.onclick = () => deleteClient(state.clients.find(c => c.id === b.dataset.delclient)));
   $('#cSearch').oninput = ev => {
@@ -1631,10 +1749,11 @@ function viewSettings() {
   if ($('#odSync')) $('#odSync').onclick = () => { state.published = {}; sync(); };
   if ($('#odOut')) $('#odOut').onclick = () => { if (confirm('Se déconnecter ?\nLa copie locale de cet appareil est effacée ; tes données restent dans OneDrive.')) signOut(); };
   $$('input[name="bMode"]').forEach(x => x.onchange = async () => {
-    if (x.value === 'live' && !confirm('Passer en mode RÉEL ?\nLes factures seront créées dans ta vraie comptabilité Billit.')) { render(); return; }
+    if (x.value === 'live' && !confirm(`Passer en mode RÉEL ?\nLes factures seront créées dans ta vraie comptabilité ${Compta.label()}.`)) { render(); return; }
     s.billit.mode = x.value; await saveSettings(); render();
   });
-  $('#bRelay').onchange = async ev => {
+  if (srvOn()) bindComptaCard();
+  if ($('#bRelay')) $('#bRelay').onchange = async ev => {
     if (ev.target.checked && !confirm('Mettre les clés API Billit sur le serveur OVH ?\n\nLes clés enregistrées sur les appareils seront effacées (sur tous les appareils, à leur prochaine synchro).'
       + '\nSaisis ensuite chaque clé ici une seule fois : elle est enregistrée sur le serveur.')) { ev.target.checked = false; return; }
     if (!ev.target.checked && !confirm('Revenir aux clés API sur chaque appareil ?\nIl faudra ressaisir la clé sur chaque appareil (celles du serveur restent, efface-les au besoin avant).')) { ev.target.checked = true; return; }
@@ -1649,7 +1768,7 @@ function viewSettings() {
       : b.key ? `<span class="pill ok">✓ Sur le serveur${b.access === 'ro' ? ' (lecture seule)' : ''}</span> <span class="muted">${esc(frDate(String(b.at).slice(0, 10)))} · ${esc(b.by || '')}</span>`
       : '<span class="pill warn">Aucune clé sur le serveur</span>';
   };
-  if (s.billit.relay) Serveur.me()
+  if (s.billit.relay && !srvOn()) Serveur.me()
     .then(i => { if (!i.admin) throw new Error('réservé aux administrateurs'); ['test', 'live'].forEach(k => srvKeyState(k, i.billit[k])); })
     .catch(e => $$('[data-skst]').forEach(el => el.innerHTML = `<span class="pill warn">${esc(e.message)}</span>`));
   $$('[data-sk]').forEach(inp => inp.onchange = async () => {
@@ -1687,6 +1806,12 @@ function viewSettings() {
   $('#bTest').onclick = async () => {
     const out = $('#bTestRes'); out.textContent = 'Connexion…';
     try {
+      // Données sur le serveur : connecteur de la société (le PartyID est retrouvé ou choisi dans la carte ci-dessus).
+      if (srvOn()) {
+        const r = await Compta.test();
+        out.innerHTML = `<span class="pill ok">✓ Connecté (${esc(billitModeLabel(Compta.mode()))}) : ${esc(r.company || 'OK')} · PartyID ${esc(r.partyId)}</span>`;
+        return;
+      }
       const a = await Billit.account();
       const companies = a?.Companies || a?.companies || [];
       const k = s.billit[Billit.mode()];
@@ -1767,6 +1892,7 @@ function viewMySettings() {
   const i = state.srv?.me;
   $('#view').innerHTML = `
     ${installPrompt ? '<button class="btn primary big" id="install" style="margin-bottom:12px">Installer l\'application</button>' : ''}
+    <h3 class="secth">Mes réglages</h3>
     <div class="card"><h2>Mon compte</h2>
       <p class="small">${esc(me().name || '')} · ${esc(OneDrive.user())}${i?.societe ? ' · ' + esc(i.societe) : ''}</p>
       <p class="small" id="odStatus">${esc(statusText())}</p>
@@ -1845,16 +1971,18 @@ async function deleteClient(c) {
 // opts (création depuis un autre écran, ex. un article d'achat) : preset = valeurs proposées ({ name, domains }),
 // onSaved(client) / onCancel() = retour à cet écran au lieu de fermer la fenêtre.
 function editClient(c, opts = {}) {
-  const dlg = $('#dlg'), f = $('#dlgForm'), pre = opts.preset || {}, mode = Billit.mode();
-  // Lien Billit (choix dans la liste) : seulement si ce client n'est pas encore relié à un client Billit dans ce mode.
-  const askBillit = !c?.billitIds?.[mode];
+  const dlg = $('#dlg'), f = $('#dlgForm'), pre = opts.preset || {}, mode = Compta.mode(), soft = Compta.label();
+  // Lien avec le logiciel de facturation (choix dans la liste) : seulement si ce client n'y est pas encore relié dans ce mode.
+  const askBillit = !extId(c) && (!srvOn() || isAdmin());
   let billitId = null;
   f.innerHTML = `<h2>${c ? 'Modifier' : 'Nouveau'} client</h2>
-    ${askBillit ? `<label>Client Billit (${billitModeLabel(mode)})</label>
-      <select id="cBillitPick" disabled><option value="">Chargement des clients Billit…</option></select>
-      <p class="small muted" id="cBillitInfo" style="margin:4px 0 0">Clients Billit pas encore reliés à un client de l'app.</p>` : ''}
+    ${askBillit ? `<label>Client ${esc(soft)} (${billitModeLabel(mode)})</label>
+      <select id="cBillitPick" disabled><option value="">Chargement des clients ${esc(soft)}…</option></select>
+      <p class="small muted" id="cBillitInfo" style="margin:4px 0 0">Clients ${esc(soft)} pas encore reliés à un client de l'app.</p>` : ''}
     <label>Nom</label><input id="cName" value="${esc(c?.name ?? pre.name ?? '')}" placeholder="ex. Vedi">
-    <label>Nom du client dans Billit</label><input id="cBillit" value="${esc(c?.billitName)}" placeholder="ex. V.T.S. SA">
+    <label>Nom du client dans ${esc(soft)}</label><input id="cBillit" value="${esc(c?.billitName)}" placeholder="ex. V.T.S. SA">
+    <label>Adresse <span class="small">(lieu d'intervention, pour le bouton 🧭 Navigation)</span></label>
+    <input id="cAddr" value="${esc(c?.address ?? '')}" placeholder="ex. Rue de la Station 12, 7000 Mons" autocomplete="off">
     <label>Nom(s) de domaine <span class="small">(séparés par une virgule, sert à attribuer les achats OVH…)</span></label>
     <input id="cDomains" value="${esc((c?.domains || pre.domains || []).join(', '))}" placeholder="ex. vedi.be, vts-sa.com" autocapitalize="off">
     <label class="check"><input type="checkbox" id="cNear" ${c?.near ? 'checked' : ''}> Client proche (déplacement zone 1, dep-003)</label>
@@ -1879,23 +2007,24 @@ function editClient(c, opts = {}) {
   if (askBillit) (async () => {
     const sel = $('#cBillitPick'), info = $('#cBillitInfo');
     try {
-      if (!Billit.ready()) throw new Error('clé API Billit absente (Réglages) : nom Billit à saisir à la main.');
-      // Déjà reliés : ID mémorisé dans ce mode, ou même nom Billit qu'un client de l'app.
-      const used = new Set(state.clients.filter(x => !x.deleted && x !== c).flatMap(x => [x.billitIds?.[mode] && 'id:' + x.billitIds[mode], x.billitName && 'n:' + fold(x.billitName)]).filter(Boolean));
-      const free = (await Billit.customers()).filter(p => !used.has('id:' + p.PartyID) && !used.has('n:' + fold(Billit.partyName(p))))
-        .sort((a, b) => Billit.partyName(a).localeCompare(Billit.partyName(b)));
+      await Compta.loadConfig();
+      if (!Compta.ready()) throw new Error(`connecteur ${soft} non configuré (Réglages) : nom à saisir à la main.`);
+      // Déjà reliés : ID mémorisé dans ce mode, ou même nom qu'un client de l'app.
+      const used = new Set(state.clients.filter(x => !x.deleted && x !== c).flatMap(x => [extId(x) && 'id:' + extId(x), x.billitName && 'n:' + fold(x.billitName)]).filter(Boolean));
+      const free = (await Compta.clients()).filter(p => !used.has('id:' + p.id) && !used.has('n:' + fold(p.name))).sort((a, b) => a.name.localeCompare(b.name));
       if (!sel.isConnected) return;
-      sel.innerHTML = `<option value="">— aucun / saisie à la main —</option>` + free.map(p => `<option value="${esc(p.PartyID)}">${esc(Billit.partyName(p))}${p.VATNumber ? ' · ' + esc(p.VATNumber) : ''}</option>`).join('');
+      sel.innerHTML = `<option value="">— aucun / saisie à la main —</option>` + free.map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.vat ? ' · ' + esc(p.vat) : ''}</option>`).join('');
       sel.disabled = false;
-      info.textContent = `${free.length} client(s) Billit pas encore relié(s) à l'app.`;
+      info.textContent = `${free.length} client(s) ${soft} pas encore relié(s) à l'app.`;
       sel.onchange = () => {
-        const p = free.find(x => String(x.PartyID) === sel.value);
-        billitId = p ? p.PartyID : null;
+        const p = free.find(x => x.id === sel.value);
+        billitId = p ? p.id : null;
         if (!p) return;
-        $('#cBillit').value = Billit.partyName(p);
-        if (!$('#cName').value.trim()) $('#cName').value = p.CommercialName || Billit.partyName(p);
+        $('#cBillit').value = p.name;
+        if (!$('#cName').value.trim()) $('#cName').value = p.tradeName || p.name;
+        if (!$('#cAddr').value.trim()) $('#cAddr').value = p.address || '';
       };
-    } catch (e) { if (sel.isConnected) { sel.innerHTML = '<option value="">—</option>'; info.textContent = 'Liste Billit indisponible : ' + e.message; } }
+    } catch (e) { if (sel.isConnected) { sel.innerHTML = '<option value="">—</option>'; info.textContent = `Liste ${soft} indisponible : ` + e.message; } }
   })();
   $('#cSave').onclick = async ev => {
     ev.preventDefault();
@@ -1908,16 +2037,82 @@ function editClient(c, opts = {}) {
       .map(d => d.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '')).filter(d => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d)))];
     const taken = domains.map(d => [d, state.clients.find(x => x !== c && !x.deleted && (x.domains || []).includes(d))]).find(([, x]) => x);
     if (taken) return alert(`Le domaine ${taken[0]} est déjà attribué à ${taken[1].name}.`);
-    const data = { name, billitName: $('#cBillit').value.trim(), domains, near: $('#cNear').checked, societeId: $('#cSoc').value, defaultAlescom: $('#cSoc').value === 'alescom', archived: !!$('#cArch')?.checked,
+    const data = { name, billitName: $('#cBillit').value.trim(), address: $('#cAddr').value.trim().replace(/\s+/g, ' '), domains, near: $('#cNear').checked, societeId: $('#cSoc').value, defaultAlescom: $('#cSoc').value === 'alescom', archived: !!$('#cArch')?.checked,
       server, servers: server ? servers : 0, m365Enforce: server && $('#cM365').checked, esetCloud: server && $('#cEset').checked };
-    // Client Billit choisi dans la liste : lien mémorisé (comme au 1er envoi d'une facture), pas de recherche par le nom ensuite.
-    if (billitId) data.billitIds = { ...c?.billitIds, [mode]: billitId };
     let saved = c;
     if (c) Object.assign(touch(c), data); else state.clients.push(saved = touch({ id: uid('c'), ...data }));
+    // Client choisi dans la liste du logiciel : lien mémorisé (comme au 1er envoi d'une facture), pas de recherche par le nom ensuite.
+    if (billitId) setExt(saved, billitId);
     if (opts.onSaved) { await persist(); opts.onSaved(saved); return; }
     dlg.close(); await persist();
   };
   if (!dlg.open) dlg.showModal();
+}
+
+// ---------- adresses des clients et navigation ----------
+// Réglages → Clients → « 📍 Adresses » : adresses vides remplies depuis les clients du logiciel de facturation reliés (ID mémorisé, sinon même nom).
+// Adresse de livraison d'abord (lieu d'intervention), choisie par le connecteur. Rien n'est écrasé.
+async function importAddresses() {
+  await Compta.loadConfig();
+  const soft = Compta.label();
+  if (!Compta.ready()) throw new Error(`connecteur ${soft} non configuré (Réglages).`);
+  toast(`Lecture des clients ${soft}…`);
+  const parties = await Compta.clients();
+  const byId = new Map(parties.map(p => [p.id, p]));
+  const byName = new Map(parties.flatMap(p => [p.name, p.tradeName].filter(Boolean).map(n => [fold(n), p])));
+  const found = activeClients().filter(c => !c.address).map(c => {
+    const p = byId.get(String(extId(c) || '')) || byName.get(fold(c.billitName || '')) || byName.get(fold(c.name));
+    return [c, p?.address || ''];
+  }).filter(([, a]) => a);
+  const missing = activeClients().filter(c => !c.address && !found.some(([x]) => x === c));
+  if (!found.length) return alert(`Aucune adresse à reprendre.${missing.length ? `\n${missing.length} client(s) sans adresse : pas de client ${soft} relié, ou pas d'adresse dans ${soft}.` : ''}`);
+  if (!confirm(`${found.length} adresse(s) trouvée(s) dans ${soft} :\n\n${found.slice(0, 15).map(([c, a]) => `${c.name} : ${a}`).join('\n')}${found.length > 15 ? '\n…' : ''}`
+    + `${missing.length ? `\n\n${missing.length} client(s) resteront sans adresse (à saisir dans leur fiche).` : ''}\n\nEnregistrer ces adresses ?`)) return;
+  found.forEach(([c, a]) => { c.address = a; touch(c); });
+  await persist(); toast(`${found.length} adresse(s) enregistrée(s)`);
+}
+
+// Bouton « 🧭 Navigation » (page Aujourd'hui, téléphone seulement) : choix du client, puis Waze ou Google Maps vers son adresse.
+const PHONE = window.matchMedia('(max-width: 699px)');
+const navQ = a => a.replace(/\s+(bte|boîte|bus)\s+[^\s,]+/gi, '');   // la boîte aux lettres gêne la recherche de Waze / Maps
+const wazeUrl = a => 'https://waze.com/ul?navigate=yes&q=' + encodeURIComponent(navQ(a));
+const mapsUrl = a => 'https://www.google.com/maps/dir/?api=1&travelmode=driving&destination=' + encodeURIComponent(navQ(a));
+function openNav() {
+  const dlg = $('#dlg'), f = $('#dlgForm');
+  // Client du chrono et dernier client en tête de liste.
+  const first = [state.timer?.clientId, state.lastClientId].filter(Boolean);
+  const cs = activeClients().sort((a, b) => (first.includes(b.id) - first.includes(a.id)) || (!!b.address - !!a.address) || a.name.localeCompare(b.name));
+  f.innerHTML = `<h2>🧭 Navigation</h2>
+    <input type="search" id="nvQ" placeholder="Rechercher un client…" autocomplete="off">
+    <ul class="list" id="nvList" style="max-height:55vh;overflow:auto;margin-top:8px">${cs.map(c => `
+      <li class="tap" data-nv="${c.id}" data-name="${esc(fold(c.name + ' ' + (c.address || '')))}"><div class="grow"><strong>${esc(c.name)}</strong>
+        <div class="small ${c.address ? 'muted' : 'warnc'}">${c.address ? esc(c.address) : 'pas d\'adresse'}</div></div><span class="chev">›</span></li>`).join('')
+      || '<li class="small muted">Aucun client.</li>'}</ul>
+    <div class="actions"><button class="btn" value="cancel">Fermer</button></div>`;
+  $('#nvQ').oninput = ev => {
+    const q = fold(ev.target.value.trim());
+    $$('#nvList li[data-name]').forEach(li => li.classList.toggle('hidden', !!q && !li.dataset.name.includes(q)));
+  };
+  $$('[data-nv]').forEach(li => li.onclick = () => navTarget(state.clients.find(c => c.id === li.dataset.nv)));
+  if (!dlg.open) dlg.showModal();
+}
+function navTarget(c) {
+  const f = $('#dlgForm'), a = c.address || '';
+  f.innerHTML = `<h2>🧭 ${esc(c.name)}</h2>
+    ${a ? `<p style="font-size:16px;margin:4px 0 14px">${esc(a)}</p>
+      <div class="navgo"><a class="btn primary big" href="${esc(wazeUrl(a))}" target="_blank" rel="noopener">🚗 Waze</a>
+        <a class="btn big" href="${esc(mapsUrl(a))}" target="_blank" rel="noopener">🗺 Google Maps</a></div>`
+    : `<p class="muted">Pas d'adresse pour ce client.${isAdmin() ? '' : ' Demande à ton administrateur de l\'ajouter dans sa fiche.'}</p>`}
+    <div class="actions">
+      ${isAdmin() ? `<button class="btn" id="nvEdit" style="margin-right:auto">${a ? 'Modifier l\'adresse' : 'Ajouter l\'adresse'}</button>` : ''}
+      <button class="btn" id="nvBack">Retour</button><button class="btn" value="cancel">Fermer</button></div>`;
+  $('#nvBack').onclick = ev => { ev.preventDefault(); openNav(); };
+  if ($('#nvEdit')) $('#nvEdit').onclick = ev => {
+    ev.preventDefault();
+    editClient(c, { onSaved: x => navTarget(x), onCancel: () => navTarget(c) });
+  };
+  // Après le choix (ouverture de Waze / Maps), la fenêtre se ferme.
+  $$('.navgo a', f).forEach(x => x.addEventListener('click', () => setTimeout(() => $('#dlg').close(), 300)));
 }
 
 // Reprise d'anciennes données (ArchiveTemplate.xlsx = à facturer ; CSV Hours Tracker = au choix).
@@ -2113,11 +2308,13 @@ document.addEventListener('visibilitychange', () => {
   if (srvOn()) HOME = state.srv.me?.societeId || HOME;
   normalizeSettings();
   OneDrive.configure(() => state.onedrive);
-  // Réglages Billit synchronisés (mode, PartyID) + clés API de cet appareil.
+  // Réglages Billit synchronisés (mode, PartyID) + clés API de cet appareil. Données sur le serveur : appels bruts (outil de copie) par le relais.
   Billit.configure(() => {
     const b = state.settings.billit, k = state.billitKeys || {};
-    return { mode: b.mode, relay: !!b.relay, test: { ...b.test, apiKey: k.test || '' }, live: { ...b.live, apiKey: k.live || '' } };
+    return { mode: b.mode, relay: !!b.relay || srvOn(), test: { ...b.test, apiKey: k.test || '' }, live: { ...b.live, apiKey: k.live || '' } };
   }, (m, id) => { state.settings.billit[m].partyId = String(id); });
+  // Connecteur de facturation (compta.js) : celui de la société sur le serveur, sinon Billit depuis cet appareil.
+  Compta.configure(() => ({ srv: srvOn(), admin: srvOn() && isAdmin(), mode: state.settings.billit?.mode, partyId: state.settings.billit?.[state.settings.billit?.mode || 'test']?.partyId }));
   if (mergeRemoteClients()) await DB.save(state);
   let justLoggedIn = false;
   try { if ((justLoggedIn = await OneDrive.handleRedirect())) toast('Connecté'); }
