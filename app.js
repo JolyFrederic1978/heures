@@ -192,13 +192,37 @@ function groupInfo(key) {
   }
   const c = client(key.slice(2));
   // Client proche : le déplacement est facturé avec l'article zone 1 (dep-003).
-  const r = c.near ? { ...rates.client, dep: rates.zone1.dep, depLabel: rates.zone1.depLabel, depRef: rates.zone1.depRef } : rates.client;
+  const r = c.near ? { ...rates.client, dep: rates.zone1.dep, depLabel: rates.zone1.depLabel, depRef: rates.zone1.depRef } : { ...rates.client };
+  r.types = rateTypes();                                 // types d'intervention : seulement pour les clients (un partenaire a un seul tarif)
   return { key, label: c.name, billitName: c.billitName || c.name, rates: r, partner: false, near: !!c.near, due: 15 };
 }
+// Types d'intervention (Réglages → Tarifs clients ; demande de Fred, 01/11) : chacun son taux € / h et € / min et ses codes produits.
+// Sans type (ou type supprimé) = « Standard » = tarifs clients de base. Le déplacement est le même pour tous les types.
+// Noms dans settings.types (vus par les techniciens, qui choisissent le type) ; taux et codes dans settings.rates.typeRates (privés, comme les autres tarifs).
+const typesIn = s => (s?.types || []).filter(t => !t.deleted).map(t => ({ h: 0, m: 0, hRef: '', mRef: '', ...t, ...(s.rates?.typeRates?.[t.id] || {}) }));
+const rateTypes = () => typesIn(state.settings);
+const typeOf = id => id ? rateTypes().find(t => t.id === id) || null : null;
+// € / minute d'un type = € / heure au prorata (÷ 60), arrondi à 2 décimales (demande de Fred, 01/11 ; ex. 99 → 1,65).
+const perMin = h => Math.round(h / 60 * 100) / 100;
+const typeLabels = t => ({ hLabel: `Main d'œuvre ${t.name} heures (${t.hRef})`, mLabel: `Main d'œuvre ${t.name} minutes (${t.mRef})` });
+// rows : lignes de main d'œuvre (heures puis minutes, par type) { qty, unit, ref, label } ; h / m : totaux tous types.
 function totals(entries, r) {
   let h = 0, m = 0, dep = 0;
-  for (const e of entries) { h += Math.floor(e.minutes / 60); m += e.minutes % 60; dep += e.onSite ? 1 : 0; }
-  return { h, m, dep, amount: h * r.h + m * r.m + dep * r.dep, minutes: entries.reduce((s, e) => s + e.minutes, 0) };
+  const by = new Map();
+  for (const e of entries) {
+    const ty = (r.types || []).find(t => t.id === e.typeId) || null, k = ty?.id || '';
+    const g = by.get(k) || by.set(k, { ty, h: 0, m: 0 }).get(k);
+    g.h += Math.floor(e.minutes / 60); g.m += e.minutes % 60;
+    h += Math.floor(e.minutes / 60); m += e.minutes % 60; dep += e.onSite ? 1 : 0;
+  }
+  const rows = [];
+  for (const g of [...by.values()].sort((a, b) => !!a.ty - !!b.ty)) {
+    const x = g.ty ? { ...g.ty, ...typeLabels(g.ty) } : r;
+    if (g.h) rows.push({ qty: g.h, unit: +x.h, ref: x.hRef, label: x.hLabel });
+    if (g.m) rows.push({ qty: g.m, unit: +x.m, ref: x.mRef, label: x.mLabel });
+  }
+  const amount = rows.reduce((s, x) => s + x.qty * x.unit, 0) + dep * r.dep;
+  return { h, m, dep, rows, amount, minutes: entries.reduce((s, e) => s + e.minutes, 0) };
 }
 const entryAmount = e => totals([e], groupInfo(groupKey(e)).rates).amount;
 
@@ -272,8 +296,7 @@ function recapBillit(b) {
   const info = groupInfo(b.key), r = info.rates;
   const s = sortEntries(live().filter(e => e.billId === b.id)), t = totals(s, r), ach = Achats.ofBill(b.id);
   const lines = [`Client Billit : ${info.billitName}`, `Objet : ${billTitle(b)}`, ''];
-  if (t.h) lines.push(`${r.hLabel} : ${t.h} × ${eur(r.h)} = ${eur(t.h * r.h)}`);
-  if (t.m) lines.push(`${r.mLabel} : ${t.m} × ${eur(r.m)} = ${eur(t.m * r.m)}`);
+  t.rows.forEach(x => lines.push(`${x.label} : ${x.qty} × ${eur(x.unit)} = ${eur(x.qty * x.unit)}`));
   if (t.dep) lines.push(`${r.depLabel} : ${t.dep} × ${eur(r.dep)} = ${eur(t.dep * r.dep)}`);
   ach.forEach(x => lines.push(`${achLabel(x)} : ${x.qty} × ${eur(x.unit)} = ${eur(x.total)}`));
   const inst = s.filter(e => e.install);
@@ -414,7 +437,7 @@ const srvOn = () => !!state?.srv?.on;
 // Modules de la société (architecture.md, section 3) ; tous actifs avec les fichiers OneDrive.
 const mod = name => !srvOn() || !!state.srv.me?.modules?.[name];
 const MODULES = ['facturation', 'taches', 'forfaits', 'achats', 'soustraitance', 'dictee'];
-const MODULE_NAMES = { facturation: 'Facturation (Facturer, Archives, Billit)', taches: 'Tâches', forfaits: 'Forfaits serveur (maintenance, mises à jour)',
+const MODULE_NAMES = { facturation: 'Facturation (Facturer, Billit)', taches: 'Tâches', forfaits: 'Forfaits serveur (maintenance, mises à jour)',
   achats: 'Achats (refacturation, Articles)', soustraitance: 'Sous-traitance (commanditaires)', dictee: 'Dictée 🎤' };
 let srvChecked = false, srvFull = true;
 const omit = (o, ...keys) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !keys.includes(k)));
@@ -485,6 +508,9 @@ async function srvSync() {
       (seen[r.t] ||= new Set()).add(r.id);
       const ack = S.ack[r.t] ||= {};
       const x = singles[r.t];
+      // Réglages d'une autre société que la mienne : jamais pris pour les miens (bogue du 01/11 : les tarifs d'Alescom remplaçaient ceux de One Level UP).
+      // Le serveur (version 9) ne les envoie plus ; ignorés ici aussi, pour un serveur plus ancien.
+      if (r.t === 'settings' && x && r.id !== x.id) return;
       if (x) {
         const cur = { id: x.id, ...x.get() };
         if (!force && x.write && ack[x.id] !== fp(cur) && x.at > r.updatedAt) { ack[x.id] ??= 'en attente'; return; }
@@ -574,9 +600,9 @@ async function migrateToServer(replace) {
 }
 
 // ---------- rendu ----------
-const TITLES = { today: "Aujourd'hui", taches: 'Tâches', list: 'Interventions', billing: 'Facturer', archive: 'Archives', achats: 'Achats', articles: 'Articles', admin: 'Administration', settings: 'Réglages' };
+const TITLES = { today: "Aujourd'hui", taches: 'Tâches', list: 'Interventions', billing: 'Facturer', achats: 'Achats', articles: 'Articles', admin: 'Administration', settings: 'Réglages' };
 // Achats et Articles (achats.js), Tâches (taches.js) : modules séparés, avec leurs propres données et leur propre synchro.
-const VIEWS = () => ({ today: viewToday, taches: Taches.view, list: viewList, billing: viewBilling, archive: viewArchive, achats: Achats.view, articles: Achats.articles, admin: viewAdmin, settings: viewSettings });
+const VIEWS = () => ({ today: viewToday, taches: Taches.view, list: viewList, billing: viewBilling, achats: Achats.view, articles: Achats.articles, admin: viewAdmin, settings: viewSettings });
 // Bandeau de la version de développement, avec le dossier de données utilisé (en rouge s'il ne s'agit pas d'un dossier -DEV).
 function envBar() {
   if (ENV === 'prod') return;
@@ -592,7 +618,7 @@ function envBar() {
 
 const TAB_RULES = {
   taches: () => mod('taches'),
-  billing: () => isAdmin() && mod('facturation'), archive: () => isAdmin() && mod('facturation'),
+  billing: () => isAdmin() && mod('facturation'),
   achats: () => isAdmin() && mod('achats'), articles: () => isAdmin() && mod('achats'),
   admin: () => isAdmin()
 };
@@ -610,7 +636,8 @@ function render() {
   if (gate) { if ($('#dlg').open) $('#dlg').close(); $('#viewTitle').textContent = 'LevelDesk'; return gate === 'login' ? viewLogin() : gate === 'pin' ? viewPin() : viewDenied(); }
   // Onglets selon le rôle (prix et facturation : administrateurs) et les modules de la société.
   $$('.tabs button[data-tab]').forEach(b => b.classList.toggle('hidden', !tabAllowed(b.dataset.tab)));
-  if (!tabAllowed(tab)) tab = 'today';
+  if (tab === 'archive') { tab = 'list'; listStatus = 'billed'; }      // ancien onglet Archives, fusionné dans Interventions (01/11)
+  if (!tabAllowed(tab) || !VIEWS()[tab]) tab = 'today';
   $('#viewTitle').textContent = TITLES[tab];
   $$('.tabs button[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   $('#tabMore').classList.toggle('active', !!$(`.tabs .sec[data-tab="${tab}"]`));   // onglet secondaire ouvert : « Plus » allumé
@@ -625,6 +652,7 @@ function entryLi(e, { showDate = false, showBill = true } = {}) {
         ${cmdOf(e) !== HOME ? `<span class="pill warn">${esc(soc(cmdOf(e)).name)}</span>` : ''}
         ${techOf(e) !== me().id ? `<span class="pill">👤 ${esc(user(techOf(e)).name)}</span>` : ''}
         ${e.taskId ? '<span class="pill" title="Faite pour une tâche">📋</span>' : ''}
+        ${typeOf(e.typeId) ? `<span class="pill">${esc(typeOf(e.typeId).name)}</span>` : ''}
         ${showBill && b ? `<span class="pill ok">facturé ${frDate(b.date)}${b.ref ? ' · ' + esc(b.ref) : ''}</span>` : ''}
         ${showBill && !b && e.locked && !isAdmin() ? '<span class="pill ok">facturée</span>' : ''}</div>
       <div class="small muted">${showDate ? frDate(e.date) + ' · ' : ''}${e.forfait || !e.start ? 'forfait' : `${esc(e.start)}–${esc(e.end)}`}${e.pauseMin ? ` · pause ${fmtDur(e.pauseMin)}` : ''}${e.install ? ' · ' + esc(e.install) : ''}</div>
@@ -633,10 +661,11 @@ function entryLi(e, { showDate = false, showBill = true } = {}) {
     <div class="dur">${fmtDur(e.minutes)}</div></li>`;
 }
 function bindEdits(root = document) {
-  // Facturée par une société (serveur : « locked ») : son technicien ne peut plus la modifier, elle s'ouvre en lecture seule.
+  // Facturée (par ta société : billId ; par une société au moins, serveur : « locked ») : lecture seule pour tout le monde, administrateur compris (demande de Fred, 01/11).
+  // Pour corriger : « Voir la facture » → « Annuler la facturation ».
   $$('[data-edit]', root).forEach(li => li.onclick = () => {
     const e = state.entries.find(x => x.id === li.dataset.edit);
-    e?.locked && !isAdmin() ? viewArchivedEntry(e) : openEntry(e);
+    e && (e.billId || e.locked) ? viewArchivedEntry(e) : openEntry(e);
   });
 }
 // Le client choisi reste dans la liste même s'il est archivé ou supprimé : sinon le menu prendrait un autre client à l'enregistrement.
@@ -654,9 +683,18 @@ const flags = (x, p) => `
   <div class="grid2">
     <div class="${mod('soustraitance') ? '' : 'hidden'}"><label>Commanditaire</label><select id="${p}Cmd" disabled title="Société du client (fiche client)">${socOptions(cmdOf(x))}</select></div>
     <div><label>Technicien</label><input id="${p}Tech" data-id="${esc(techOf(x))}" value="${esc(userLabel(user(techOf(x))))}" disabled></div>
-  </div>`;
-const readWho = p => { const cmdId = $(`#${p}Cmd`).value; return { cmdId, techId: $(`#${p}Tech`).dataset.id, alescom: cmdId === 'alescom' }; };
-const newWho = c => ({ cmdId: clientSoc(c), techId: me().id, alescom: clientSoc(c) === 'alescom' });
+  </div>
+  ${typeField(x.typeId, p)}`;
+// Type d'intervention (taux horaire et codes produits, Réglages → Tarifs clients) : seulement si la société en a créé ; prérempli avec celui du client.
+const typeField = (sel, p) => {
+  const ts = rateTypes(), cur = sel && !ts.some(t => t.id === sel) ? [{ id: sel, name: '(type supprimé)' }] : [];
+  return ts.length ? `<label>Type d'intervention</label><select id="${p}Type"><option value="">Standard</option>
+    ${[...cur, ...ts].map(t => `<option value="${esc(t.id)}" ${t.id === sel ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>` : '';
+};
+const readWho = p => { const cmdId = $(`#${p}Cmd`).value; return { cmdId, techId: $(`#${p}Tech`).dataset.id, alescom: cmdId === 'alescom', typeId: $(`#${p}Type`)?.value || '' }; };
+const newWho = c => ({ cmdId: clientSoc(c), techId: me().id, alescom: clientSoc(c) === 'alescom', typeId: c?.typeId || '' });
+// Client changé dans un formulaire : commanditaire et type d'intervention suivent sa fiche.
+const followClient = (p, c) => { $(`#${p}Cmd`).value = clientSoc(c); if ($(`#${p}Type`)) $(`#${p}Type`).value = typeOf(c.typeId) ? c.typeId : ''; };
 
 // Heure de début ramenée à aujourd'hui (ou hier si elle est dans le futur).
 function startFromTime(hm) {
@@ -783,7 +821,8 @@ function viewToday() {
       ${seesMoney() ? `<div class="tap money" id="goBill"><b>${eur(toBill)}</b><span>à facturer ›</span></div>`
         : `<div><b>${todays.length}</b><span>intervention(s)</span></div>`}
     </div>
-    <div class="card"><h2>Aujourd'hui <span class="tot">${fmtDur(sum(todays))}</span></h2>${dayList}</div>
+    ${mod('taches') ? '<div class="card"><h2>Tâches du jour et en retard</h2><div id="tkDay"></div></div>'     // téléphone : les tâches plutôt que les interventions (demande de Fred, 01/11 ; interventions : onglet Interventions)
+      : `<div class="card"><h2>Aujourd'hui <span class="tot">${fmtDur(sum(todays))}</span></h2>${dayList}</div>`}
     ${PHONE.matches ? '<button class="btn big navbtn" id="goNav">🧭 Navigation</button>' : ''}`;
 
   $('#addManual').onclick = () => openEntry(null);
@@ -815,6 +854,7 @@ function viewToday() {
     };
     $('#tDesc').onchange = ev => { t.description = ev.target.value; save(); };
     $('#tSite').onchange = ev => { t.onSite = ev.target.checked; save(); };
+    if ($('#tType')) $('#tType').onchange = ev => { t.typeId = ev.target.value; save(); };
     $('#tPause').onclick = async () => {
       t.description = $('#tDesc').value;
       if (t.pausedAt) { t.pausedMs = (t.pausedMs || 0) + (Date.now() - new Date(t.pausedAt)); t.pausedAt = null; }
@@ -829,11 +869,11 @@ function viewToday() {
       openEntry(null, {
         clientId: t.clientId, date: isoDate(start), start: hhmm(start), end: hhmm(end), pauseMin,
         minutes: Math.max(1, Math.round(timerElapsed(t) / 60000)), description: t.description,
-        onSite: t.onSite, cmdId: cmdOf(t), techId: techOf(t), alescom: cmdOf(t) === 'alescom', ...(t.taskId ? { taskId: t.taskId } : {})
+        onSite: t.onSite, cmdId: cmdOf(t), techId: techOf(t), alescom: cmdOf(t) === 'alescom', typeId: t.typeId || '', ...(t.taskId ? { taskId: t.taskId } : {})
       }, true);
     };
   } else if ($('#tStart')) {
-    $('#tClient').onchange = ev => { $('#tCmd').value = clientSoc(client(ev.target.value)); };
+    $('#tClient').onchange = ev => followClient('t', client(ev.target.value));
     $('#tStart').onclick = async () => {
       const at = $('#tAt').value;
       const start = at ? startFromTime(at) : new Date();
@@ -913,7 +953,7 @@ function openEntry(entry, preset = {}, fromTimer = false, onSaved = null, draft 
         install: $('#fInst').value, flat: flat() };
       const back = x => openEntry(entry, preset, fromTimer, onSaved, x);
       editClient(null, { onSaved: c => back({ ...d, clientId: c.id, ...(entry ? {} : { cmdId: clientSoc(c), alescom: clientSoc(c) === 'alescom' }) }), onCancel: () => back(d) });
-    } else $('#fCmd').value = clientSoc(client(ev.target.value));
+    } else followClient('f', client(ev.target.value));
   };
   if ($('#fDel')) $('#fDel').onclick = async () => {
     if (!confirm('Supprimer cette intervention ?')) return;
@@ -992,7 +1032,7 @@ function openForfait(entry, kind, pre = {}) {
     const c = client(ev.target.value);
     $('#kHint').textContent = hint(c);
     if (kind === 'update') $('#kDur').value = fmtDur(updateMinutes(c));
-    $('#kCmd').value = clientSoc(c);
+    followClient('k', c);
   };
   if ($('#kDel')) $('#kDel').onclick = async () => {
     if (!confirm('Supprimer cette intervention ?')) return;
@@ -1019,28 +1059,46 @@ function openForfait(entry, kind, pre = {}) {
 
 // ---- Interventions ----
 let listMonth = today().slice(0, 7), listClient = '', listStatus = '';
+// Interventions, à facturer et facturées (l'ancien onglet Archives y est fusionné depuis le 01/11 : recherche, commanditaire, statut « Facturées »).
+// Une intervention facturée s'ouvre en lecture seule (bindEdits).
+let listQuery = '', listCmd = '';
+const LIST_MAX = 300;
 function viewList() {
+  const q = listQuery.toLowerCase();
+  const text = e => { const b = e.billId && bill(e.billId); return [client(e.clientId).name, e.description, e.install, b?.ref, b?.label].join(' ').toLowerCase(); };
   const es = sortEntries(live().filter(e => (!listMonth || e.date.startsWith(listMonth)) && (!listClient || e.clientId === listClient)
-    && (!listStatus || (listStatus === 'open') === !e.billId))).reverse();
-  const days = [...new Set(es.map(e => e.date))];
+    && (!listStatus || (listStatus === 'open') === !e.billId) && (!listCmd || cmdOf(e) === listCmd) && (!q || text(e).includes(q)))).reverse();
+  const shown = es.slice(0, LIST_MAX);
+  const days = [...new Set(shown.map(e => e.date))];
   const months = [...new Set([today().slice(0, 7), ...live().map(e => e.date.slice(0, 7))])].sort().reverse();
   const monthLabel = m => new Date(m + '-01T00:00').toLocaleDateString('fr-BE', { month: 'long', year: 'numeric' });
+  const cmds = [...new Set(live().map(cmdOf))].map(soc).sort((a, b) => (b.id === HOME) - (a.id === HOME) || a.name.localeCompare(b.name));
   $('#view').innerHTML = `
-    <div class="card"><div class="grid3">
+    <div class="card">
+      <label style="margin-top:0">Rechercher</label><input type="search" id="hQ" value="${esc(listQuery)}" placeholder="description, client, n° facture…">
+      <div class="grid3">
       <div><label>Mois</label><select id="hMonth"><option value="">Tous</option>
         ${months.map(m => `<option value="${m}" ${m === listMonth ? 'selected' : ''}>${monthLabel(m)}</option>`).join('')}</select></div>
       <div><label>Client</label><select id="hClient"><option value="">Tous</option>${clientOptions(listClient)}</select></div>
       <div><label>Statut</label><select id="hStatus"><option value="">Toutes</option>
         <option value="open" ${listStatus === 'open' ? 'selected' : ''}>À facturer</option>
         <option value="billed" ${listStatus === 'billed' ? 'selected' : ''}>Facturées</option></select></div>
+      ${cmds.length > 1 ? `<div><label>Commanditaire</label><select id="hCmd"><option value="">Tous</option>${cmds.map(s => `<option value="${s.id}" ${s.id === listCmd ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></div>` : ''}
     </div>
-    <p class="small muted" style="margin:10px 0 0">${es.length} intervention(s) · <strong>${fmtDur(es.reduce((s, e) => s + e.minutes, 0))}</strong></p></div>
+    <p class="small muted" style="margin:10px 0 0">${es.length} intervention(s) · <strong>${fmtDur(es.reduce((s, e) => s + e.minutes, 0))}</strong>
+      ${es.length > LIST_MAX ? ` · ${LIST_MAX} plus récentes affichées, affine la recherche` : ''}${q && listMonth ? ' · recherche dans le mois choisi (Mois : Tous pour tout chercher)' : ''}</p></div>
     ${days.length ? days.map(d => `<div class="day">${longDate(d)}</div>
-      <div class="card" style="padding:4px 14px"><ul class="list">${es.filter(e => e.date === d).map(e => entryLi(e)).join('')}</ul></div>`).join('')
+      <div class="card" style="padding:4px 14px"><ul class="list">${shown.filter(e => e.date === d).map(e => entryLi(e)).join('')}</ul></div>`).join('')
       : '<div class="empty">Aucune intervention.</div>'}`;
+  const qi = $('#hQ');
+  qi.oninput = () => {
+    listQuery = qi.value; clearTimeout(viewList.t);
+    viewList.t = setTimeout(() => { render(); const n = $('#hQ'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 250);
+  };
   $('#hMonth').onchange = e => { listMonth = e.target.value; render(); };
   $('#hClient').onchange = e => { listClient = e.target.value; render(); };
   $('#hStatus').onchange = e => { listStatus = e.target.value; render(); };
+  if ($('#hCmd')) $('#hCmd').onchange = e => { listCmd = e.target.value; render(); };
   bindEdits();
 }
 
@@ -1097,8 +1155,8 @@ function viewBilling() {
 function totalsTable(t, r, ach = []) {
   const interv = t.h || t.m || t.dep || !ach.length;
   return `<table class="tot">
-    ${interv ? `<tr><td>${esc(r.hLabel)}<br><span class="small muted">${t.h} × ${eur(r.h)}</span></td><td>${eur(t.h * r.h)}</td></tr>
-    <tr><td>${esc(r.mLabel)}<br><span class="small muted">${t.m} × ${eur(r.m)}</span></td><td>${eur(t.m * r.m)}</td></tr>
+    ${interv ? `${(t.rows.length ? t.rows : [{ qty: 0, unit: r.h, label: r.hLabel }, { qty: 0, unit: r.m, label: r.mLabel }])
+      .map(x => `<tr><td>${esc(x.label)}<br><span class="small muted">${x.qty} × ${eur(x.unit)}</span></td><td>${eur(x.qty * x.unit)}</td></tr>`).join('')}
     <tr><td>${esc(r.depLabel)}<br><span class="small muted">${t.dep} × ${eur(r.dep)}</span></td><td>${eur(t.dep * r.dep)}</td></tr>` : ''}
     ${ach.map(x => `<tr><td>${esc(achLabel(x))}<br><span class="small muted">${x.qty} × ${eur(x.unit)}${x.from ? ` · du ${frDate(x.from)} au ${frDate(x.to)}` : ''}</span></td><td>${eur(x.total)}</td></tr>`).join('')}
     <tr class="sum"><td>Total HTVA</td><td>${eur(t.amount + achSum(ach))}</td></tr>
@@ -1368,8 +1426,7 @@ function billitLines(b, info, products) {
     return { qty, ref, description: p?.name || label, price: p?.price ?? price, vat: p?.vat ?? 21, articleId: p?.id || '' };
   };
   const lines = [];
-  if (t.h) lines.push(line(t.h, r.hRef, r.hLabel, r.h));
-  if (t.m) lines.push(line(t.m, r.mRef, r.mLabel, r.m));
+  t.rows.forEach(x => lines.push(line(x.qty, x.ref, x.label, x.unit)));     // heures et minutes, par type d'intervention
   if (t.dep) lines.push(line(t.dep, r.depRef, r.depLabel, r.dep));
   // Achats refacturés : prix calculé par le module Achats (achat + marge).
   const ach = Achats.orderLines(b.id, products);
@@ -1428,53 +1485,13 @@ async function sendToBillit(b) {
   }
 }
 
-// ---- Archives : anciennes interventions (déjà facturées) ----
-let archQuery = '', archYear = today().slice(0, 4), archClient = '', archCmd = '';
-const ARCH_MAX = 300;
-function viewArchive() {
-  const q = archQuery.toLowerCase();
-  const billed = live().filter(e => e.billId && bill(e.billId));
-  const years = [...new Set([today().slice(0, 4), ...billed.map(e => e.date.slice(0, 4))])].sort().reverse();
-  const text = e => { const b = bill(e.billId); return [client(e.clientId).name, e.description, e.install, b.ref, b.label].join(' ').toLowerCase(); };
-  const es = sortEntries(billed.filter(e => (!archYear || e.date.startsWith(archYear)) && (!archClient || e.clientId === archClient)
-    && (!archCmd || cmdOf(e) === archCmd) && (!q || text(e).includes(q)))).reverse();
-  const cmds = [...new Set(billed.map(cmdOf))].map(soc).sort((a, b) => (b.id === HOME) - (a.id === HOME) || a.name.localeCompare(b.name));
-  const shown = es.slice(0, ARCH_MAX);
-  const days = [...new Set(shown.map(e => e.date))];
-
-  $('#view').innerHTML = `
-    <div class="card">
-      <label style="margin-top:0">Rechercher</label><input type="search" id="aQ" value="${esc(archQuery)}" placeholder="description, client, n° facture…">
-      <div class="grid3">
-        <div><label>Année</label><select id="aYear"><option value="">Toutes</option>${years.map(y => `<option ${y === archYear ? 'selected' : ''}>${y}</option>`).join('')}</select></div>
-        <div><label>Client</label><select id="aClient"><option value="">Tous</option>${clientOptions(archClient)}</select></div>
-        <div><label>Commanditaire</label><select id="aCmd"><option value="">Tous</option>${cmds.map(s => `<option value="${s.id}" ${s.id === archCmd ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></div>
-      </div>
-      <p class="small muted" style="margin:10px 0 0">${es.length} intervention(s) archivée(s) · <strong>${fmtDur(es.reduce((s, e) => s + e.minutes, 0))}</strong>
-        ${es.length > ARCH_MAX ? ` · ${ARCH_MAX} plus récentes affichées, affine la recherche` : ''}</p>
-    </div>
-    ${days.length ? days.map(d => `<div class="day">${longDate(d)}</div>
-      <div class="card" style="padding:4px 14px"><ul class="list">${shown.filter(e => e.date === d).map(e => entryLi(e)).join('')}</ul></div>`).join('')
-      : '<div class="empty">Aucune intervention archivée.</div>'}`;
-  const qi = $('#aQ');
-  qi.oninput = () => {
-    archQuery = qi.value; clearTimeout(viewArchive.t);
-    viewArchive.t = setTimeout(() => { render(); const n = $('#aQ'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 250);
-  };
-  $('#aYear').onchange = e => { archYear = e.target.value; render(); };
-  $('#aClient').onchange = e => { archClient = e.target.value; render(); };
-  $('#aCmd').onchange = e => { archCmd = e.target.value; render(); };
-  // Archives : consultation seulement (pas de modification d'une intervention facturée).
-  $$('[data-edit]').forEach(li => li.onclick = () => viewArchivedEntry(state.entries.find(e => e.id === li.dataset.edit)));
-}
-
 // Intervention archivée en lecture seule, pour tous les types (chrono, saisie, forfait serveur), avec accès à sa facture.
 function viewArchivedEntry(e) {
   const b = e.billId && bill(e.billId);
   const dlg = $('#dlg'), f = $('#dlgForm');
   const row = (k, v) => v ? `<tr><td class="muted">${k}</td><td>${v}</td></tr>` : '';
   const flat = e.forfait || !e.start;
-  f.innerHTML = `<h2>Intervention archivée</h2>
+  f.innerHTML = `<h2>Intervention facturée</h2>
     ${b ? `<p class="small"><span class="pill ok">facturée le ${frDate(b.date)}${b.ref ? ' · ' + esc(b.ref) : ''}</span></p>` : ''}
     <table class="tot ro">
       ${row('Client', esc(client(e.clientId).name))}
@@ -1483,6 +1500,7 @@ function viewArchivedEntry(e) {
       ${row('Pause', !flat && e.pauseMin ? fmtDur(e.pauseMin) : '')}
       ${row('Durée facturée', `<strong>${fmtDur(e.minutes)}</strong>`)}
       ${row('Lieu', e.onSite ? 'sur site' : 'à distance')}
+      ${row('Type', e.typeId ? esc(typeOf(e.typeId)?.name || '(type supprimé)') : '')}
       ${row('Commanditaire', esc(soc(cmdOf(e)).name))}
       ${row('Technicien', esc(userLabel(user(techOf(e)))))}
       ${row('Description', esc(e.description).replace(/\n/g, '<br>'))}
@@ -1654,11 +1672,59 @@ function editUser(u) {
   if (!dlg.open) dlg.showModal();
 }
 
+// Fiche d'un type d'intervention de ma société. Supprimé = « douce » : les interventions déjà saisies repassent au standard.
+function editType(id) {
+  const S = state.settings;
+  const t = id ? typesIn(S).find(x => x.id === id) : null, r = S.rates.client;
+  const dlg = $('#dlg'), f = $('#dlgForm');
+  f.innerHTML = `<h2>${t ? 'Type d\'intervention' : 'Nouveau type d\'intervention'}</h2>
+    <label>Nom (vu par les techniciens)</label><input id="yName" value="${esc(t?.name || '')}" placeholder="ex. Urgence, Développement, Formation">
+    <div class="grid2">
+      <div><label>€ / heure</label><input type="number" step="0.01" id="yH" value="${t?.h ?? r.h}"></div>
+      <div><label>Code produit des heures</label><input id="yHRef" value="${esc(t?.hRef || '')}" autocapitalize="off" placeholder="ex. mai-005"></div>
+      <div><label>€ / minute (= € / heure ÷ 60)</label><input type="number" step="0.01" id="yM" value="${perMin(t?.h ?? r.h)}" disabled></div>
+      <div><label>Code produit des minutes</label><input id="yMRef" value="${esc(t?.mRef || '')}" autocapitalize="off" placeholder="ex. mai-006"></div>
+    </div>
+    <p class="small muted">Les codes sont ceux des articles du logiciel de facturation (Billit) : le prix de l'article y fait foi à l'envoi de la facture, comme pour le standard.</p>
+    <div class="actions">${t ? '<button class="btn danger" id="yDel">Supprimer</button>' : ''}<span class="grow"></span>
+      <button class="btn" id="yCancel">Annuler</button><button class="btn primary" id="yOk">Enregistrer</button></div>`;
+  const done = async () => {
+    state.settingsAt = Date.now();
+    dlg.close(); await DB.save(state); scheduleSync(); toast('Enregistré'); render();
+  };
+  $('#yH').oninput = () => { const h = parseFloat($('#yH').value); $('#yM').value = isNaN(h) ? '' : perMin(h); };
+  $('#yCancel').onclick = ev => { ev.preventDefault(); dlg.close(); };
+  if ($('#yDel')) $('#yDel').onclick = async ev => {
+    ev.preventDefault();
+    const n = state.clients.filter(c => !c.deleted && c.typeId === id).length;
+    if (!confirm(`Supprimer le type « ${t.name} » ?${n ? `\n${n} client(s) repasseront au type standard.` : ''}\nLes interventions de ce type pas encore facturées seront facturées au tarif standard.`)) return;
+    S.types.find(x => x.id === id).deleted = true;
+    state.clients.forEach(c => { if (!c.deleted && c.typeId === id) { c.typeId = ''; touch(c); } });
+    await done();
+  };
+  $('#yOk').onclick = async ev => {
+    ev.preventDefault();
+    const name = $('#yName').value.trim(), h = parseFloat($('#yH').value), m = perMin(h);
+    const hRef = $('#yHRef').value.trim().toLowerCase(), mRef = $('#yMRef').value.trim().toLowerCase();
+    if (!name) return alert('Donne un nom au type.');
+    if (isNaN(h) || isNaN(m) || h < 0 || m < 0) return alert('Taux invalides.');
+    if (!hRef || !mRef) return alert('Indique les codes produits des heures et des minutes.');
+    if (typesIn(S).some(x => x.id !== id && fold(x.name) === fold(name))) return alert('Un type porte déjà ce nom.');
+    const tid = id || uid('ty');
+    S.types ||= [];
+    const o = S.types.find(x => x.id === tid);
+    if (o) o.name = name; else S.types.push({ id: tid, name });
+    (S.rates.typeRates ||= {})[tid] = { h, m, hRef, mRef };
+    await done();
+  };
+  if (!dlg.open) dlg.showModal();
+}
+
 // ---- Réglages ----
 function viewSettings() {
   if (!isAdmin()) return viewMySettings();
   const od = state.onedrive, s = state.settings, r = s.rates;
-  const rateBlock = (k, title) => `<h2>${title}</h2><div class="grid3">
+  const rateBlock = (k, title, extra = '') => `<h2>${title}</h2>${extra}<div class="grid3">
       <div><label>€ / heure</label><input type="number" step="0.01" data-rate="${k}.h" value="${r[k].h}"></div>
       <div><label>€ / minute</label><input type="number" step="0.01" data-rate="${k}.m" value="${r[k].m}"></div>
       <div><label>€ déplacement</label><input type="number" step="0.01" data-rate="${k}.dep" value="${r[k].dep}"></div></div>`;
@@ -1677,10 +1743,16 @@ function viewSettings() {
           <button class="btn danger chip" data-delclient="${c.id}" title="Supprimer">🗑</button></li>`).join('')}</ul>
     </div>
 
-    <div class="card">${rateBlock('client', 'Tarifs clients')}
+    <div class="card">${rateBlock('client', 'Tarifs clients', `<p class="small muted" style="margin:0 0 6px">Tarifs de ${esc(soc(HOME).name)} pour ses clients : propres à ta société, invisibles pour les autres.</p>`)}
       <div class="grid2" style="margin-top:4px">
         <div><label>€ déplacement client proche (dep-003)</label><input type="number" step="0.01" data-rate="zone1.dep" value="${r.zone1.dep}"></div>
       </div>
+      <div class="row" style="margin-top:14px"><h3 class="grow" style="margin:0">Types d'intervention</h3><button class="btn chip" id="addType">+ Type</button></div>
+      <p class="small muted" style="margin:4px 0 6px">Taux horaire et codes produits propres à un type (ex. urgence, développement). Choisi sur chaque intervention,
+        prérempli avec le type du client (fiche client). Sans type : « Standard » = tarifs ci-dessus. Le déplacement ne change pas.</p>
+      <ul class="list">${typesIn(s).map(t => `<li class="tap" data-type="${esc(t.id)}"><div class="grow"><strong>${esc(t.name)}</strong>
+        <div class="small muted">${eur(t.h)} / h (${esc(t.hRef || '—')}) · ${eur(t.m)} / min (${esc(t.mRef || '—')}) · ${state.clients.filter(c => !c.deleted && c.typeId === t.id).length} client(s)</div></div>
+        <span class="chev">›</span></li>`).join('') || '<li class="small muted">Aucun type : toutes les interventions au tarif standard.</li>'}</ul>
     </div>
     ${mod('soustraitance') ? `<div class="card"><h2>Partenaires (commanditaires)</h2>
       <p class="small muted" style="margin-top:0">Sociétés pour qui tes techniciens interviennent : tu leur factures ce travail avec ces tarifs.
@@ -1780,8 +1852,11 @@ function viewSettings() {
   const saveSettings = async () => { state.settingsAt = Date.now(); await DB.save(state); scheduleSync(); toast('Enregistré'); };
   $$('[data-rate]').forEach(inp => inp.onchange = () => {
     const [k, fld] = inp.dataset.rate.split('.'); const v = parseFloat(inp.value);
-    if (!isNaN(v)) { r[k][fld] = v; saveSettings(); }
+    if (isNaN(v)) return;
+    r[k][fld] = v; saveSettings();
   });
+  $('#addType').onclick = () => editType(null);
+  $$('[data-type]').forEach(li => li.onclick = () => editType(li.dataset.type));
 
   const saveOd = async () => {
     Object.assign(od, { clientId: $('#odClient').value.trim(), tenant: $('#odTenant').value.trim() || 'organizations',
@@ -2031,6 +2106,7 @@ function editClient(c, opts = {}) {
     <label>Nom(s) de domaine <span class="small">(séparés par une virgule, sert à attribuer les achats OVH…)</span></label>
     <input id="cDomains" value="${esc((c?.domains || pre.domains || []).join(', '))}" placeholder="ex. vedi.be, vts-sa.com" autocapitalize="off">
     <label class="check"><input type="checkbox" id="cNear" ${c?.near ? 'checked' : ''}> Client proche (déplacement zone 1, dep-003)</label>
+    ${rateTypes().length ? typeField(c?.typeId || '', 'c').replace("Type d'intervention", "Type d'intervention par défaut (modifiable sur chaque intervention)") : ''}
     <label>Société du client (commanditaire proposé par défaut)</label><select id="cSoc">${socOptions(c ? clientSoc(c) : HOME)}</select>
     <div class="row">
       <label class="check grow"><input type="checkbox" id="cServer" ${c?.server ? 'checked' : ''}> Serveur(s)</label>
@@ -2082,7 +2158,7 @@ function editClient(c, opts = {}) {
       .map(d => d.replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '')).filter(d => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d)))];
     const taken = domains.map(d => [d, state.clients.find(x => x !== c && !x.deleted && (x.domains || []).includes(d))]).find(([, x]) => x);
     if (taken) return alert(`Le domaine ${taken[0]} est déjà attribué à ${taken[1].name}.`);
-    const data = { name, billitName: $('#cBillit').value.trim(), address: $('#cAddr').value.trim().replace(/\s+/g, ' '), domains, near: $('#cNear').checked, societeId: $('#cSoc').value, defaultAlescom: $('#cSoc').value === 'alescom', archived: !!$('#cArch')?.checked,
+    const data = { name, billitName: $('#cBillit').value.trim(), address: $('#cAddr').value.trim().replace(/\s+/g, ' '), domains, near: $('#cNear').checked, ...($('#cType') ? { typeId: $('#cType').value } : {}), societeId: $('#cSoc').value, defaultAlescom: $('#cSoc').value === 'alescom', archived: !!$('#cArch')?.checked,
       server, servers: server ? servers : 0, m365Enforce: server && $('#cM365').checked, esetCloud: server && $('#cEset').checked };
     let saved = c;
     if (c) Object.assign(touch(c), data); else state.clients.push(saved = touch({ id: uid('c'), ...data }));

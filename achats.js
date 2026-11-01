@@ -283,10 +283,12 @@ const Achats = (() => {
   }
 
   // --- bandeau « nouvelles factures » de la page Aujourd'hui (app.js : <div id="achNotif">) ---
-  // Factures importées pas encore vues ; toucher = onglet Achats ; ✕ = marquées vues (sur tous les appareils, via achats-data.json).
+  // Factures importées pas encore vues ET qui demandent encore quelque chose (à traiter, article à compléter ou à refacturer) :
+  // une facture validée, refacturée, mise en stock ou en usage interne sort du bandeau toute seule. Toucher = onglet Achats ; ✕ = marquées vues (tous les appareils).
   function todayBanner(el) {
     if (!A) { load().then(() => el.isConnected && todayBanner(el)); return; }
-    const fresh = alive(A.invoices).filter(i => i.seen === false).sort((a, b) => (b.importedAt || 0) - (a.importedAt || 0));
+    const open = i => toTreat(i) || alive(A.lines).some(l => l.invoiceId === i.id && ['todo', 'ready'].includes(lineState(l)));
+    const fresh = alive(A.invoices).filter(i => i.seen === false && open(i)).sort((a, b) => (b.importedAt || 0) - (a.importedAt || 0));
     if (!fresh.length) { el.innerHTML = ''; return; }
     const ids = new Set(fresh.map(i => i.id));
     const todo = alive(A.lines).filter(l => ids.has(l.invoiceId) && lineState(l) === 'todo').length;
@@ -697,7 +699,7 @@ const Achats = (() => {
     openDlg();
   }
 
-  const productOptions = () => (products || []).map(p => `<option value="${esc(p.ref)}">${esc(p.name || '')} · ${eur(productPrice(p))}</option>`).join('');
+  const productOptions = () => (products || []).map(p => `<option value="${esc(p.ref)}">${esc(String(p.name || '').slice(0, 60))} · ${eur(productPrice(p))}</option>`).join('');
 
   // Une ligne : client + correspondance avec l'article Billit (valable pour tous les articles du même type).
   // draft : valeurs saisies à conserver (retour de la création d'article).
@@ -1254,7 +1256,9 @@ const Achats = (() => {
   function productSelect(id, sel) {
     if (!products) return `<input id="${id}" value="${esc(sel)}" autocapitalize="off" placeholder="ex. int-004">`;
     const ps = products.slice().sort((a, b) => String(a.ref).localeCompare(String(b.ref)));
-    const opt = p => `<option value="${esc(p.ref)}" ${fold(p.ref) === fold(sel) ? 'selected' : ''}>${esc(p.ref)} · ${esc(p.name || '')} · ${eur(productPrice(p))}</option>`;
+    // Nom raccourci : la liste ouverte du navigateur prend la largeur de l'option la plus longue (noms Billit de plusieurs centaines de caractères).
+    const short = s => { s = String(s || ''); return s.length > 60 ? s.slice(0, 57).trimEnd() + '…' : s; };
+    const opt = p => `<option value="${esc(p.ref)}" title="${esc(p.name || '')}" ${fold(p.ref) === fold(sel) ? 'selected' : ''}>${esc(p.ref)} · ${esc(short(p.name))} · ${eur(productPrice(p))}</option>`;
     const groups = categories().map(g => ({ name: g.name, ps: ps.filter(p => p.catId === g.id) }))
       .concat([{ name: 'Sans catégorie', ps: ps.filter(p => !p.catId) }]).filter(g => g.ps.length);
     return `<select id="${id}"><option value="">— aucun article —</option>
