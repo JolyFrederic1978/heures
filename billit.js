@@ -17,7 +17,7 @@ const Billit = (() => {
     const k = keys(m), relay = !!cfg().relay;
     let r;
     if (relay) {
-      if (!k.partyId && !opts.noParty) throw new Error(`PartyID Billit (${m === 'live' ? 'réel' : 'test'}) manquant dans Réglages.`);
+      // PartyID : celui des réglages s'il y en a un, sinon le serveur prend celui du connecteur de la société (lib/compta.php).
       r = await Serveur.call('billit', { method: opts.method || 'GET', body: opts.body, query: { mode: m, party: k.partyId || '', path } });
     } else {
       if (!k.apiKey || (!k.partyId && !opts.noParty)) throw new Error(`Clé API / PartyID Billit (${m === 'live' ? 'réel' : 'test'}) manquants dans Réglages.`);

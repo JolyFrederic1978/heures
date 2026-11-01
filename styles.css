@@ -167,6 +167,9 @@ button.link { border: 0; background: none; color: var(--accent); font: inherit; 
 .hello .date { color: var(--muted); font-size: 13px; font-weight: 600; white-space: nowrap; }
 .hello .date::first-letter { text-transform: uppercase; }
 .chrono .crow { display: flex; align-items: center; gap: 12px; }
+/* Client et description prennent toute la largeur : le bouton ▶ reste au bord droit de la carte, aussi sur un grand écran. */
+.chrono .crow > .grow { flex: 1; min-width: 0; }
+.chrono .crow .row > input { flex: 1; min-width: 0; }
 .chrono .cl { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
 .chrono .cname { font-size: 18px; font-weight: 700; }
 .chrono select { margin-bottom: 8px; }

@@ -1,7 +1,7 @@
 // © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // Cache-first : l'app fonctionne hors ligne. Les appels Microsoft / OneDrive ne sont jamais mis en cache.
 // Incrémenter CACHE à chaque mise à jour publiée (même nom = le navigateur garde l'ancienne copie).
-const CACHE = 'heures-v49';
+const CACHE = 'heures-v50';
 const LOCAL = [
   './', 'index.html', 'styles.css', 'db.js', 'csv.js', 'xlsx.js', 'onedrive.js', 'serveur.js', 'fichiers.js','billit.js', 'compta.js','copie-billit.js', 'pdf-fournisseurs.js', 'achats.js', 'taches.js', 'app.js',
   'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
