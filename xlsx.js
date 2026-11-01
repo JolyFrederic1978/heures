@@ -1,3 +1,4 @@
+// © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // Fichiers Excel : liste à facturer, archive, fichier Prestations (format repris par la facture Billit)
 // et lecture de l'ancien ArchiveTemplate.xlsx pour la migration.
 const Xlsx = (() => {

@@ -1,3 +1,4 @@
+// © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // Connexion Microsoft 365 (OAuth2 code + PKCE, sans bibliothèque) et accès OneDrive via Microsoft Graph.
 const OneDrive = (() => {
   const TK = 'heures.tokens', PK = 'heures.pkce', AK = 'heures.apitk', CK = 'heures.caltk';

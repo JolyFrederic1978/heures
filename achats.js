@@ -1,3 +1,4 @@
+// © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // Module Achats : refacturation des articles des factures fournisseurs (PDF), séparé du pointage.
 // - Les PDF sont déposés dans OneDrive Compta/Achats/Entrant ou arrivent dans Billit (Peppol). L'app les lit à l'ouverture,
 //   puis au plus toutes les heures, ou sur demande, et les range dans Compta/Achats/Traités/AAAA.

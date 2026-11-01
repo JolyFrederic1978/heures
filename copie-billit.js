@@ -1,3 +1,4 @@
+// © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // Copie Billit réel → sandbox, dans la version de développement uniquement (Réglages → Billit).
 // Copie : catégories (par correspondance de nom, l'API ne sait pas les créer), clients, articles, et les factures de vente et d'achat
 // des derniers mois (avec les fournisseurs de ces factures). Le Billit réel n'est que LU (Billit.live : requêtes GET uniquement).

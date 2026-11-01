@@ -1,3 +1,4 @@
+// © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // Lecture des factures fournisseurs en PDF : texte extrait avec pdf.js (rangé en lignes par position),
 // puis un lecteur par fournisseur. Un lecteur renvoie :
 //   { supplier, number, date, totalExcl, lines: [{ key, label, detail, domain, qty, unit, total, from, to }] }

@@ -1,3 +1,4 @@
+// © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // Module Tâches (voir taches.md) : tâches « à la Todoist », liées à un client et à un technicien ; une tâche mène à une ou plusieurs interventions.
 // - Données : TimeSheet/App/taches-data.json, avec sa propre synchro (comme Achats). heures-data.json : seulement entries[].taskId.
 //   Avec le serveur OVH (srvOn(), architecture.md) : table tasks, synchronisée par app.js (srvSync) ; plus de fichier OneDrive.

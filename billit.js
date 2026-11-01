@@ -1,3 +1,4 @@
+// © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // Accès à l'API Billit (https://docs.billit.be) : clients, articles, factures.
 // Authentification par en-têtes ApiKey + PartyID. Mode « test » = sandbox, « live » = comptabilité réelle.
 const Billit = (() => {

@@ -1,3 +1,4 @@
+// © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // Environnement : production = gestion.onelevelup.be (OVH) ; toute autre adresse (gestion-dev sur GitHub, localhost) = développement.
 // En développement : données dans Compta-DEV, Billit en sandbox uniquement, bandeau DEV.
 const ENV = location.hostname === 'gestion.onelevelup.be' ? 'prod' : 'dev';

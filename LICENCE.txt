@@ -1,0 +1,18 @@
+LevelDesk
+© 2026 One Level UP. Tous droits réservés.
+
+Ce logiciel (code source, code exécutable, interface, textes et documents qui l'accompagnent) est la propriété exclusive
+de One Level UP. Il est protégé par le droit d'auteur (Code de droit économique belge, livre XI) et par les traités internationaux.
+
+Sauf autorisation écrite et préalable de One Level UP, il est interdit :
+- de copier, reproduire, modifier, adapter ou traduire tout ou partie du logiciel ;
+- de le distribuer, publier, louer, prêter, vendre ou mettre à disposition de tiers, sous quelque forme que ce soit ;
+- de le décompiler, désassembler ou d'en faire de la rétro-ingénierie, dans les limites permises par la loi ;
+- d'en retirer ou modifier les mentions de propriété.
+
+L'accès au code par un navigateur ou par ce dépôt ne donne aucune licence ni aucun droit d'utilisation.
+Toute utilisation non autorisée peut donner lieu à des poursuites.
+
+Les bibliothèques du dossier lib/ (pdf.js, ExcelJS) restent soumises à leurs propres licences, jointes dans ce dossier.
+
+Contact : One Level UP – https://www.onelevelup.be

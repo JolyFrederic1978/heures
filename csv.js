@@ -1,3 +1,4 @@
+// © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // Lecture d'un CSVExport.csv d'Hours Tracker (reprise de l'historique).
 // Colonnes : Job,Clocked In,Clocked Out,Duration,Comment,Tags,... — dates "JJ-MM-AA HH:MM", durée "H:MM".
 const Csv = (() => {

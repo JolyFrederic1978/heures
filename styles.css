@@ -1,3 +1,4 @@
+/* © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt). */
 /* Design « aéré » (maquette A choisie par Fred le 30/10) : fond doux, cartes blanches arrondies avec ombre légère, en-tête blanc avec logo. */
 :root {
   --bg: #f3f5f8; --card: #fff; --text: #1b2430; --muted: #66727f; --line: #e3e7ec;

@@ -1,3 +1,4 @@
+// © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // LevelDesk (anciennement OLU Gestion, puis Heures OLU) – pointage des interventions, facturation et archivage, synchronisés sur OneDrive.
 // Les noms techniques gardent « heures » (heures-data.json, base locale, cache) : les changer ferait perdre données et connexion.
 // Source de vérité : App/heures-data.json. Les fichiers Excel sont régénérés à partir de ces données :

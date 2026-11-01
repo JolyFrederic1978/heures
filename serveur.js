@@ -1,3 +1,4 @@
+// © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // Serveur LevelDesk chez OVH (PHP + MySQL, dossier serveur/ du projet ; adresse API_URL dans db.js).
 // Relais Billit (la clé API reste sur le serveur, chiffrée) et données de l'app (synchro, migration ; architecture.md).
 // L'app n'envoie que son jeton Microsoft : le serveur en tire l'utilisateur, sa société et ses droits.

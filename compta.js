@@ -1,3 +1,4 @@
+// © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
 // Connecteur de facturation de la société (architecture.md, section 11) : des opérations LevelDesk, quel que soit le logiciel (Billit, plus tard Odoo…).
 // Formats LevelDesk :
 //   client  { id, name, tradeName, vat, email, address }
