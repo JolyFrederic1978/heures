@@ -748,7 +748,8 @@ const Achats = (() => {
     let suggested = '';
     const onGroup = () => {
       const g = categories().find(x => String(x.id) === $('#pGroup').value), next = g && nextRef(g);
-      $('#pRefHint').textContent = !categories().length ? 'Aucune catégorie trouvée dans Billit (liste des articles non chargée ?).'
+      // L'API Billit ne liste pas les catégories : elles ne sont connues que par les articles qui en ont une (le sandbox n'en a aucune au départ).
+      $('#pRefHint').textContent = !categories().length ? 'Aucune catégorie connue dans Billit (aucun article n\'en a) : article créé sans catégorie, à classer ensuite dans Billit.'
         : g ? `Articles de cette catégorie : ${g.refs.slice(0, 8).join(', ')}${g.refs.length > 8 ? '…' : ''}` : 'Choisis la catégorie : la référence est proposée.';
       if (next && (!$('#pRef').value.trim() || $('#pRef').value === suggested)) $('#pRef').value = suggested = next;
     };
@@ -759,7 +760,7 @@ const Achats = (() => {
       ev.preventDefault();
       const item = { ref: $('#pRef').value.trim(), name: $('#pDesc').value.trim(), price: +$('#pPrice').value, vat: +$('#pVat').value,
         ...($('#pBuy').value !== '' ? { buy: +$('#pBuy').value } : {}), catId: $('#pGroup').value };
-      if (!$('#pGroup').value) return alert('Choisis la catégorie Billit de l\'article.');
+      if (!$('#pGroup').value && categories().length) return alert('Choisis la catégorie Billit de l\'article.');
       if (!item.ref || !item.name) return alert('Référence et description requises.');
       if (!(item.price >= 0) || $('#pPrice').value === '') return alert('Prix requis.');
       await loadProducts(0);
@@ -913,7 +914,9 @@ const Achats = (() => {
 
   // Onglet « Articles » : articles Billit (création sans passer par un import), correspondances, marges des fournisseurs, contacts → clients.
   // Les fiches s'ouvrent en fenêtre ; « Retour » / enregistrement reviennent sur la page.
-  let artFind = '', artCat = '';
+  let artFind = '', artCat = '', mapFind = '', mapSup = '', mapSt = '';
+  // États d'une correspondance (filtre) : sans article, article inconnu dans le logiciel, non refacturée, marge propre.
+  const MAP_ST = { none: 'Sans article', unknown: 'Article inconnu', ignore: 'Non refacturés', margin: 'Avec marge propre' };
   const backToArticles = () => { if ($('#dlg').open) $('#dlg').close(); render(); };
   function articles() {
     if (!A) { $('#view').innerHTML = '<div class="empty">Chargement…</div>'; load().then(() => tab === 'articles' && render()); return; }
@@ -924,13 +927,24 @@ const Achats = (() => {
     const maps = alive(A.mapping).sort((a, b) => (a.supplier + a.label).localeCompare(b.supplier + b.label));
     const sups = alive(A.suppliers).sort((a, b) => a.name.localeCompare(b.name));
     const hints = alive(A.hints).sort((a, b) => a.label.localeCompare(b.label));
+    // Nombre d'achats importés par correspondance (utile pour repérer les correspondances qui servent vraiment).
+    const used = new Map();
+    for (const l of alive(A.lines)) { const m = mapOf(l); if (m) used.set(m.id, (used.get(m.id) || 0) + 1); }
+    const mapStates = m => [!m.billitRef && 'none', m.billitRef && products && !product(m.billitRef) && 'unknown', m.ignore && 'ignore', isSet(m.margin) && 'margin'].filter(Boolean);
+    const mapSups = [...new Set(maps.map(m => m.supplier))].sort();
     // Ordre voulu par Fred (26/10) : correspondances d'abord, puis articles Billit (liste compacte, une ligne par article, zone qui défile).
+    // Recherche, fournisseur et état (demande de Fred, 01/11) : filtrés sans redessiner la page.
     $('#view').innerHTML = `
       <div class="card"><h2>Correspondance des articles fournisseurs (${maps.length})</h2>
         <p class="small muted" style="margin-top:0">Article d'une facture fournisseur → article Billit. Touche une ligne pour la modifier (nom, article, marge).</p>
-        ${maps.length ? `<ul class="list">${maps.map(m => { const p = product(m.billitRef); return `<li class="tap" data-map="${m.id}"><div class="grow" style="flex:1;min-width:0">${supPill(m.supplier)} <strong>${esc(m.label)}</strong>
-            <div class="small muted">${[m.ignore && 'non refacturé', isSet(m.margin) && `marge article ${pct(m.margin)}`, p && `Billit ${eur(productPrice(p))}`].filter(Boolean).join(' · ')}</div></div>
-            <div class="dur">${esc(m.billitRef || '—')}${m.billitRef && products && !p ? '<div><span class="pill warn">inconnu</span></div>' : ''}</div></li>`; }).join('')}</ul>`
+        ${maps.length ? `<div class="filters3"><input type="search" id="mapFind" placeholder="Rechercher : produit, référence…" value="${esc(mapFind)}">
+          <select id="mapSup"><option value="">Tous les fournisseurs</option>${mapSups.map(s => `<option value="${esc(s)}" ${s === mapSup ? 'selected' : ''}>${esc(s)} (${maps.filter(m => m.supplier === s).length})</option>`).join('')}</select>
+          <select id="mapSt"><option value="">Tous les états</option>${Object.entries(MAP_ST).map(([k, l]) => `<option value="${k}" ${k === mapSt ? 'selected' : ''}>${l} (${maps.filter(m => mapStates(m).includes(k)).length})</option>`).join('')}</select></div>
+          <div class="artbox"><ul class="list" id="mapList">${maps.map(m => { const p = product(m.billitRef), n = used.get(m.id) || 0; return `<li class="tap" data-map="${m.id}" data-sup="${esc(m.supplier)}" data-st="${mapStates(m).join(' ')}"
+              data-find="${esc(fold([m.supplier, m.label, m.billitRef, p?.name].filter(Boolean).join(' ')))}"><div class="grow" style="flex:1;min-width:0">${supPill(m.supplier)} <strong>${esc(m.label)}</strong>
+            <div class="small muted">${[m.ignore && 'non refacturé', isSet(m.margin) && `marge article ${pct(m.margin)}`, p && `Billit ${eur(productPrice(p))}`, `${n} achat${n > 1 ? 's' : ''}`].filter(Boolean).join(' · ')}</div></div>
+            <div class="dur">${esc(m.billitRef || '—')}${m.billitRef && products && !p ? '<div><span class="pill warn">inconnu</span></div>' : ''}</div></li>`; }).join('')}</ul></div>
+          <p class="small muted" id="mapMore" style="margin:6px 0 0"></p>`
           : '<div class="empty">Vide : elle se remplit quand tu complètes les articles importés (onglet Achats).</div>'}
       </div>
       <div class="card"><div class="row"><h2 class="grow" style="margin:0;border:0;padding:0">Articles Billit (${products ? products.length : '?'})</h2>
@@ -973,6 +987,18 @@ const Achats = (() => {
       $('#artFind').oninput = ev => { artFind = ev.target.value; filterArt(); };
       $('#artCat').onchange = ev => { artCat = ev.target.value; filterArt(); };
       filterArt();
+    }
+    const filterMap = () => {
+      const words = fold(mapFind).split(/\s+/).filter(Boolean), all = $$('#mapList > li');
+      const hits = all.filter(li => (!mapSup || li.dataset.sup === mapSup) && (!mapSt || li.dataset.st.split(' ').includes(mapSt)) && words.every(w => li.dataset.find.includes(w)));
+      all.forEach(li => li.classList.toggle('hidden', !hits.includes(li)));
+      if ($('#mapMore')) $('#mapMore').textContent = hits.length === all.length ? `${all.length} correspondance(s).` : `${hits.length} correspondance(s) sur ${all.length}.`;
+    };
+    if ($('#mapFind')) {
+      $('#mapFind').oninput = ev => { mapFind = ev.target.value; filterMap(); };
+      $('#mapSup').onchange = ev => { mapSup = ev.target.value; filterMap(); };
+      $('#mapSt').onchange = ev => { mapSt = ev.target.value; filterMap(); };
+      filterMap();
     }
     $('#pNew').onclick = () => createArticle(artCat && artCat !== 'none' ? { catId: artCat } : {}, backToArticles);
     $$('[data-prod]').forEach(li => li.onclick = () => editProduct(products.find(p => String(p.id) === li.dataset.prod)));

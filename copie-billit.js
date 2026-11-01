@@ -23,6 +23,7 @@ const CopieBillit = (() => {
     if (ENV !== 'dev' || Billit.mode() !== 'test') throw new Error('Copie possible seulement dans la version de développement, vers le sandbox.');
     if (!Billit.ready()) throw new Error('Clé API et PartyID du sandbox (test) manquants dans Réglages.');
     if (!Billit.live.ready()) throw new Error('Clé API du Billit réel manquante (champ « Clé API (réel) »).');
+    // Avec le serveur : clés des deux comptes dans Réglages → Connecteur de facturation (« Réel » en lecture seule en développement).
   }
 
   // 1. Lecture des deux comptes et préparation (rien n'est écrit, sauf le PartyID réel s'il manquait).

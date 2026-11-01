@@ -2322,11 +2322,17 @@ function editPin() {
 
 // ---------- démarrage ----------
 // Dans les dialogues, seul le bouton principal est "submit" : Entrée enregistre, jamais supprimer/annuler.
-new MutationObserver(() => $$('#dlgForm button').forEach(b => {
-  if (b.classList.contains('primary')) return;
-  b.type = 'button';
-  if (b.value === 'cancel') b.onclick = () => $('#dlg').close();
-})).observe($('#dlgForm'), { childList: true });
+// Croix ✕ en haut à droite de TOUTES les fenêtres (actuelles et futures : ajoutée à chaque nouveau contenu), comme la touche Échap.
+new MutationObserver(() => {
+  const f = $('#dlgForm');
+  if (f.firstElementChild && !f.querySelector(':scope > .dlgx'))
+    f.insertAdjacentHTML('afterbegin', '<button type="button" class="dlgx" aria-label="Fermer" title="Fermer">✕</button>');
+  $$('#dlgForm button').forEach(b => {
+    if (b.classList.contains('primary')) return;
+    b.type = 'button';
+    if (b.value === 'cancel' || b.classList.contains('dlgx')) b.onclick = () => $('#dlg').close();
+  });
+}).observe($('#dlgForm'), { childList: true });
 $('#dlgForm').addEventListener('submit', ev => { ev.preventDefault(); $('#dlgForm .btn.primary')?.click(); });
 
 $$('.tabs button[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });

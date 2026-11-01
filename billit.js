@@ -59,8 +59,8 @@ const Billit = (() => {
     configure(fn, party) { cfg = fn; if (party) onParty = party; },
     mode,
     relay: () => !!cfg().relay,
-    // Avec le serveur, la présence de la clé n'est connue qu'en l'appelant : seul le PartyID est contrôlé ici.
-    ready: () => !!((cfg().relay || keys().apiKey) && keys().partyId),
+    // Avec le serveur (relais), clé et PartyID sont dans le connecteur de la société sur le serveur : connus seulement en l'appelant.
+    ready: () => !!(cfg().relay || (keys().apiKey && keys().partyId)),
     orderUrl: id => `${WEB[mode()]}/Order/Income/Invoice/${id}/EditOrder`,
     partyName,
     // Fonctionne avec la clé seule : sert aussi à retrouver le PartyID de la société.
