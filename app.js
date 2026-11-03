@@ -1739,7 +1739,7 @@ function viewSettings() {
       <ul class="list" style="margin-top:8px;max-height:420px;overflow:auto">${state.clients.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name)).map(c => `
         <li data-name="${esc(fold(c.name + ' ' + (c.billitName || '') + ' ' + (c.domains || []).join(' ')))}">
           <div class="grow tap" data-client="${c.id}"><strong>${esc(c.name)}</strong> ${c.archived ? '<span class="pill">archivé</span>' : ''}
-            <div class="small muted">Billit : ${esc(c.billitName || '—')}${c.near ? ' · proche (zone 1)' : ''}${c.server ? ` · ${serverCount(c)} serveur(s)${c.m365Enforce ? ' · M365 Enforce' : ''}${c.esetCloud ? ' · ESET Cloud' : ''}` : ''}${clientSoc(c) !== HOME ? ' · ' + esc(soc(clientSoc(c)).name) : ''}${c.domains?.length ? ' · ' + esc(c.domains.join(', ')) : ''}</div></div>
+            <div class="small muted">${clientSoc(c) === HOME ? `Billit : ${esc(c.billitName || '—')}` : `facturé par ${esc(soc(clientSoc(c)).name)}`}${c.near ? ' · proche (zone 1)' : ''}${c.server ? ` · ${serverCount(c)} serveur(s)${c.m365Enforce ? ' · M365 Enforce' : ''}${c.esetCloud ? ' · ESET Cloud' : ''}` : ''}${c.domains?.length ? ' · ' + esc(c.domains.join(', ')) : ''}</div></div>
           <button class="btn danger chip" data-delclient="${c.id}" title="Supprimer">🗑</button></li>`).join('')}</ul>
     </div>
 
@@ -2095,12 +2095,19 @@ function editClient(c, opts = {}) {
   // Lien avec le logiciel de facturation (choix dans la liste) : seulement si ce client n'y est pas encore relié dans ce mode.
   const askBillit = !extId(c) && (!srvOn() || isAdmin());
   let billitId = null;
+  // Client d'un commanditaire (société du client ≠ ma société) : c'est le commanditaire qui le facture en direct → pas de lien ni de nom dans MON logiciel
+  // de facturation (demande de Fred, 02/11). Les champs sont seulement masqués : une valeur déjà saisie est gardée.
+  const billedByMe = s => s === HOME;
+  const own0 = billedByMe(c ? clientSoc(c) : (pre.societeId || HOME));
   f.innerHTML = `<h2>${c ? 'Modifier' : 'Nouveau'} client</h2>
+    <div id="cBillitBox" class="${own0 ? '' : 'hidden'}">
     ${askBillit ? `<label>Client ${esc(soft)} (${billitModeLabel(mode)})</label>
       <select id="cBillitPick" disabled><option value="">Chargement des clients ${esc(soft)}…</option></select>
       <p class="small muted" id="cBillitInfo" style="margin:4px 0 0">Clients ${esc(soft)} pas encore reliés à un client de l'app.</p>` : ''}
+    </div>
     <label>Nom</label><input id="cName" value="${esc(c?.name ?? pre.name ?? '')}" placeholder="ex. Vedi">
-    <label>Nom du client dans ${esc(soft)}</label><input id="cBillit" value="${esc(c?.billitName)}" placeholder="ex. V.T.S. SA">
+    <div id="cBillitBox2" class="${own0 ? '' : 'hidden'}"><label>Nom du client dans ${esc(soft)}</label><input id="cBillit" value="${esc(c?.billitName)}" placeholder="ex. V.T.S. SA"></div>
+    <p class="small muted ${own0 ? 'hidden' : ''}" id="cCmdInfo" style="margin:6px 0 0">Client facturé directement par son commanditaire : pas de nom ${esc(soft)} chez toi.</p>
     <label>Adresse <span class="small">(lieu d'intervention, pour le bouton 🧭 Navigation)</span></label>
     <input id="cAddr" value="${esc(c?.address ?? '')}" placeholder="ex. Rue de la Station 12, 7000 Mons" autocomplete="off">
     <label>Nom(s) de domaine <span class="small">(séparés par une virgule, sert à attribuer les achats OVH…)</span></label>
@@ -2123,6 +2130,11 @@ function editClient(c, opts = {}) {
       <button class="btn" ${opts.onCancel ? 'id="cCancel"' : 'value="cancel"'}>${opts.onCancel ? 'Retour' : 'Annuler'}</button><button class="btn primary" id="cSave">Enregistrer</button></div>`;
   // M365 Enforce et ESET Cloud : seulement pour un client avec serveur(s).
   $('#cServer').onchange = ev => ['#cServersBox', '#cSrvOpts'].forEach(s => $(s).classList.toggle('hidden', !ev.target.checked));
+  $('#cSoc').onchange = ev => {
+    const own = billedByMe(ev.target.value);
+    ['#cBillitBox', '#cBillitBox2'].forEach(s => $(s).classList.toggle('hidden', !own));
+    $('#cCmdInfo').classList.toggle('hidden', own);
+  };
   if ($('#cDel')) $('#cDel').onclick = () => deleteClient(c);
   if (opts.onCancel) $('#cCancel').onclick = () => opts.onCancel();
   if (askBillit) (async () => {
@@ -2163,7 +2175,7 @@ function editClient(c, opts = {}) {
     let saved = c;
     if (c) Object.assign(touch(c), data); else state.clients.push(saved = touch({ id: uid('c'), ...data }));
     // Client choisi dans la liste du logiciel : lien mémorisé (comme au 1er envoi d'une facture), pas de recherche par le nom ensuite.
-    if (billitId) setExt(saved, billitId);
+    if (billitId && billedByMe(data.societeId)) setExt(saved, billitId);
     if (opts.onSaved) { await persist(); opts.onSaved(saved); return; }
     dlg.close(); await persist();
   };
@@ -2329,10 +2341,12 @@ function viewLogin() {
       <h2 style="font-size:18px;margin:12px 0 4px">LevelDesk</h2>
       <p class="muted">Outil interne de gestion de One Level UP.</p>
       <button class="btn primary big" id="loginBtn" ${OneDrive.configured() ? '' : 'disabled'}>Se connecter avec Microsoft 365</button>
-      ${OneDrive.configured() ? '' : '<p class="small"><span class="pill warn">ID d\'application manquant dans la configuration.</span></p>'}
+      ${OneDrive.configured() ? `<p style="margin:10px 0 0"><button class="btn link" id="loginOther">Utiliser un autre compte Microsoft</button></p>`
+        : '<p class="small"><span class="pill warn">ID d\'application manquant dans la configuration.</span></p>'}
       <p class="small muted" style="margin-bottom:0">Connexion sur la page officielle de Microsoft : le mot de passe n'est jamais saisi ici.</p>
     </div>`;
   $('#loginBtn').onclick = () => OneDrive.login().catch(e => alert(e.message));
+  if ($('#loginOther')) $('#loginOther').onclick = () => OneDrive.login('', true).catch(e => alert(e.message));
 }
 
 // Compte Microsoft inconnu, désactivé ou supprimé dans Administration.
@@ -2342,9 +2356,11 @@ function viewDenied() {
       <h2 style="font-size:18px">⛔ Accès refusé</h2>
       <p>Le compte <strong>${esc(OneDrive.user())}</strong> n'est pas autorisé dans LevelDesk.</p>
       <p class="small muted">Demande à l'administrateur de l'ajouter (ou de le réactiver) dans l'onglet Admin.</p>
-      <button class="btn big" id="deniedOut">Se déconnecter</button>
+      <button class="btn primary big" id="deniedOther">Se connecter avec un autre compte</button>
+      <p style="margin:10px 0 0"><button class="btn link" id="deniedOut">Se déconnecter</button></p>
     </div>`;
   $('#deniedOut').onclick = () => signOut();
+  $('#deniedOther').onclick = async () => { await signOut(); OneDrive.login('', true).catch(e => alert(e.message)); };
 }
 
 function viewPin() {

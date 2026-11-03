@@ -14,7 +14,8 @@ const OneDrive = (() => {
   const tokens = () => { try { return JSON.parse(localStorage.getItem(TK)); } catch (_) { return null; } };
 
   // extra : permission en plus, demandée sur la page Microsoft (ex. agenda Outlook).
-  async function login(extra = '') {
+  // pick : Microsoft affiche le choix du compte au lieu de reprendre en silence celui déjà connecté (SSO).
+  async function login(extra = '', pick = false) {
     if (!cfg().clientId) throw new Error("Renseigne d'abord l'ID d'application (client ID) dans Réglages.");
     const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
     const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
@@ -24,7 +25,8 @@ const OneDrive = (() => {
       client_id: cfg().clientId, response_type: 'code', redirect_uri: redirectUri(), scope: extra ? `${SCOPE} ${extra}` : SCOPE,
       code_challenge: challenge, code_challenge_method: 'S256', state: st, response_mode: 'query'
     });
-    if (tokens()?.user) p.set('login_hint', tokens().user);
+    if (pick) p.set('prompt', 'select_account');
+    else if (tokens()?.user) p.set('login_hint', tokens().user);
     location.assign(`${authBase()}/authorize?${p}`);
   }
 

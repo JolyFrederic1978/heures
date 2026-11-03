@@ -5,7 +5,8 @@
 // - Données : TimeSheet/App/achats-data.json, avec sa propre synchro (celle du pointage n'y touche pas).
 // - Les articles à 0 € ne sont pas importés.
 // - Client : trouvé par le nom de domaine (fiche client). Article Billit : table de correspondance, apprise au fil des imports.
-// - Prix de vente = prix d'achat × (1 + marge) ; marge de l'article si elle est définie, sinon celle du fournisseur.
+// - Prix de vente = prix d'achat × (1 + marge) ; marge de l'article si elle est définie, sinon celle du fournisseur,
+//   sinon (aucune marge) le prix de l'article Billit choisi.
 //   Si le prix calculé diffère du prix de l'article dans Billit, l'app propose d'ajuster Billit.
 // - Fichiers Excel régénérés dans Compta/Achats : Achats-A-Facturer.xlsx, Archives/Archive-Achats.xlsx, Correspondance-Articles.xlsx.
 // Utilise les outils de app.js ($, esc, uid, touch, state, client, persist…) : chargé avant lui, appelé après le démarrage.
@@ -83,7 +84,17 @@ const Achats = (() => {
     const s = supplierOf(l.supplier);
     return s && isSet(s.margin) ? { pct: +s.margin, from: 'fournisseur' } : null;
   }
-  const saleUnit = (l, m) => { const g = marginOf(l, m); return g ? round2(l.unit * (1 + g.pct / 100)) : null; };
+  // Prix de vente unitaire : achat × (1 + marge) ; sans marge, le prix de l'article dans le logiciel de facturation
+  // (liste chargée, sinon dernier prix connu gardé dans la correspondance : billitPrice). from = origine, pour l'affichage.
+  function priceOf(l, m = mapOf(l)) {
+    const g = marginOf(l, m);
+    if (g) return { unit: round2(l.unit * (1 + g.pct / 100)), from: `marge ${g.from} ${pct(g.pct)}`, margin: true };
+    const p = product(m?.billitRef), u = p ? productPrice(p) : m?.billitRef && isSet(m?.billitPrice) ? +m.billitPrice : null;
+    return u == null ? null : { unit: u, from: `prix de l'article ${Compta.label()}`, margin: false };
+  }
+  const saleUnit = (l, m) => priceOf(l, m)?.unit ?? null;
+  // Prix de l'article à garder dans la correspondance (pour calculer sans la liste des articles).
+  const priceCache = ref => { const p = product(ref); return p ? { billitPrice: productPrice(p) } : {}; };
   // Prix figé (billedUnit) une fois la ligne mise sur une facture de l'app : un changement de marge ne la modifie plus.
   const lineUnit = l => l.billedUnit ?? saleUnit(l);
   const saleTotal = l => { const u = lineUnit(l); return u == null ? null : round2(u * l.qty); };
@@ -122,8 +133,8 @@ const Achats = (() => {
   }
   // Écart entre le prix calculé et le prix de l'article dans Billit (null si pas d'écart ou pas vérifiable).
   function priceGap(l, m = mapOf(l)) {
-    const p = product(m?.billitRef), u = saleUnit(l, m);
-    return p && u != null && Math.abs(productPrice(p) - u) > 0.005 ? { p, billit: productPrice(p), calc: u } : null;
+    const p = product(m?.billitRef), pr = priceOf(l, m);
+    return p && pr?.margin && Math.abs(productPrice(p) - pr.unit) > 0.005 ? { p, billit: productPrice(p), calc: pr.unit } : null;
   }
   // buy : prix d'achat de la dernière facture fournisseur, enregistré aussi dans le logiciel. Le connecteur renvoie l'article complet (rien n'est effacé).
   async function setBillitPrice(p, price, buy) {
@@ -725,7 +736,7 @@ const Achats = (() => {
         <div class="row"><input id="mRef" class="grow" style="flex:1" value="${esc(d.ref)}" list="billitRefs" placeholder="ex. int-004" autocapitalize="off">
           <button class="btn" id="mNew" ${Compta.ready() ? '' : 'disabled'}>+ Créer</button></div>
         <datalist id="billitRefs">${productOptions()}</datalist>
-        <label>Marge de l'article en % (vide = marge fournisseur : ${s && isSet(s.margin) ? pct(s.margin) : 'non définie'})</label>
+        <label>Marge de l'article en % (vide = marge fournisseur : ${s && isSet(s.margin) ? pct(s.margin) : 'non définie, prix de l\'article Billit'})</label>
         <input type="number" step="0.1" id="mMargin" value="${esc(d.margin)}">
         <p class="small" id="mCalc" style="margin:8px 0 0"></p>
         <label class="check"><input type="checkbox" id="mIgnore" ${d.ignore ? 'checked' : ''}> Ne jamais refacturer ce type d'article</label>
@@ -746,10 +757,10 @@ const Achats = (() => {
     // Prix calculé et comparaison avec Billit, mis à jour pendant la saisie.
     const calc = () => {
       const v = read(), tmp = { billitRef: v.ref, margin: v.margin };
-      const g = marginOf(l, tmp), u = saleUnit(l, tmp), p = product(v.ref);
+      const pr = priceOf(l, tmp), p = product(v.ref);
       const gap = priceGap(l, tmp);
-      $('#mCalc').innerHTML = (u == null ? '<span class="pill warn">Aucune marge : définis la marge de l\'article ou du fournisseur.</span>'
-        : `Prix de vente : <strong>${eur(u)}</strong> HTVA (marge ${g.from} ${pct(g.pct)})`)
+      $('#mCalc').innerHTML = (pr == null ? '<span class="pill warn">Aucune marge ni prix : choisis l\'article Billit, ou définis la marge de l\'article ou du fournisseur.</span>'
+        : `Prix de vente : <strong>${eur(pr.unit)}</strong> HTVA (${esc(pr.from)})`)
         + (!v.ref ? '' : !products ? '' : !p ? `<br><span class="pill warn">${esc(v.ref)} n'existe pas dans Billit : utilise « + Créer ».</span>`
           : `<br>Billit : ${esc(p.name || '')} · ${eur(productPrice(p))}` + (gap ? ` <span class="pill warn">≠ prix calculé</span> <button class="btn chip" id="mFix">Mettre ${eur(gap.calc)} dans Billit</button>` : ' <span class="pill ok">✓ identique</span>'));
       if ($('#mFix')) $('#mFix').onclick = async () => { if (await setBillitPrice(gap.p, gap.calc, l.unit)) calc(); };
@@ -768,7 +779,7 @@ const Achats = (() => {
       let mp = m;
       if (!mp && (v.ref || v.margin !== '' || v.ignore)) A.mapping.push(mp = { id: uid('am'), supplier: l.supplier, key: l.key, label: l.label, createdAt: Date.now() });
       if (mp) {
-        Object.assign(touch(mp), { billitRef: v.ref, margin: v.margin === '' ? '' : +v.margin, ignore: v.ignore });
+        Object.assign(touch(mp), { billitRef: v.ref, margin: v.margin === '' ? '' : +v.margin, ignore: v.ignore, ...priceCache(v.ref) });
         alive(A.lines).forEach(x => { if (!x.mapId && x.supplier === l.supplier && x.key === l.key) { x.mapId = mp.id; touch(x); } });
       }
       let clientsChanged = false;
@@ -870,9 +881,9 @@ const Achats = (() => {
       const chosen = ls.filter(l => sel.has(l.id));
       f.innerHTML = `<h2>Achats à refacturer : ${esc(client(clientId).name)}</h2>
         <p class="small muted">Achat ${eur(chosen.reduce((s, l) => s + l.total, 0))} · vente <strong>${eur(chosen.reduce((s, l) => s + saleTotal(l), 0))}</strong> HTVA</p>
-        <ul class="list small">${ls.map(l => { const g = marginOf(l), gap = priceGap(l); return `<li><input type="checkbox" data-sel="${l.id}" ${sel.has(l.id) ? 'checked' : ''}>
+        <ul class="list small">${ls.map(l => { const pr = priceOf(l), gap = priceGap(l); return `<li><input type="checkbox" data-sel="${l.id}" ${sel.has(l.id) ? 'checked' : ''}>
           <div class="grow" style="flex:1;min-width:0"><strong>${esc(mapOf(l).billitRef)}</strong> ${esc(l.label)}
-            <div class="muted">${[whereOf(l), l.from && `du ${frDate(l.from)} au ${frDate(l.to)}`, `${l.qty} × ${eur(saleUnit(l))} (achat ${eur(l.unit)} + ${pct(g.pct)} ${g.from})`].filter(Boolean).map(esc).join(' · ')}</div>
+            <div class="muted">${[whereOf(l), l.from && `du ${frDate(l.from)} au ${frDate(l.to)}`, `${l.qty} × ${eur(pr.unit)} (achat ${eur(l.unit)}, ${pr.from})`].filter(Boolean).map(esc).join(' · ')}</div>
             ${gap ? `<div><span class="pill warn">Prix Billit ${eur(gap.billit)}</span> <button class="btn chip" data-fix="${l.id}">Mettre ${eur(gap.calc)} dans Billit</button></div>` : ''}</div>
           <div class="dur">${eur(saleTotal(l))}</div></li>`; }).join('')}</ul>
         <div class="actions"><button class="btn" value="cancel">Fermer</button>
@@ -1031,7 +1042,7 @@ const Achats = (() => {
         let mp = mapOf(l) || findMap(l.supplier, l.key);
         if (x.dest === 'client') {
           if (!mp && (x.ref || x.margin !== '')) A.mapping.push(mp = { id: uid('am'), supplier: l.supplier, key: l.key, label: l.label, createdAt: Date.now() });
-          if (mp) Object.assign(touch(mp), { billitRef: x.ref, margin: x.margin === '' ? '' : +x.margin, ignore: false });
+          if (mp) Object.assign(touch(mp), { billitRef: x.ref, margin: x.margin === '' ? '' : +x.margin, ignore: false, ...priceCache(x.ref) });
         }
         Object.assign(touch(l), { clientId: x.dest === 'client' ? x.clientId || null : l.clientId, mapId: mp?.id || l.mapId || null,
           status: { client: 'open', stock: 'stock', interne: 'ignored' }[x.dest] });
@@ -1273,7 +1284,7 @@ const Achats = (() => {
       <label>Nom du produit (affiché dans l'app et les fichiers Excel)</label><input id="mLabel" value="${esc(m.label)}">
       <label>Article Billit (${Compta.mode() === 'live' ? 'réel' : 'test'}, ${products ? products.length + ' articles' : 'liste indisponible'})</label>${productSelect('mRef', m.billitRef || '')}
       ${productsErr ? `<p class="small muted">${esc(productsErr)}</p>` : ''}
-      <label>Marge de l'article en % (vide = marge fournisseur : ${s && isSet(s.margin) ? pct(s.margin) : 'non définie'})</label>
+      <label>Marge de l'article en % (vide = marge fournisseur : ${s && isSet(s.margin) ? pct(s.margin) : 'non définie, prix de l\'article Billit'})</label>
       <input type="number" step="0.1" id="mMargin" value="${esc(m.margin ?? '')}">
       <label class="check"><input type="checkbox" id="mIgnore" ${m.ignore ? 'checked' : ''}> Ne jamais refacturer ce type d'article</label>
       <div class="actions"><button class="btn danger" id="mDel" style="margin-right:auto">Supprimer</button>
@@ -1285,7 +1296,7 @@ const Achats = (() => {
       if (!label) return alert('Nom requis.');
       // Le nom est repris par les lignes de ce type (la clé de correspondance, elle, ne change pas).
       if (label !== m.label) alive(A.lines).forEach(l => { if (l.mapId === m.id && l.label === m.label) { l.label = label; touch(l); } });
-      Object.assign(touch(m), { label, billitRef: $('#mRef').value.trim(), margin: margin === '' ? '' : +margin, ignore: $('#mIgnore').checked });
+      Object.assign(touch(m), { label, billitRef: $('#mRef').value.trim(), margin: margin === '' ? '' : +margin, ignore: $('#mIgnore').checked, ...priceCache($('#mRef').value.trim()) });
       await save(); scheduleSync(); backToArticles();
     };
     $('#mDel').onclick = async () => {

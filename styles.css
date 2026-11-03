@@ -146,6 +146,7 @@ button.btn.primary { background: var(--accent); border-color: var(--accent); col
 @media (prefers-color-scheme: dark) { button.btn.primary { color: #0d1a24; } }
 button.btn.danger { color: var(--danger); }
 button.btn.big { width: 100%; padding: 14px; font-size: 17px; }
+button.btn.link { border: 0; background: none; color: var(--accent); padding: 4px 6px; text-decoration: underline; }
 button.btn:disabled { opacity: .5; }
 button.btn.chip { padding: 6px 10px; font-size: 13px; border-radius: 99px; }
 .lblmic { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
