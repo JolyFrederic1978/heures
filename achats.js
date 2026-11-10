@@ -764,19 +764,20 @@ const Achats = (() => {
     // Prix calculé et comparaison avec Billit, mis à jour pendant la saisie.
     const calc = () => {
       const v = read(), tmp = { billitRef: v.ref, margin: v.margin };
-      const pr = priceOf(l, tmp), p = product(v.ref);
-      const gap = priceGap(l, tmp);
+      const lv = { ...l, clientId: v.clientId };                  // client choisi, pas encore enregistré (marge commanditaire)
+      const pr = priceOf(lv, tmp), p = product(v.ref);
+      const gap = priceGap(lv, tmp);
       $('#mCalc').innerHTML = (pr == null ? '<span class="pill warn">Aucune marge ni prix : choisis l\'article Billit, ou définis la marge de l\'article ou du fournisseur.</span>'
         : `Prix de vente : <strong>${eur(pr.unit)}</strong> HTVA (${esc(pr.from)})`)
         + (!v.ref ? '' : !products ? '' : !p ? `<br><span class="pill warn">${esc(v.ref)} n'existe pas dans Billit : utilise « + Créer ».</span>`
           : `<br>Billit : ${esc(p.name || '')} · ${eur(productPrice(p))}` + (gap ? ` <span class="pill warn">≠ prix calculé</span> <button class="btn chip" id="mFix">Mettre ${eur(gap.calc)} dans Billit</button>` : ' <span class="pill ok">✓ identique</span>'));
       if ($('#mFix')) $('#mFix').onclick = async () => { if (await setBillitPrice(gap.p, gap.calc, l.unit)) calc(); };
     };
-    ['#mRef', '#mMargin'].forEach(s => $(s).oninput = calc);
+    ['#mRef', '#mMargin', '#lClient'].forEach(s => $(s).oninput = calc);
     calc();
     $('#mNew').onclick = () => {
       const v = read();
-      createArticle({ ref: v.ref, name: l.label, price: saleUnit(l, { margin: v.margin }) ?? '', buy: l.unit },
+      createArticle({ ref: v.ref, name: l.label, price: saleUnit({ ...l, clientId: null }, { margin: v.margin }) ?? '', buy: l.unit },
         ref => editLine(l, { ...v, ref: ref || v.ref }));
     };
     $('#lSave').onclick = async ev => {
@@ -1016,6 +1017,8 @@ const Achats = (() => {
       return [l.id, { dest: destOf({ ...l, mapId: l.mapId || m?.id }), clientId: l.clientId || '', ref: m?.billitRef || '', margin: m?.margin ?? '' }];
     }));
     const tmpMap = x => ({ billitRef: x.ref, margin: x.margin });
+    // Prix de vente avec les choix pas encore enregistrés (client choisi : marge commanditaire éventuelle).
+    const draftUnit = (l, x) => saleUnit({ ...l, clientId: x.clientId || null }, tmpMap(x));
     const f = $('#dlgForm');
     f.innerHTML = `<h2>Traiter la facture ${esc(i.supplier)} ${esc(i.number)}</h2>
       <p class="small muted" style="margin-top:0">Du ${frDate(i.date)} · total HTVA ${i.totalExcl != null ? eur(i.totalExcl) : '?'} · ${ls.length} article(s)
@@ -1031,7 +1034,7 @@ const Achats = (() => {
           <div class="row tdest">${Object.entries(DEST).map(([k, n]) => `<label class="check"><input type="radio" name="td_${l.id}" value="${k}" ${x.dest === k ? 'checked' : ''} ${billed ? 'disabled' : ''}> ${n}</label>`).join('')}</div>
           <div class="tclient ${x.dest === 'client' ? '' : 'hidden'}">
             <select data-tc="${l.id}" ${billed ? 'disabled' : ''}><option value="">— client —</option>${clientOptions(x.clientId)}</select>
-            ${productSelect('tr_' + l.id, x.ref)}
+            ${productSelect('tr_' + l.id, x.ref, !billed)}
             <input type="number" step="0.1" data-tm="${l.id}" value="${esc(x.margin)}" placeholder="marge fournisseur" title="Marge de l'article en % (vide = marge du fournisseur)" ${billed ? 'disabled' : ''}>
           </div>
           <div class="small" data-tp="${l.id}"></div>
@@ -1048,12 +1051,13 @@ const Achats = (() => {
         const x = d[l.id];
         x.dest = $(`input[name="td_${l.id}"]:checked`)?.value || x.dest;
         x.clientId = $(`[data-tc="${l.id}"]`).value;
-        x.ref = ($(`#tr_${l.id}`).value || '').trim();
+        const r = ($(`#tr_${l.id}`).value || '').trim();
+        if (r !== '__new') x.ref = r;
         x.margin = $(`[data-tm="${l.id}"]`).value.trim();
       }
     };
     // Ce qui manque à une ligne « Client » pour être refacturable.
-    const lacks = l => { const x = d[l.id]; return x.dest !== 'client' || l.status === 'billed' ? [] : [!x.clientId && 'client', !x.ref && 'article', saleUnit(l, tmpMap(x)) == null && 'marge'].filter(Boolean); };
+    const lacks = l => { const x = d[l.id]; return x.dest !== 'client' || l.status === 'billed' ? [] : [!x.clientId && 'client', !x.ref && 'article', draftUnit(l, x) == null && 'marge'].filter(Boolean); };
     const draw = () => {
       read();
       const sum = { client: 0, sale: 0, stock: 0, interne: 0 };
@@ -1061,7 +1065,7 @@ const Achats = (() => {
         const x = d[l.id], el = $(`[data-tp="${l.id}"]`);
         $(`[data-tl="${l.id}"] .tclient`).classList.toggle('hidden', x.dest !== 'client');
         if (x.dest === 'client') {
-          const u = l.status === 'billed' ? lineUnit(l) : saleUnit(l, tmpMap(x)), miss = lacks(l);
+          const u = l.status === 'billed' ? lineUnit(l) : draftUnit(l, x), miss = lacks(l);
           sum.client += l.total; sum.sale += u != null ? round2(u * l.qty) : 0;
           el.innerHTML = miss.length ? `<span class="pill warn">${miss.join(' + ')} à choisir</span>` : `→ refacturé ${eur(round2(u * l.qty))} HTVA (${l.qty} × ${eur(u)})`;
         } else { sum[x.dest] += l.total; el.innerHTML = `<span class="muted">${x.dest === 'stock' ? '→ mis en stock' : '→ usage interne, non refacturé'}</span>`; }
@@ -1073,7 +1077,21 @@ const Achats = (() => {
       $('#tErr').innerHTML = '';
     };
     const box = $('ul.treat', f);
-    box.oninput = box.onchange = draw;
+    box.oninput = draw;
+    // « + Nouvel article… » : fiche de création (prérempli : nom, prix d'achat, prix de vente calculé), puis retour sur le traitement avec l'article choisi
+    // pour cette ligne et pour les autres lignes du même produit encore sans article. Les choix déjà faits sont gardés.
+    box.onchange = ev => {
+      const t = ev.target;
+      if (!(t.id?.startsWith('tr_') && t.value === '__new')) return draw();
+      read();
+      const l = ls.find(x => 'tr_' + x.id === t.id), x = d[l.id];
+      setLarge(false);
+      // Prix de l'article = prix client (marge article / fournisseur), jamais le prix commanditaire (+ 1 %) : clientId retiré pour le calcul.
+      createArticle({ name: l.label, buy: l.unit, price: saleUnit({ ...l, clientId: null }, tmpMap({ ...x, ref: '' })) ?? '' }, ref => {
+        if (ref) editable.forEach(o => { if (o === l || (o.supplier === l.supplier && o.key === l.key && !d[o.id].ref)) d[o.id].ref = ref; });
+        treatInvoice(i, d);
+      });
+    };
     $('#tAllC').onchange = ev => { const c = ev.target.value; if (!c) return; read(); editable.forEach(l => { d[l.id].dest = 'client'; d[l.id].clientId = c; }); treatInvoice(i, d); };
     $('#tAllS').onclick = () => { read(); editable.forEach(l => { d[l.id].dest = 'stock'; }); treatInvoice(i, d); };
     $('#tAllI').onclick = () => { read(); editable.forEach(l => { d[l.id].dest = 'interne'; }); treatInvoice(i, d); };
@@ -1307,7 +1325,8 @@ const Achats = (() => {
 
   // Liste déroulante des articles Billit, par catégorie. La référence actuelle reste proposée même si elle n'existe pas (ou plus) dans Billit.
   // Liste Billit indisponible (pas de clé, erreur) : saisie de la référence à la main.
-  function productSelect(id, sel) {
+  // canNew : option « + Nouvel article… » (traitement d'une facture : article absent du logiciel de facturation, créé sans quitter l'écran).
+  function productSelect(id, sel, canNew = false) {
     if (!products) return `<input id="${id}" value="${esc(sel)}" autocapitalize="off" placeholder="ex. int-004">`;
     const ps = products.slice().sort((a, b) => String(a.ref).localeCompare(String(b.ref)));
     // Nom raccourci : la liste ouverte du navigateur prend la largeur de l'option la plus longue (noms Billit de plusieurs centaines de caractères).
@@ -1316,6 +1335,7 @@ const Achats = (() => {
     const groups = categories().map(g => ({ name: g.name, ps: ps.filter(p => p.catId === g.id) }))
       .concat([{ name: 'Sans catégorie', ps: ps.filter(p => !p.catId) }]).filter(g => g.ps.length);
     return `<select id="${id}"><option value="">— aucun article —</option>
+      ${canNew ? `<option value="__new">+ Nouvel article ${esc(Compta.label())}…</option>` : ''}
       ${sel && !product(sel) ? `<option value="${esc(sel)}" selected>${esc(sel)} (inconnu dans Billit)</option>` : ''}
       ${groups.map(g => `<optgroup label="${esc(g.name)}">${g.ps.map(opt).join('')}</optgroup>`).join('')}</select>`;
   }
