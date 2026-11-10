@@ -1,5 +1,6 @@
 // © 2026 One Level UP – LevelDesk. Logiciel propriétaire, tous droits réservés. Copie, modification, redistribution et rétro-ingénierie interdites sans autorisation écrite (voir LICENCE.txt).
-// Connecteur de facturation de la société (architecture.md, section 11) : des opérations LevelDesk, quel que soit le logiciel (Billit, plus tard Odoo…).
+// Connecteur de facturation de la société (architecture.md, section 11) : des opérations LevelDesk, quel que soit le logiciel (Billit, Odoo…).
+// Odoo : seulement avec le serveur (serveur/api/lib/connecteurs/odoo.php).
 // Formats LevelDesk :
 //   client  { id, name, tradeName, vat, email, address }
 //   article { id, ref, name, price, vat, buy, unit, catId, catName }
@@ -16,7 +17,25 @@ const Compta = (() => {
   const mode = () => ENV === 'prod' ? cfg().mode || 'test' : 'test';
   const type = () => srv() ? conf?.modes?.[mode()]?.type || (conf ? '' : 'billit') : 'billit';
 
-  async function op(name, args = {}, m = mode()) { return (await Serveur.json('compta', { method: 'POST', body: { op: name, mode: m, args } })).data; }
+  async function op(name, args = {}, m = mode(), soc = '') { return (await Serveur.json('compta', { method: 'POST', body: { op: name, mode: m, args, ...(soc ? { soc } : {}) } })).data; }
+
+  // Connecteur d'une AUTRE société que je gère (ex. Alescom gérée par One Level UP) : lecture seule (config, test, clients) — ses clients
+  // sont liés à SON logiciel (Odoo d'Alescom), pas au mien. Avec le serveur seulement.
+  const others = new Map();   // société → { conf, at }
+  const other = {
+    async config(soc, force) {
+      if (!srv() || !cfg().admin) return null;
+      const x = others.get(soc);
+      if (!force && x && Date.now() - x.at < 300000) return x.conf;
+      const c = await Serveur.json('compta', { method: 'POST', body: { op: 'config', soc } });
+      others.set(soc, { conf: c, at: Date.now() });
+      return c;
+    },
+    type: soc => others.get(soc)?.conf?.modes?.[mode()]?.type || '',
+    ready: soc => { const x = others.get(soc)?.conf?.modes?.[mode()]; return !!(x?.type && x.key); },
+    label: soc => NAMES[other.type(soc)] || 'Facturation',
+    clients: soc => op('clients', {}, mode(), soc)
+  };
 
   // ---- Billit direct (sans serveur) → format LevelDesk ----
   const num = v => v == null || v === '' ? null : +v;
@@ -89,11 +108,14 @@ const Compta = (() => {
       return conf;
     },
     async saveConfig(body) { const r = await Serveur.json('compta', { method: 'POST', body: { op: 'config.save', ...body } }); conf = r; confAt = Date.now(); return r; },
-    reset() { conf = null; confAt = 0; },
+    reset() { conf = null; confAt = 0; others.clear(); },
+    other,
     // ---- opérations ----
     test: () => srv() ? op('test') : direct.test(),
     clients: () => srv() ? op('clients') : direct.clients(),
     articles: () => srv() ? op('articles') : direct.articles(),
+    // Catégories { id, name } : listées par Odoo ; Billit seulement celles de ses articles.
+    categories: () => srv() ? op('categories') : direct.articles().then(ps => [...new Map(ps.filter(p => p.catId).map(p => [p.catId, { id: p.catId, name: p.catName }])).values()]),
     saveArticle: a => srv() ? op('article.save', a) : direct.saveArticle(a),
     draftInvoice: f => srv() ? op('facture.brouillon', f) : direct.draftInvoice(f),
     openInvoices: customerId => srv() ? op('factures.ouvertes', { customerId: String(customerId) }) : direct.openInvoices(customerId),

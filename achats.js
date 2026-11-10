@@ -19,7 +19,8 @@ const Achats = (() => {
   let A = null;                       // données du module
   let lastCheck = 0, busy = false, msg = '';
   let invFind = '', invSup = '';      // recherche et filtre fournisseur des « Factures importées »
-  let products = null, productsErr = '', productsMode = '', productsAt = 0;   // articles Billit (mémoire seulement)
+  let products = null, productsErr = '', productsMode = '', productsAt = 0;   // articles du logiciel de facturation (mémoire seulement)
+  let cats = null;                                                           // catégories listées par le logiciel (Odoo)
 
   // --- cache local (base IndexedDB à part : n'interfère pas avec celle du pointage) ---
   function idb(mode, fn) {
@@ -79,7 +80,10 @@ const Achats = (() => {
   const isSet = v => v !== '' && v != null;
   const round2 = n => Math.round(n * 100) / 100;
   // Marge appliquée (%) : celle de l'article, sinon celle du fournisseur.
+  // Client d'un commanditaire (ou le commanditaire lui-même) : marge d'achats du commanditaire (1 % par défaut, app.js achatPartnerMargin), avant tout.
   function marginOf(l, m = mapOf(l)) {
+    const cm = typeof achatPartnerMargin === 'function' ? achatPartnerMargin(l.clientId) : null;
+    if (cm != null) return { pct: +cm, from: 'commanditaire', partner: true };
     if (isSet(m?.margin)) return { pct: +m.margin, from: 'article' };
     const s = supplierOf(l.supplier);
     return s && isSet(s.margin) ? { pct: +s.margin, from: 'fournisseur' } : null;
@@ -88,7 +92,7 @@ const Achats = (() => {
   // (liste chargée, sinon dernier prix connu gardé dans la correspondance : billitPrice). from = origine, pour l'affichage.
   function priceOf(l, m = mapOf(l)) {
     const g = marginOf(l, m);
-    if (g) return { unit: round2(l.unit * (1 + g.pct / 100)), from: `marge ${g.from} ${pct(g.pct)}`, margin: true };
+    if (g) return { unit: round2(l.unit * (1 + g.pct / 100)), from: `marge ${g.from} ${pct(g.pct)}`, margin: true, partner: !!g.partner };
     const p = product(m?.billitRef), u = p ? productPrice(p) : m?.billitRef && isSet(m?.billitPrice) ? +m.billitPrice : null;
     return u == null ? null : { unit: u, from: `prix de l'article ${Compta.label()}`, margin: false };
   }
@@ -130,11 +134,14 @@ const Achats = (() => {
     if (products && productsMode === Compta.mode() && Date.now() - productsAt < maxAge) return;
     try { products = await Compta.articles(); productsErr = ''; productsMode = Compta.mode(); productsAt = Date.now(); }
     catch (e) { products = null; productsErr = e.message; }
+    // Catégories listées par le logiciel (Odoo) ; Billit : seulement par ses articles (categories()).
+    if (products && Compta.type() !== 'billit') { try { cats = await Compta.categories(); } catch (_) { cats = null; } } else cats = null;
   }
   // Écart entre le prix calculé et le prix de l'article dans Billit (null si pas d'écart ou pas vérifiable).
   function priceGap(l, m = mapOf(l)) {
     const p = product(m?.billitRef), pr = priceOf(l, m);
-    return p && pr?.margin && Math.abs(productPrice(p) - pr.unit) > 0.005 ? { p, billit: productPrice(p), calc: pr.unit } : null;
+    // Prix commanditaire (1 %) : le prix de l'article dans Billit reste celui des clients, jamais proposé à la modification.
+    return p && pr?.margin && !pr.partner && Math.abs(productPrice(p) - pr.unit) > 0.005 ? { p, billit: productPrice(p), calc: pr.unit } : null;
   }
   // buy : prix d'achat de la dernière facture fournisseur, enregistré aussi dans le logiciel. Le connecteur renvoie l'article complet (rien n'est effacé).
   async function setBillitPrice(p, price, buy) {
@@ -797,33 +804,68 @@ const Achats = (() => {
     openDlg();
   }
 
-  // Catégories Billit (GroupID / GroupName des articles existants : l'API ne les liste pas à part).
+  // Catégories du logiciel : celles qu'il liste (Odoo), plus celles des articles existants (Billit ne les liste pas à part).
   function categories() {
     const m = new Map();
+    for (const g of cats || []) m.set(g.id, { id: g.id, name: g.name || `Catégorie ${g.id}`, refs: [] });
     for (const p of products || []) if (p.catId) {
       const g = m.get(p.catId) || m.set(p.catId, { id: p.catId, name: p.catName || `Catégorie ${p.catId}`, refs: [] }).get(p.catId);
       g.refs.push(p.ref);
     }
     return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
-  // Référence proposée (règle de Fred) : 3 premières lettres de la catégorie, « - », puis le numéro suivant disponible
-  // pour ce préfixe (ex. « logiciel » : LOG-001, log-002, log-003 → log-004 ; « matériel » → mat-…). Numéro sur 3 chiffres.
-  // Exceptions voulues par Fred : ces catégories gardent leurs anciens préfixes.
-  const REF_PREFIX = { 'service internet': 'int', reseau: 'net' };
-  const refPrefix = g => REF_PREFIX[fold(g.name).trim()] || fold(g.name).replace(/[^a-z]/g, '').slice(0, 3);
-  function nextRef(g) {
-    const p = refPrefix(g);
-    if (!p) return '';
-    const used = (products || []).map(x => new RegExp(`^${p}-(\\d+)$`, 'i').exec(x.ref || '')?.[1]).filter(Boolean).map(Number);
-    return `${p}-${String(Math.max(0, ...used) + 1).padStart(3, '0')}`;
+  // Référence proposée : modèle de code article PROPRE À CHAQUE SOCIÉTÉ (Réglages → Ma société → Codes articles, settings.refModel).
+  // Repères du modèle :
+  //   {cat}  préfixe de la catégorie en minuscules (3 lettres, ou l'exception de la société) · {CAT} en majuscules · {cat:4} 4 lettres
+  //   {n:3}  numéro suivant sur 3 chiffres (le plus grand déjà utilisé avec le même début + 1) · {n} sans zéros
+  //   {aaaa} année · {aa} année sur 2 chiffres · tout le reste est recopié tel quel (ex. « ART-{n:5} », « {CAT}{aa}-{n:4} »).
+  // One Level UP (règle de Fred) : « {cat}-{n:3} », exceptions Service Internet → int, reseau → net (log-004, mat-007, int-018).
+  const OLU_PREFIXES = { 'service internet': 'int', reseau: 'net' };
+  const refModel = () => {
+    const r = state.settings.refModel;
+    return { pattern: r?.pattern || '{cat}-{n:3}', prefixes: r?.prefixes || (HOME === 'olu' && !r ? OLU_PREFIXES : {}) };
+  };
+  const TOKEN = /\{(cat|CAT|n|aaaa|aa)(?::(\d{1,2}))?\}/g;
+  // Préfixe de la catégorie g (nom), selon le modèle et ses exceptions ; '' si pas de catégorie.
+  function catPrefix(name, len, upper, model) {
+    if (!name) return '';
+    const p = model.prefixes[fold(name).trim()] ?? fold(name).replace(/[^a-z]/g, '').slice(0, len || 3);
+    return upper ? p.toUpperCase() : p;
   }
+  // refs : références existantes ; g : catégorie { name } ou rien. Renvoie '' si le modèle a besoin d'une catégorie absente.
+  function makeRef(model, g, refs, year = new Date().getFullYear()) {
+    let need = false, numLen = null;
+    const parts = [];     // morceaux fixes et place du numéro
+    let last = 0, m;
+    TOKEN.lastIndex = 0;
+    while ((m = TOKEN.exec(model.pattern))) {
+      parts.push(model.pattern.slice(last, m.index));
+      const [, t, len] = m;
+      if (t === 'n') { parts.push(null); numLen = +len || 0; }
+      else if (t === 'cat' || t === 'CAT') { const p = catPrefix(g?.name, +len, t === 'CAT', model); if (!p) need = true; parts.push(p); }
+      else parts.push(t === 'aaaa' ? String(year) : String(year).slice(-2));
+      last = TOKEN.lastIndex;
+    }
+    parts.push(model.pattern.slice(last));
+    if (need) return '';
+    if (numLen === null) return parts.join('');
+    const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp('^' + parts.map(x => x === null ? '(\\d+)' : reEsc(x)).join('') + '$', 'i');
+    const used = (refs || []).map(r => re.exec(r || '')?.slice(1).map(Number)).filter(Boolean).flat();
+    const n = String(Math.max(0, ...used) + 1).padStart(numLen, '0');
+    return parts.map(x => x === null ? n : x).join('');
+  }
+  const nextRef = g => makeRef(refModel(), g, (products || []).map(p => p.ref));
+  const needsCat = () => /\{cat(:\d+)?\}/i.test(refModel().pattern);
 
   // Création d'un article dans Billit. back(ref) : retour à l'écran précédent (ref = article créé, ou rien si annulé).
   function createArticle(pre = {}, back = backToArticles) {
     const f = $('#dlgForm');
-    f.innerHTML = `<h2>Nouvel article Billit</h2>
-      <p class="small muted">Créé dans Billit en mode ${Compta.mode() === 'live' ? 'réel' : 'test (sandbox)'}.</p>
-      <label>Catégorie Billit (obligatoire)</label><select id="pGroup"><option value="">— choisir —</option>
+    const soft = Compta.label();
+    f.innerHTML = `<h2>Nouvel article ${esc(soft)}</h2>
+      <p class="small muted">Créé dans ${esc(soft)} en mode ${Compta.mode() === 'live' ? 'réel' : 'test'}. Code proposé selon le modèle de ta société
+        (<code>${esc(refModel().pattern)}</code>, Réglages → Ma société → Codes articles).</p>
+      <label>Catégorie ${esc(soft)} (obligatoire)</label><select id="pGroup"><option value="">— choisir —</option>
         ${categories().map(g => `<option value="${g.id}" ${String(g.id) === String(pre.catId ?? '') ? 'selected' : ''}>${esc(g.name)} (${g.refs.length})</option>`).join('')}</select>
       <label>Référence</label><input id="pRef" value="${esc(pre.ref)}" placeholder="ex. int-005" autocapitalize="off">
       <p class="small muted" id="pRefHint" style="margin:4px 0 0"></p>
@@ -832,20 +874,21 @@ const Achats = (() => {
         <div><label>Prix de vente HTVA</label><input type="number" step="0.01" id="pPrice" value="${esc(pre.price)}"></div></div>
       <div class="grid2"><div><label>TVA %</label><input type="number" step="1" id="pVat" value="${esc(pre.vat ?? 21)}"></div>
         <div><label>Marge</label><p class="small muted" id="pMargin" style="margin:10px 0 0"></p></div></div>
-      <div class="actions"><button class="btn" id="pBack">Retour</button><button class="btn primary" id="pSave">Créer dans Billit</button></div>`;
+      <div class="actions"><button class="btn" id="pBack">Retour</button><button class="btn primary" id="pSave">Créer dans ${esc(soft)}</button></div>`;
     const showMargin = () => {
       const buy = +$('#pBuy').value, sale = +$('#pPrice').value;
       $('#pMargin').textContent = $('#pBuy').value !== '' && $('#pPrice').value !== '' && buy > 0 ? `${pct(Math.round((sale - buy) / buy * 1000) / 10)} (${eur(sale - buy)})` : '—';
     };
     $('#pBuy').oninput = $('#pPrice').oninput = showMargin;
     showMargin();
-    // Catégorie choisie : référence proposée (3 lettres de la catégorie + numéro suivant), si le champ est vide ou déjà proposé.
+    // Catégorie choisie : référence proposée selon le modèle de la société, si le champ est vide ou déjà proposé.
     let suggested = '';
     const onGroup = () => {
-      const g = categories().find(x => String(x.id) === $('#pGroup').value), next = g && nextRef(g);
+      const g = categories().find(x => String(x.id) === $('#pGroup').value), next = nextRef(g);
       // L'API Billit ne liste pas les catégories : elles ne sont connues que par les articles qui en ont une (le sandbox n'en a aucune au départ).
-      $('#pRefHint').textContent = !categories().length ? 'Aucune catégorie connue dans Billit (aucun article n\'en a) : article créé sans catégorie, à classer ensuite dans Billit.'
-        : g ? `Articles de cette catégorie : ${g.refs.slice(0, 8).join(', ')}${g.refs.length > 8 ? '…' : ''}` : 'Choisis la catégorie : la référence est proposée.';
+      $('#pRefHint').textContent = !categories().length ? `Aucune catégorie connue dans ${soft} : article créé sans catégorie, à classer ensuite dans ${soft}.`
+        : g ? `Articles de cette catégorie : ${g.refs.slice(0, 8).join(', ') || 'aucun'}${g.refs.length > 8 ? '…' : ''}`
+        : needsCat() ? 'Choisis la catégorie : la référence est proposée.' : '';
       if (next && (!$('#pRef').value.trim() || $('#pRef').value === suggested)) $('#pRef').value = suggested = next;
     };
     $('#pGroup').onchange = onGroup;
@@ -855,17 +898,17 @@ const Achats = (() => {
       ev.preventDefault();
       const item = { ref: $('#pRef').value.trim(), name: $('#pDesc').value.trim(), price: +$('#pPrice').value, vat: +$('#pVat').value,
         ...($('#pBuy').value !== '' ? { buy: +$('#pBuy').value } : {}), catId: $('#pGroup').value };
-      if (!$('#pGroup').value && categories().length) return alert('Choisis la catégorie Billit de l\'article.');
+      if (!$('#pGroup').value && categories().length) return alert(`Choisis la catégorie ${soft} de l'article.`);
       if (!item.ref || !item.name) return alert('Référence et description requises.');
       if (!(item.price >= 0) || $('#pPrice').value === '') return alert('Prix requis.');
       await loadProducts(0);
-      if (product(item.ref)) return alert(`L'article ${item.ref} existe déjà dans Billit.`);
+      if (product(item.ref)) return alert(`L'article ${item.ref} existe déjà dans ${soft}.`);
       const btn = $('#pSave'); btn.disabled = true;
       try {
         await Compta.saveArticle(item);
         await loadProducts(0);
-        if (!product(item.ref)) throw new Error("Billit n'a pas renvoyé d'erreur, mais l'article n'apparaît pas dans la liste. Vérifie dans Billit.");
-        toast(`Article ${item.ref} créé dans Billit`);
+        if (!product(item.ref)) throw new Error(`${soft} n'a pas renvoyé d'erreur, mais l'article n'apparaît pas dans la liste. Vérifie dans ${soft}.`);
+        toast(`Article ${item.ref} créé dans ${soft}`);
         back(item.ref);
       } catch (e) { alert(e.message); if (btn.isConnected) btn.disabled = false; }
     };
@@ -1346,7 +1389,9 @@ const Achats = (() => {
 
   // --- lien avec l'onglet Facturer (app.js) : les achats prêts d'un client vont sur sa facture, avec ses interventions ---
   const forBilling = l => ({ id: l.id, label: l.label, supplier: l.supplier, domain: whereOf(l), from: l.from, to: l.to,
-    qty: l.qty, unit: lineUnit(l), total: saleTotal(l), ref: mapOf(l)?.billitRef || '' });
+    qty: l.qty, unit: lineUnit(l), total: saleTotal(l), ref: mapOf(l)?.billitRef || '',
+    // Refacturé à un commanditaire : nom du client final dans la ligne de facture.
+    client: typeof achatPartnerOf === 'function' && achatPartnerOf(l.clientId) && !client(l.clientId).socRef ? clientName(l) : '' });
   // Données pas encore chargées (tout début) : liste vide, puis nouvel affichage une fois chargées.
   const ensure = () => { if (A) return true; load().then(() => render()); return false; };
   const readyClients = () => !ensure() ? [] : [...new Set(alive(A.lines).filter(l => lineState(l) === 'ready').map(l => l.clientId))];
@@ -1372,7 +1417,7 @@ const Achats = (() => {
     const lines = ofBill(billId).map(x => {
       const p = prods.find(p => fold(p.ref) === fold(x.ref));
       if (!p) missing.push(x.ref);
-      const what = [p?.name || x.label, x.domain, x.from && `du ${frDate(x.from)} au ${frDate(x.to)}`].filter(Boolean).join(' – ');
+      const what = [p?.name || x.label, x.client, x.domain, x.from && `du ${frDate(x.from)} au ${frDate(x.to)}`].filter(Boolean).join(' – ');
       return { qty: x.qty, ref: x.ref, description: what, price: x.unit, vat: p?.vat ?? 21, articleId: p?.id || '' };
     });
     return { lines, missing };
@@ -1386,5 +1431,5 @@ const Achats = (() => {
   // Déconnexion : on oublie la copie locale (les données restent dans OneDrive).
   async function reset() { A = null; products = null; productsErr = ''; lastCheck = 0; msg = ''; await idb('readwrite', s => s.delete('data')); }
 
-  return { view, articles, sync, reset, todayBanner, dashTile, readyClients, readyFor, ofBill, attach, detach, orderLines };
+  return { view, articles, sync, reset, todayBanner, dashTile, readyClients, readyFor, ofBill, attach, detach, orderLines, refModel, makeRef };
 })();

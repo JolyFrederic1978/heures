@@ -99,6 +99,16 @@ const ADMIN = 'u_admin';
 const liveSocs = () => state.societes.filter(s => !s.deleted).sort((a, b) => (b.id === HOME) - (a.id === HOME) || a.name.localeCompare(b.name));
 const activeSocs = () => liveSocs().filter(s => s.active !== false);
 const soc = id => state.societes.find(s => s.id === id) || { id, name: '(société supprimée)' };
+// Société gérée par la mienne (ex. Alescom gérée par One Level UP tant qu'elle n'a pas d'administrateur), avec le serveur.
+const managedByMe = id => srvOn() && isAdmin() && !!id && id !== HOME && soc(id).managedBy === HOME;
+// Logiciel de facturation dont relèvent les clients d'une société : le mien pour mes clients, celui de la société gérée pour les siens
+// (clients d'Alescom → Odoo d'Alescom) ; null pour un commanditaire indépendant (son administrateur relie lui-même ses clients).
+function clientConn(socId) {
+  if (socId === HOME) return { soc: HOME, type: () => Compta.type(), label: () => Compta.label(), ready: () => Compta.ready(), load: () => Compta.loadConfig(), clients: () => Compta.clients() };
+  if (!managedByMe(socId)) return null;
+  const o = Compta.other;
+  return { soc: socId, type: () => o.type(socId), label: () => o.label(socId), ready: () => o.ready(socId), load: () => o.config(socId), clients: () => o.clients(socId) };
+}
 const liveUsers = () => state.users.filter(u => !u.deleted).sort((a, b) => a.name.localeCompare(b.name));
 const user = id => state.users.find(u => u.id === id) || { id, name: '(utilisateur supprimé)' };
 // Utilisateur connecté : reconnu par son adresse Microsoft. Compte inconnu, désactivé ou supprimé : aucun droit (écran « accès refusé »).
@@ -131,8 +141,23 @@ const PARTNER_FIELDS = ['rates', 'due', 'billitName', 'billitIds', 'ext'];
 const partnerCfg = id => ((state.settings.partners ||= {})[id] ||= {});
 function partnerOf(id) {
   const s = soc(id), p = state.settings.partners?.[id] || {};
-  return { rates: p.rates || s.rates || state.settings.rates.partner, due: p.due ?? s.due ?? 15, billitName: p.billitName || s.billitName || s.name };
+  return { rates: p.rates || s.rates || state.settings.rates.partner, due: p.due ?? s.due ?? 15, billitName: p.billitName || s.billitName || s.name,
+    achMargin: p.achMargin ?? 1 };
 }
+// Achats (produits autres qu'interventions et déplacements) d'un client d'un commanditaire, ou du commanditaire lui-même (fiche « Alescom ») :
+// refacturés AU commanditaire avec sa marge d'achats, 1 % par défaut (demande de Fred, 10/11), au lieu des marges article / fournisseur.
+// achatPartnerOf → id de la société à qui refacturer, ou null (client de ma société : règles habituelles).
+function achatPartnerOf(clientId) {
+  const c = clientId && state.clients.find(x => x.id === clientId);
+  if (!c) return null;
+  if (c.socRef && c.socRef !== HOME) return c.socRef;
+  const s = clientSoc(c);
+  return s !== HOME ? s : null;
+}
+const achatPartnerMargin = id => { const p = achatPartnerOf(id); return p ? partnerOf(p).achMargin : null; };
+// Groupe de facturation d'un achat : le client lui-même ; pour un client d'un commanditaire, la facture du commanditaire (avec ses interventions).
+const achatKey = id => { const p = achatPartnerOf(id); return !p || client(id).socRef ? 'c:' + id : p === 'alescom' ? 'alescom' : 's:' + p; };
+const achFor = k => Achats.readyClients().filter(id => achatKey(id) === k).flatMap(id => Achats.readyFor(id));
 const socRates = s => partnerOf(s.id).rates;
 // Clients visibles par l'utilisateur connecté (réglés dans Administration, par société) ; un administrateur voit tout.
 function canSee(c) {
@@ -191,6 +216,11 @@ function groupInfo(key) {
     return { key, label: s.name, billitName: p.billitName, rates: p.rates, partner: true, soc: s, due: p.due };
   }
   const c = client(key.slice(2));
+  // Client qui est une société partenaire (Alescom) : facturé au tarif partenaire et à son échéance (10 j), sans types d'intervention (demande de Fred, 10/11).
+  if (c.socRef && state.societes.some(s => s.id === c.socRef && !s.deleted)) {
+    const p = partnerOf(c.socRef);
+    return { key, label: c.name, billitName: c.billitName || p.billitName, rates: { ...p.rates }, partner: false, near: false, due: p.due };
+  }
   // Client proche : le déplacement est facturé avec l'article zone 1 (dep-003).
   const r = c.near ? { ...rates.client, dep: rates.zone1.dep, depLabel: rates.zone1.depLabel, depRef: rates.zone1.depRef } : { ...rates.client };
   r.types = rateTypes();                                 // types d'intervention : seulement pour les clients (un partenaire a un seul tarif)
@@ -254,6 +284,31 @@ function normalizeSettings() {
     if (!all[s.id]) { all[s.id] = JSON.parse(JSON.stringify(Object.fromEntries(PARTNER_FIELDS.filter(k => s[k] != null).map(k => [k, s[k]])))); state.settingsAt = Date.now(); }
     if (srvOn()) { PARTNER_FIELDS.forEach(k => delete s[k]); touch(s); }
   }
+  if (ensureSocClients()) setTimeout(scheduleSync, 0);
+}
+// Société partenaire = aussi un client (demande de Fred, 10/11) : Alescom, commanditaire de One Level UP, est aussi son client
+// (travail fait pour Alescom elle-même), et One Level UP est un client d'Alescom. Une fiche client par paire (S facture T),
+// id fixe c_soc_<S>_<T> : pas de doublon entre appareils, et une fiche supprimée n'est pas recréée. Fiche déjà créée à la main
+// sous le même nom : simplement reliée (socRef). Une société ne se propose pas comme son propre client (clientOptions).
+// S = ma société et celles que je gère (serveur) ; sans serveur, toutes (l'administrateur gère tout). Renvoie true si une fiche a changé.
+function ensureSocClients() {
+  if (srvOn() && !state.lastSync) return false;          // appareil neuf : attendre les clients du serveur
+  const mine = liveSocs().filter(s => !srvOn() || s.id === HOME || managedByMe(s.id));
+  let changed = false;
+  for (const S of mine) for (const T of activeSocs()) {
+    if (T.id === S.id) continue;
+    const id = `c_soc_${S.id}_${T.id}`;
+    if (state.clients.some(c => c.id === id || (c.socRef === T.id && clientSoc(c) === S.id))) continue;
+    const same = state.clients.find(c => !c.deleted && clientSoc(c) === S.id && fold(c.name) === fold(T.name));
+    if (same) { same.socRef = T.id; touch(same); changed = true; continue; }
+    // Client de ma société : nom et liens de facturation repris du partenaire (Réglages → Partenaires), sinon le nom de la société.
+    const p = S.id === HOME ? state.settings.partners?.[T.id] || {} : {};
+    const links = JSON.parse(JSON.stringify({ ...(p.billitIds ? { billitIds: p.billitIds } : {}), ...(p.ext ? { ext: p.ext } : {}) }));
+    state.clients.push(touch({ id, name: T.name, billitName: S.id === HOME ? partnerOf(T.id).billitName : '', near: false,
+      societeId: S.id, defaultAlescom: S.id === 'alescom', server: false, servers: 0, socRef: T.id, ...links }));
+    changed = true;
+  }
+  return changed;
 }
 // Échéance des factures Billit (jours) : 15 j pour les clients, celle du commanditaire sinon (Alescom 10 j) ; à modifier au besoin dans Billit.
 const dueDays = info => info.due ?? 15;
@@ -283,7 +338,7 @@ const prestationsFile = b => Xlsx.prestations(sortEntries(live().filter(e => e.b
 
 // Achats refacturés (module Achats, achats.js) : ils peuvent être ajoutés à la facture d'un client.
 const achSum = ach => ach.reduce((s, x) => s + x.total, 0);
-const achLabel = x => `${x.ref} ${x.label}${x.domain ? ' – ' + x.domain : ''}`;
+const achLabel = x => `${x.ref} ${x.label}${x.client ? ' – ' + x.client : ''}${x.domain ? ' – ' + x.domain : ''}`;
 // Objet de la facture : interventions (période) et/ou achats refacturés.
 function billTitle(b) {
   const parts = [];
@@ -671,7 +726,7 @@ function bindEdits(root = document) {
 // Le client choisi reste dans la liste même s'il est archivé ou supprimé : sinon le menu prendrait un autre client à l'enregistrement.
 // Seulement les clients visibles par l'utilisateur connecté (Administration).
 function clientOptions(sel) {
-  const list = activeClients().filter(canSee), cur = sel && !list.some(c => c.id === sel) && state.clients.find(c => c.id === sel);
+  const list = activeClients().filter(c => canSee(c) && c.socRef !== HOME), cur = sel && !list.some(c => c.id === sel) && state.clients.find(c => c.id === sel);
   return (cur ? `<option value="${cur.id}" selected>${esc(cur.name)}${cur.deleted ? ' (supprimé)' : cur.archived ? ' (archivé)' : ''}</option>` : '')
     + list.map(c => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
 }
@@ -1109,10 +1164,10 @@ function billingGroups() {
   // Seulement ce que One Level UP facture (pas le travail d'un autre technicien pour un autre commanditaire).
   const open = live().filter(e => !e.billId && billable(e));
   // Un client sans intervention en attente apparaît aussi s'il a des achats prêts à refacturer.
-  const keys = [...new Set([...open.map(groupKey), ...Achats.readyClients().map(id => 'c:' + id)])];
+  const keys = [...new Set([...open.map(groupKey), ...Achats.readyClients().map(achatKey)])];
   const groups = keys.map(k => {
     const info = groupInfo(k), es = sortEntries(open.filter(e => groupKey(e) === k));
-    const ach = k.startsWith('c:') ? Achats.readyFor(k.slice(2)) : [], t = totals(es, info.rates);
+    const ach = achFor(k), t = totals(es, info.rates);
     // age : jours d'attente de la plus ancienne intervention (affiché « depuis n j » à partir de 20 j).
     const age = es.length ? Math.round((new Date(today() + 'T00:00') - new Date(es[0].date + 'T00:00')) / 864e5) : 0;
     return { info, es, ach, t, achAmount: achSum(ach), amount: t.amount + achSum(ach), age };
@@ -1168,7 +1223,7 @@ function viewBillingTarget(key, all) {
   const es = sortEntries(all.filter(e => e.date <= billUntil));
   const sel = es.filter(e => !excluded.has(e.id));
   const t = totals(sel, r);
-  const ach = key.startsWith('c:') ? Achats.readyFor(key.slice(2)) : [];
+  const ach = achFor(key);
   const selA = ach.filter(x => !excludedAch.has(x.id));
   const what = [sel.length && `${sel.length} intervention(s)`, selA.length && `${selA.length} achat(s)`].filter(Boolean).join(' + ');
 
@@ -1283,57 +1338,129 @@ function billitStatus(b) {
 }
 
 // Réglages → Connecteur de facturation (données sur le serveur) : logiciel, clé et PartyID par mode, gardés chiffrés sur le serveur pour la société.
+// Billit : clé API + PartyID. Odoo : adresse, base, utilisateur, clé API + société (architecture.md, section 11).
 function comptaCard() {
   return `<label>Logiciel de facturation</label>
-    <select id="cpType"><option value="billit">Billit</option><option value="odoo" disabled>Odoo (bientôt)</option></select>
-    ${['test', 'live'].map(k => `<div class="card" style="margin:10px 0;padding:10px">
-      <div class="row"><strong class="grow">${k === 'live' ? 'Réel' : 'Test (sandbox)'}</strong><span class="small" data-cst="${k}">Lecture…</span></div>
-      <div class="grid2"><div><label>Clé API</label><input type="password" autocomplete="off" data-ck="${k}" placeholder="Saisir pour remplacer"></div>
-        <div><label>Société (PartyID)</label><select data-cp="${k}" disabled><option value="">—</option></select></div></div>
-      <div class="row" style="margin-top:6px"><button class="btn" data-cx="${k}" disabled>Effacer</button></div></div>`).join('')}
+    <select id="cpType"><option value="billit">Billit</option><option value="odoo">Odoo</option></select>
+    <div id="cpModes"></div>
     <p class="small muted">🔒 Connecteur de ta société : clés chiffrées sur le serveur OVH, jamais sur les appareils ni dans OneDrive.
-      Une clé saisie est d'abord contrôlée par le logiciel ; la société (PartyID) est choisie seule s'il n'y en a qu'une.</p>`;
+      Les identifiants sont d'abord contrôlés par le logiciel ; la société est choisie seule s'il n'y en a qu'une.</p>
+    <p class="small muted" id="cpHelp"></p>`;
 }
+const COMPTA_HELP = {
+  billit: 'Clé API : dans Billit, menu de ton profil → API. La société (PartyID) est retrouvée automatiquement. La clé donne accès à tout ton Billit : tu peux la révoquer à tout moment dans Billit.',
+  odoo: 'Odoo 13 à 19 (Odoo Online : seulement avec une formule qui ouvre l\'API externe ; Odoo.sh ou hébergé : toujours). Adresse : https://… du site Odoo, sans chemin. '
+    + 'Base : nom de la base de données (Odoo.sh : celui de la branche ; « Test » = une base de test ou de staging). Utilisateur : son identifiant de connexion (e-mail). '
+    + 'Clé API : dans Odoo, Mon profil → Sécurité du compte → Nouvelle clé API. Conseillé : un utilisateur dédié avec les droits Facturation (sans droit de validation si possible). '
+    + 'LevelDesk ne crée que des factures en brouillon et des articles : jamais de validation, d\'envoi ni de paiement.'
+};
 function bindComptaCard() {
-  const cos = {};   // sociétés liées à la clé, connues après un contrôle
+  const cos = {};   // sociétés liées aux identifiants, connues après un contrôle
+  let conf = null;
   const say = (k, h) => { const el = $(`[data-cst="${k}"]`); if (el) el.innerHTML = h; };
-  const draw = conf => {
+  const type = () => $('#cpType')?.value || 'billit';
+  const blocks = () => {
+    const t = type();
+    $('#cpModes').innerHTML = ['test', 'live'].map(k => `<div class="card" style="margin:10px 0;padding:10px">
+      <div class="row"><strong class="grow">${k === 'live' ? 'Réel' : t === 'odoo' ? 'Test (base de test)' : 'Test (sandbox)'}</strong><span class="small" data-cst="${k}">Lecture…</span></div>
+      ${t === 'odoo' ? `<label>Adresse du site Odoo</label><input data-co="${k}.url" placeholder="https://societe.odoo.com" autocapitalize="off" spellcheck="false">
+        <div class="grid2"><div><label>Base de données</label><input data-co="${k}.db" autocapitalize="off" spellcheck="false"></div>
+          <div><label>Utilisateur (e-mail)</label><input data-co="${k}.login" autocapitalize="off" spellcheck="false"></div></div>
+        <div class="grid2"><div><label>Clé API</label><input type="password" autocomplete="off" data-co="${k}.apiKey" placeholder="Saisir pour remplacer"></div>
+          <div><label>Société</label><select data-cp="${k}" disabled><option value="">—</option></select></div></div>
+        <div class="row" style="margin-top:6px"><button class="btn primary" data-cs="${k}">Contrôler et enregistrer</button><button class="btn" data-cx="${k}" disabled>Effacer</button></div>`
+      : `<div class="grid2"><div><label>Clé API</label><input type="password" autocomplete="off" data-ck="${k}" placeholder="Saisir pour remplacer"></div>
+          <div><label>Société (PartyID)</label><select data-cp="${k}" disabled><option value="">—</option></select></div></div>
+        <div class="row" style="margin-top:6px"><button class="btn" data-cx="${k}" disabled>Effacer</button></div>`}</div>`).join('');
+    $('#cpHelp').textContent = COMPTA_HELP[t];
+    bindBlocks();
+  };
+  const draw = c => {
+    conf = c;
     for (const k of ['test', 'live']) {
-      const x = conf?.modes?.[k] || {}, sel = $(`[data-cp="${k}"]`);
+      const x = c?.modes?.[k] || {}, sel = $(`[data-cp="${k}"]`), mine = x.type === type();
       if (!sel) return;
       say(k, !x.access ? '<span class="pill warn">Non autorisé sur ce serveur</span>'
-        : x.key ? `<span class="pill ok">✓ ${esc(conf.types?.[x.type] || x.type)}${x.company ? ' · ' + esc(x.company) : ''}${x.access === 'ro' ? ' (lecture seule)' : ''}</span>
+        : x.key ? `<span class="pill ${mine ? 'ok' : 'warn'}">${mine ? '✓' : 'Actuellement :'} ${esc(c.types?.[x.type] || x.type)}${x.company ? ' · ' + esc(x.company) : ''}${x.access === 'ro' ? ' (lecture seule)' : ''}</span>
             <span class="muted">${esc(frDate(String(x.at || '').slice(0, 10)))} · ${esc(x.by || '')}</span>`
         : '<span class="pill warn">Pas configuré</span>');
-      const list = cos[k] || (x.partyId ? [{ id: x.partyId, name: x.company || '' }] : []);
-      sel.innerHTML = (x.partyId ? '' : '<option value="">— à choisir —</option>') + list.map(c => `<option value="${esc(c.id)}" ${c.id === x.partyId ? 'selected' : ''}>${esc(c.name)} (${esc(c.id)})</option>`).join('');
-      sel.disabled = !x.key || (list.length < 2 && !!x.partyId);
+      const list = mine ? cos[k] || (x.partyId ? [{ id: x.partyId, name: x.company || '' }] : []) : [];
+      sel.innerHTML = (mine && x.partyId ? '' : '<option value="">— à choisir —</option>') + list.map(o => `<option value="${esc(o.id)}" ${o.id === x.partyId ? 'selected' : ''}>${esc(o.name)} (${esc(o.id)})</option>`).join('');
+      sel.disabled = !mine || !x.key || (list.length < 2 && !!x.partyId);
       $(`[data-cx="${k}"]`).disabled = !x.key;
-      $(`[data-ck="${k}"]`).disabled = !x.access;
+      $$(`[data-ck="${k}"], [data-co^="${k}."], [data-cs="${k}"]`).forEach(i => i.disabled = !x.access);
+      if (mine) for (const f of ['url', 'db', 'login']) { const i = $(`[data-co="${k}.${f}"]`); if (i && !i.value) i.value = x[f] || ''; }
     }
-    const t = Object.values(conf?.modes || {}).find(m => m.type)?.type;
-    if (t && $('#cpType')) $('#cpType').value = t;
   };
   const failAll = e => ['test', 'live'].forEach(k => say(k, `<span class="pill warn">${esc(e.message)}</span>`));
-  Compta.loadConfig(true).then(draw).catch(failAll);
   const save = async (k, body, msg) => {
     try {
-      const r = await Compta.saveConfig({ mode: k, type: $('#cpType').value, ...body });
+      const r = await Compta.saveConfig({ mode: k, type: type(), ...body });
       if (r.companies?.length) cos[k] = r.companies;
       draw(r); toast(msg);
     } catch (e) { say(k, `<span class="pill warn">${esc(e.message)}</span>`); }
   };
-  $$('[data-ck]').forEach(i => i.onchange = () => {
-    const k = i.dataset.ck, v = i.value.trim(); i.value = '';
-    if (!v) return;
-    say(k, 'Contrôle de la clé…');
-    save(k, { apiKey: v }, 'Clé enregistrée sur le serveur');
-  });
-  $$('[data-cp]').forEach(sel => sel.onchange = () => sel.value && save(sel.dataset.cp, { partyId: sel.value }, 'Société enregistrée'));
-  $$('[data-cx]').forEach(b => b.onclick = () => {
-    const k = b.dataset.cx;
-    if (confirm(`Effacer le connecteur ${k === 'live' ? 'réel' : 'test'} de ta société ?\nPlus aucune facture ne pourra être envoyée dans ce mode.`)) save(k, { clear: true }, 'Connecteur effacé');
-  });
+  function bindBlocks() {
+    $$('[data-ck]').forEach(i => i.onchange = () => {
+      const k = i.dataset.ck, v = i.value.trim(); i.value = '';
+      if (!v) return;
+      say(k, 'Contrôle de la clé…');
+      save(k, { apiKey: v }, 'Clé enregistrée sur le serveur');
+    });
+    $$('[data-cs]').forEach(b => b.onclick = ev => {
+      ev.preventDefault();
+      const k = b.dataset.cs, v = f => $(`[data-co="${k}.${f}"]`).value.trim();
+      const body = { url: v('url'), db: v('db'), login: v('login'), apiKey: v('apiKey') };
+      if (!body.url || !body.db || !body.login) return say(k, '<span class="pill warn">Adresse, base et utilisateur requis.</span>');
+      $(`[data-co="${k}.apiKey"]`).value = '';
+      say(k, 'Contrôle par Odoo…');
+      save(k, body, 'Connecteur Odoo enregistré sur le serveur');
+    });
+    $$('[data-cp]').forEach(sel => sel.onchange = () => sel.value && save(sel.dataset.cp, { partyId: sel.value }, 'Société enregistrée'));
+    $$('[data-cx]').forEach(b => b.onclick = ev => {
+      ev.preventDefault();
+      const k = b.dataset.cx;
+      if (confirm(`Effacer le connecteur ${k === 'live' ? 'réel' : 'test'} de ta société ?\nPlus aucune facture ne pourra être envoyée dans ce mode.`)) save(k, { clear: true }, 'Connecteur effacé');
+    });
+  }
+  // Changer de logiciel : rien n'est enregistré tant que les identifiants du nouveau logiciel n'ont pas été contrôlés.
+  $('#cpType').onchange = () => { blocks(); draw(conf); $('#cpCopy')?.classList.toggle('hidden', type() !== 'billit'); };
+  blocks();
+  Compta.loadConfig(true).then(c => {
+    const t = Object.values(c?.modes || {}).find(m => m.type)?.type;
+    if (t && t !== type()) { $('#cpType').value = t; blocks(); }
+    $('#cpCopy')?.classList.toggle('hidden', type() !== 'billit');
+    draw(c);
+  }).catch(failAll);
+}
+
+// Réglages → Ma société → Codes articles : modèle propre à la société (achats.js, makeRef).
+function refModelCard() {
+  const m = Achats.refModel();
+  return `<div class="card"><h2>Codes articles</h2>
+    <p class="small muted" style="margin-top:0">Modèle du code proposé quand tu crées un article dans ${esc(Compta.label())} (onglet Articles, achats). Propre à ta société.</p>
+    <label>Modèle</label><input id="rmPat" value="${esc(m.pattern)}" autocapitalize="off" spellcheck="false" maxlength="40">
+    <p class="small muted" style="margin:4px 0 0">Repères : <code>{cat}</code> 3 premières lettres de la catégorie · <code>{CAT}</code> en majuscules · <code>{cat:4}</code> 4 lettres ·
+      <code>{n:3}</code> numéro suivant sur 3 chiffres · <code>{aaaa}</code> / <code>{aa}</code> année. Le reste est recopié tel quel. Ex. <code>{cat}-{n:3}</code>, <code>ART-{n:5}</code>, <code>{CAT}{aa}-{n:4}</code>.</p>
+    <label>Préfixes imposés (une ligne par catégorie : catégorie = préfixe)</label>
+    <textarea id="rmEx" rows="3" placeholder="Service Internet = int">${esc(Object.entries(m.prefixes).map(([k, v]) => `${k} = ${v}`).join('\n'))}</textarea>
+    <p class="small" id="rmPrev"></p></div>`;
+}
+function bindRefModel(saveSettings) {
+  if (!$('#rmPat')) return;
+  const read = () => ({ pattern: $('#rmPat').value.trim(),
+    prefixes: Object.fromEntries($('#rmEx').value.split('\n').map(l => l.split('=')).filter(p => p.length === 2 && p[0].trim() && p[1].trim())
+      .map(([k, v]) => [fold(k).trim(), v.trim()])) });
+  const prev = () => {
+    const m = read(), ex = Object.keys(m.prefixes)[0];
+    const bad = !/\{n(:\d{1,2})?\}/.test(m.pattern) ? 'Le modèle doit contenir {n} (ou {n:3}…) : sinon deux articles auraient le même code.' : '';
+    $('#rmPrev').innerHTML = bad ? `<span class="pill warn" style="white-space:normal">${esc(bad)}</span>`
+      : 'Exemples : ' + ['Logiciel', 'Matériel', ...(ex ? [ex] : [])].map(n => `${esc(n)} → <code>${esc(Achats.makeRef(m, { name: n }, []) || '?')}</code>`).join(' · ');
+    return !bad;
+  };
+  prev();
+  $('#rmPat').oninput = $('#rmEx').oninput = prev;
+  $('#rmPat').onchange = $('#rmEx').onchange = () => { if (prev()) { state.settings.refModel = read(); saveSettings(); } };
 }
 
 // Réglages → Ma société → Fichiers : emplacement (réglage de la société) et fichiers rangés sur le serveur (téléchargement, suppression).
@@ -1368,9 +1495,9 @@ function bindFilesCard() {
 
 // Lien d'un client (ou d'une société commanditaire) avec sa fiche dans le logiciel de facturation, par connecteur et par mode.
 // billitIds est encore lu et écrit pour Billit : les appareils en ancienne version (et la production en OneDrive) s'en servent.
-const extId = (o, m = Compta.mode()) => o?.ext?.[Compta.type()]?.[m] ?? (Compta.type() === 'billit' ? o?.billitIds?.[m] : undefined);
-function setExt(o, id, m = Compta.mode()) {
-  const t = Compta.type();
+// t : logiciel (par défaut celui de ma société ; client d'une société que je gère : celui de cette société, Compta.other.type).
+const extId = (o, m = Compta.mode(), t = Compta.type()) => o?.ext?.[t]?.[m] ?? (t === 'billit' ? o?.billitIds?.[m] : undefined);
+function setExt(o, id, m = Compta.mode(), t = Compta.type()) {
   o.ext = { ...o.ext, [t]: { ...o.ext?.[t], [m]: String(id) } };
   if (t === 'billit') o.billitIds = { ...o.billitIds, [m]: +id || id };
   touch(o);
@@ -1600,6 +1727,8 @@ function editPartner(id) {
     <div class="grid3">${rate('h', '€ / heure')}${rate('m', '€ / minute')}${rate('dep', '€ déplacement')}</div>
     <div class="grid3">${txt('hRef', 'Article heure')}${txt('mRef', 'Article minute')}${txt('depRef', 'Article déplacement')}</div>
     <label>Échéance des factures (jours)</label><input type="number" step="1" min="0" id="pDue" value="${esc(p.due)}" style="max-width:120px">
+    <label>Marge sur les achats refacturés (%)</label><input type="number" step="0.1" min="0" id="pAchMargin" value="${esc(p.achMargin)}" style="max-width:120px">
+    <p class="small muted" style="margin:4px 0 0">Produits achetés (onglet Achats) pour ${esc(s.name)} ou pour un de ses clients : prix d'achat + cette marge, à la place des marges article et fournisseur. Vide = 1 %.</p>
     <div class="actions"><button class="btn" value="cancel">Annuler</button><button class="btn primary" id="pSave">Enregistrer</button></div>`;
   $('#pSave').onclick = async ev => {
     ev.preventDefault();
@@ -1609,6 +1738,9 @@ function editPartner(id) {
     // Les libellés (récap, fichier Prestations) suivent le nom de la société et les articles (Alescom garde les siens).
     if (id !== 'alescom') Object.assign(rates, { hLabel: `Main d'œuvre ${s.name} heure (${rates.hRef})`, mLabel: `Main d'œuvre ${s.name} minutes (${rates.mRef})`, depLabel: `Déplacement ${s.name} (${rates.depRef})` });
     Object.assign(partnerCfg(id), { rates, billitName: $('#pBillit').value.trim() || s.name, due: Math.max(0, parseInt($('#pDue').value, 10) || 0) });
+    // Marge d'achats : vide = 1 % par défaut (partnerOf) ; déjà facturé = prix figé, pas changé.
+    const am = parseFloat($('#pAchMargin').value.replace(',', '.'));
+    if (isNaN(am) || am < 0) delete partnerCfg(id).achMargin; else partnerCfg(id).achMargin = am;
     state.settingsAt = Date.now();
     dlg.close(); await persist(); toast('Tarifs enregistrés');
   };
@@ -1734,7 +1866,7 @@ function viewSettings() {
     ${installPrompt ? '<button class="btn primary big" id="install" style="margin-bottom:12px">Installer l\'application</button>' : ''}
     <h3 class="secth">Ma société${srvOn() && state.srv.me?.societe ? ' · ' + esc(state.srv.me.societe) : ''}</h3>
     <div class="card"><div class="row"><h2 class="grow" style="margin:0">Clients (${state.clients.filter(c => !c.deleted).length})</h2>
-      ${isAdmin() ? '<button class="btn" id="addrImport" title="Remplit les adresses vides avec celles des clients Billit reliés">📍 Adresses Billit</button>' : ''}<button class="btn" id="addClient">+ Ajouter</button></div>
+      ${isAdmin() ? '<button class="btn" id="addrImport" title="Remplit les adresses vides depuis le logiciel de facturation de la société de chaque client (Billit, Odoo)">📍 Adresses</button>' : ''}<button class="btn" id="addClient">+ Ajouter</button></div>
       <input type="search" id="cSearch" placeholder="Rechercher un client…" style="margin-top:10px">
       <ul class="list" style="margin-top:8px;max-height:420px;overflow:auto">${state.clients.filter(c => !c.deleted).sort((a, b) => a.name.localeCompare(b.name)).map(c => `
         <li data-name="${esc(fold(c.name + ' ' + (c.billitName || '') + ' ' + (c.domains || []).join(' ')))}">
@@ -1788,15 +1920,16 @@ function viewSettings() {
           Une clé saisie ici est contrôlée par Billit puis enregistrée sur le serveur, une seule fois pour tous les appareils.`
         : '🔒 Les clés API restent sur cet appareil (jamais sur OneDrive) : à saisir une fois sur chaque appareil, effacées à la déconnexion.'}</p>`}
       <div class="row" style="margin-top:10px"><button class="btn" id="bTest">Tester la connexion</button><span class="small" id="bTestRes"></span></div>
-      ${ENV === 'prod' ? '' : `<h3 style="margin:16px 0 4px">Copier Billit réel → sandbox</h3>
+      ${ENV === 'prod' ? '' : `<div id="cpCopy"><h3 style="margin:16px 0 4px">Copier Billit réel → sandbox</h3>
       <p class="small muted">Clients, articles (catégories par leur nom) et factures de vente et d'achat des 3 derniers mois, avec leurs fournisseurs.
         Le Billit réel est seulement lu (clé « réel » ci-dessus). Ventes copiées en Projet ; clients et fournisseurs sans e-mail ni Peppol.
         Relancer ne crée pas de doublon. Pour que l'onglet Achats importe les factures d'achat copiées, ouvre-le une fois <em>avant</em> la copie.</p>
       <div class="row"><button class="btn" id="cpGo">Préparer la copie</button><button class="btn" id="cpArt">Copier les articles seulement</button></div>
-      <pre class="recap hidden" id="cpLog"></pre>`}
-      <p class="small muted">Clé API : dans Billit, menu de ton profil → API. Laisse le PartyID vide puis clique « Tester la connexion » : il est retrouvé automatiquement.
-        La clé donne accès à tout ton Billit : tu peux la révoquer à tout moment dans Billit.</p>
+      <pre class="recap hidden" id="cpLog"></pre></div>`}
+      ${srvOn() ? '' : `<p class="small muted">Clé API : dans Billit, menu de ton profil → API. Laisse le PartyID vide puis clique « Tester la connexion » : il est retrouvé automatiquement.
+        La clé donne accès à tout ton Billit : tu peux la révoquer à tout moment dans Billit.</p>`}
     </div>
+    ${isAdmin() ? refModelCard() : ''}
 
     <h3 class="secth">Mes réglages</h3>
     <div class="card"><h2>${srvOn() ? 'Mon compte' : 'OneDrive'}</h2>
@@ -1842,7 +1975,7 @@ function viewSettings() {
   if (installPrompt) $('#install').onclick = async () => { installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; render(); };
   $('#addClient').onclick = () => editClient(null);
   $$('[data-partner]').forEach(li => li.onclick = () => editPartner(li.dataset.partner));
-  if ($('#addrImport')) $('#addrImport').onclick = () => importAddresses().catch(e => alert('Adresses Billit : ' + e.message));
+  if ($('#addrImport')) $('#addrImport').onclick = () => importAddresses().catch(e => alert('Adresses : ' + e.message));
   $$('[data-client]').forEach(li => li.onclick = () => editClient(state.clients.find(c => c.id === li.dataset.client)));
   $$('[data-delclient]').forEach(b => b.onclick = () => deleteClient(state.clients.find(c => c.id === b.dataset.delclient)));
   $('#cSearch').oninput = ev => {
@@ -1855,6 +1988,7 @@ function viewSettings() {
     if (isNaN(v)) return;
     r[k][fld] = v; saveSettings();
   });
+  bindRefModel(saveSettings);
   $('#addType').onclick = () => editType(null);
   $$('[data-type]').forEach(li => li.onclick = () => editType(li.dataset.type));
 
@@ -1929,7 +2063,7 @@ function viewSettings() {
       // Données sur le serveur : connecteur de la société (le PartyID est retrouvé ou choisi dans la carte ci-dessus).
       if (srvOn()) {
         const r = await Compta.test();
-        out.innerHTML = `<span class="pill ok">✓ Connecté (${esc(billitModeLabel(Compta.mode()))}) : ${esc(r.company || 'OK')} · PartyID ${esc(r.partyId)}</span>`;
+        out.innerHTML = `<span class="pill ok">✓ ${esc(Compta.label())} connecté (${esc(billitModeLabel(Compta.mode()))}) : ${esc(r.company || 'OK')} · société ${esc(r.partyId)}${r.version ? ' · version ' + esc(r.version) : ''}</span>`;
         return;
       }
       const a = await Billit.account();
@@ -2092,18 +2226,18 @@ async function deleteClient(c) {
 // onSaved(client) / onCancel() = retour à cet écran au lieu de fermer la fenêtre.
 function editClient(c, opts = {}) {
   const dlg = $('#dlg'), f = $('#dlgForm'), pre = opts.preset || {}, mode = Compta.mode(), soft = Compta.label();
-  // Lien avec le logiciel de facturation (choix dans la liste) : seulement si ce client n'y est pas encore relié dans ce mode.
-  const askBillit = !extId(c) && (!srvOn() || isAdmin());
-  let billitId = null;
-  // Client d'un commanditaire (société du client ≠ ma société) : c'est le commanditaire qui le facture en direct → pas de lien ni de nom dans MON logiciel
-  // de facturation (demande de Fred, 02/11). Les champs sont seulement masqués : une valeur déjà saisie est gardée.
+  // Lien avec le logiciel de facturation de la société du client (choix dans la liste ; remplit aussi l'adresse) : administrateur, avec le serveur.
+  const askBillit = !srvOn() || isAdmin();
+  let billitId = null, billitConn = null;
+  // Client d'un commanditaire (société du client ≠ ma société) : c'est le commanditaire qui le facture en direct → pas de nom dans MON logiciel
+  // de facturation (demande de Fred, 02/11). Si je gère cette société (Alescom), le client est relié à SON logiciel (Odoo d'Alescom, demande de Fred, 04/11).
   const billedByMe = s => s === HOME;
-  const own0 = billedByMe(c ? clientSoc(c) : (pre.societeId || HOME));
+  const soc0 = c ? clientSoc(c) : (pre.societeId || HOME), own0 = billedByMe(soc0);
   f.innerHTML = `<h2>${c ? 'Modifier' : 'Nouveau'} client</h2>
-    <div id="cBillitBox" class="${own0 ? '' : 'hidden'}">
-    ${askBillit ? `<label>Client ${esc(soft)} (${billitModeLabel(mode)})</label>
-      <select id="cBillitPick" disabled><option value="">Chargement des clients ${esc(soft)}…</option></select>
-      <p class="small muted" id="cBillitInfo" style="margin:4px 0 0">Clients ${esc(soft)} pas encore reliés à un client de l'app.</p>` : ''}
+    <div id="cBillitBox" class="${clientConn(soc0) ? '' : 'hidden'}">
+    ${askBillit ? `<label id="cBillitLbl">Client ${esc(soft)} (${billitModeLabel(mode)})</label>
+      <select id="cBillitPick" disabled><option value="">Chargement…</option></select>
+      <p class="small muted" id="cBillitInfo" style="margin:4px 0 0"></p>` : ''}
     </div>
     <label>Nom</label><input id="cName" value="${esc(c?.name ?? pre.name ?? '')}" placeholder="ex. Vedi">
     <div id="cBillitBox2" class="${own0 ? '' : 'hidden'}"><label>Nom du client dans ${esc(soft)}</label><input id="cBillit" value="${esc(c?.billitName)}" placeholder="ex. V.T.S. SA"></div>
@@ -2130,35 +2264,55 @@ function editClient(c, opts = {}) {
       <button class="btn" ${opts.onCancel ? 'id="cCancel"' : 'value="cancel"'}>${opts.onCancel ? 'Retour' : 'Annuler'}</button><button class="btn primary" id="cSave">Enregistrer</button></div>`;
   // M365 Enforce et ESET Cloud : seulement pour un client avec serveur(s).
   $('#cServer').onchange = ev => ['#cServersBox', '#cSrvOpts'].forEach(s => $(s).classList.toggle('hidden', !ev.target.checked));
-  $('#cSoc').onchange = ev => {
-    const own = billedByMe(ev.target.value);
-    ['#cBillitBox', '#cBillitBox2'].forEach(s => $(s).classList.toggle('hidden', !own));
-    $('#cCmdInfo').classList.toggle('hidden', own);
-  };
-  if ($('#cDel')) $('#cDel').onclick = () => deleteClient(c);
-  if (opts.onCancel) $('#cCancel').onclick = () => opts.onCancel();
-  if (askBillit) (async () => {
-    const sel = $('#cBillitPick'), info = $('#cBillitInfo');
+  // Liste des clients du logiciel de la société socId : clients pas encore reliés ; si ce client l'est déjà, seulement « Reprendre l'adresse ».
+  let pickRun = 0;
+  const loadPick = async socId => {
+    const sel = $('#cBillitPick'), info = $('#cBillitInfo'), run = ++pickRun, conn = clientConn(socId);
+    billitId = null; billitConn = conn;
+    if (!sel || !conn) return;
+    const own = socId === HOME;
+    sel.disabled = true; sel.innerHTML = '<option value="">Chargement…</option>'; info.textContent = '';
     try {
-      await Compta.loadConfig();
-      if (!Compta.ready()) throw new Error(`connecteur ${soft} non configuré (Réglages) : nom à saisir à la main.`);
-      // Déjà reliés : ID mémorisé dans ce mode, ou même nom qu'un client de l'app.
-      const used = new Set(state.clients.filter(x => !x.deleted && x !== c).flatMap(x => [extId(x) && 'id:' + extId(x), x.billitName && 'n:' + fold(x.billitName)]).filter(Boolean));
-      const free = (await Compta.clients()).filter(p => !used.has('id:' + p.id) && !used.has('n:' + fold(p.name))).sort((a, b) => a.name.localeCompare(b.name));
-      if (!sel.isConnected) return;
-      sel.innerHTML = `<option value="">— aucun / saisie à la main —</option>` + free.map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.vat ? ' · ' + esc(p.vat) : ''}</option>`).join('');
+      await conn.load();
+      const sw = conn.label(), t = conn.type();
+      $('#cBillitLbl').textContent = `Client ${sw}${own ? '' : ' de ' + soc(socId).name} (${mode === 'live' ? 'réel' : 'test'})`;
+      if (!conn.ready()) throw new Error(own ? `connecteur ${sw} non configuré (Réglages) : nom à saisir à la main.`
+        : `${soc(socId).name} n'a pas de connecteur de facturation (son administrateur : Réglages → Connecteur de facturation).`);
+      const all = await conn.clients();
+      if (run !== pickRun || !sel.isConnected) return;
+      const linked = c && extId(c, mode, t) && all.find(p => p.id === String(extId(c, mode, t)));
+      if (linked) {
+        sel.innerHTML = `<option value="${esc(linked.id)}">${esc(linked.name)}</option>`;
+        info.innerHTML = `Relié${linked.address ? ` · ${esc(linked.address)} <button class="btn chip" type="button" id="cAddrGet">Reprendre l'adresse</button>` : ' (pas d\'adresse dans ' + esc(sw) + ')'}`;
+        if ($('#cAddrGet')) $('#cAddrGet').onclick = () => { $('#cAddr').value = linked.address; toast('Adresse reprise (enregistrer pour garder)'); };
+        return;
+      }
+      // Déjà reliés : ID mémorisé dans ce mode, ou (mon logiciel) même nom qu'un client de l'app.
+      const used = new Set(state.clients.filter(x => !x.deleted && x !== c).flatMap(x => [extId(x, mode, t) && 'id:' + extId(x, mode, t), own && x.billitName && 'n:' + fold(x.billitName)]).filter(Boolean));
+      const free = all.filter(p => !used.has('id:' + p.id) && !used.has('n:' + fold(p.name))).sort((a, b) => a.name.localeCompare(b.name));
+      sel.innerHTML = `<option value="">— aucun${own ? ' / saisie à la main' : ''} —</option>` + free.map(p => `<option value="${esc(p.id)}">${esc(p.name)}${p.vat ? ' · ' + esc(p.vat) : ''}</option>`).join('');
       sel.disabled = false;
-      info.textContent = `${free.length} client(s) ${soft} pas encore relié(s) à l'app.`;
+      info.textContent = `${free.length} client(s) ${sw} pas encore relié(s) à l'app.${own ? '' : ' Choisir le client remplit son adresse.'}`;
       sel.onchange = () => {
         const p = free.find(x => x.id === sel.value);
         billitId = p ? p.id : null;
         if (!p) return;
-        $('#cBillit').value = p.name;
+        if (own) $('#cBillit').value = p.name;
         if (!$('#cName').value.trim()) $('#cName').value = p.tradeName || p.name;
-        if (!$('#cAddr').value.trim()) $('#cAddr').value = p.address || '';
+        if (p.address) $('#cAddr').value = p.address;
       };
-    } catch (e) { if (sel.isConnected) { sel.innerHTML = '<option value="">—</option>'; info.textContent = `Liste ${soft} indisponible : ` + e.message; } }
-  })();
+    } catch (e) { if (sel.isConnected && run === pickRun) { sel.innerHTML = '<option value="">—</option>'; info.textContent = e.message; } }
+  };
+  $('#cSoc').onchange = ev => {
+    const own = billedByMe(ev.target.value);
+    $('#cBillitBox').classList.toggle('hidden', !clientConn(ev.target.value));
+    $('#cBillitBox2').classList.toggle('hidden', !own);
+    $('#cCmdInfo').classList.toggle('hidden', own);
+    if (askBillit) loadPick(ev.target.value);
+  };
+  if ($('#cDel')) $('#cDel').onclick = () => deleteClient(c);
+  if (opts.onCancel) $('#cCancel').onclick = () => opts.onCancel();
+  if (askBillit) loadPick(soc0);
   $('#cSave').onclick = async ev => {
     ev.preventDefault();
     const name = $('#cName').value.trim().replace(/\s+/g, ' ');
@@ -2175,7 +2329,7 @@ function editClient(c, opts = {}) {
     let saved = c;
     if (c) Object.assign(touch(c), data); else state.clients.push(saved = touch({ id: uid('c'), ...data }));
     // Client choisi dans la liste du logiciel : lien mémorisé (comme au 1er envoi d'une facture), pas de recherche par le nom ensuite.
-    if (billitId && billedByMe(data.societeId)) setExt(saved, billitId);
+    if (billitId && billitConn && billitConn.soc === data.societeId) setExt(saved, billitId, mode, billitConn.type());
     if (opts.onSaved) { await persist(); opts.onSaved(saved); return; }
     dlg.close(); await persist();
   };
@@ -2185,23 +2339,37 @@ function editClient(c, opts = {}) {
 // ---------- adresses des clients et navigation ----------
 // Réglages → Clients → « 📍 Adresses » : adresses vides remplies depuis les clients du logiciel de facturation reliés (ID mémorisé, sinon même nom).
 // Adresse de livraison d'abord (lieu d'intervention), choisie par le connecteur. Rien n'est écrasé.
+// Chaque client est cherché dans le logiciel de SA société : mes clients dans le mien (Billit), ceux d'une société que je gère dans le sien (Alescom → Odoo).
+// Trouvé par le nom (sans lien mémorisé) : le lien est aussi mémorisé. Clients d'un commanditaire indépendant : ignorés (son administrateur le fait).
 async function importAddresses() {
-  await Compta.loadConfig();
-  const soft = Compta.label();
-  if (!Compta.ready()) throw new Error(`connecteur ${soft} non configuré (Réglages).`);
-  toast(`Lecture des clients ${soft}…`);
-  const parties = await Compta.clients();
-  const byId = new Map(parties.map(p => [p.id, p]));
-  const byName = new Map(parties.flatMap(p => [p.name, p.tradeName].filter(Boolean).map(n => [fold(n), p])));
-  const found = activeClients().filter(c => !c.address).map(c => {
-    const p = byId.get(String(extId(c) || '')) || byName.get(fold(c.billitName || '')) || byName.get(fold(c.name));
-    return [c, p?.address || ''];
-  }).filter(([, a]) => a);
-  const missing = activeClients().filter(c => !c.address && !found.some(([x]) => x === c));
-  if (!found.length) return alert(`Aucune adresse à reprendre.${missing.length ? `\n${missing.length} client(s) sans adresse : pas de client ${soft} relié, ou pas d'adresse dans ${soft}.` : ''}`);
-  if (!confirm(`${found.length} adresse(s) trouvée(s) dans ${soft} :\n\n${found.slice(0, 15).map(([c, a]) => `${c.name} : ${a}`).join('\n')}${found.length > 15 ? '\n…' : ''}`
-    + `${missing.length ? `\n\n${missing.length} client(s) resteront sans adresse (à saisir dans leur fiche).` : ''}\n\nEnregistrer ces adresses ?`)) return;
-  found.forEach(([c, a]) => { c.address = a; touch(c); });
+  const todo = activeClients().filter(c => !c.address);
+  const bySoc = new Map();
+  for (const c of todo) { const s = clientSoc(c); if (clientConn(s)) (bySoc.get(s) || bySoc.set(s, []).get(s)).push(c); }
+  const found = [], notes = [];
+  const mode = Compta.mode();
+  for (const [s, cs] of bySoc) {
+    const conn = clientConn(s), who = s === HOME ? '' : ` (${soc(s).name})`;
+    try {
+      await conn.load();
+      const sw = conn.label();
+      if (!conn.ready()) { notes.push(`${cs.length} client(s)${who} : pas de connecteur de facturation.`); continue; }
+      toast(`Lecture des clients ${sw}${who}…`);
+      const parties = await conn.clients(), t = conn.type();
+      const byId = new Map(parties.map(p => [p.id, p]));
+      const byName = new Map(parties.flatMap(p => [p.name, p.tradeName].filter(Boolean).map(n => [fold(n), p])));
+      for (const c of cs) {
+        const id = extId(c, mode, t);
+        const p = id ? byId.get(String(id)) : byName.get(fold(c.billitName || '')) || byName.get(fold(c.name));
+        if (p?.address) found.push({ c, a: p.address, sw, link: !id && p.id, t });
+      }
+    } catch (e) { notes.push(`${cs.length} client(s)${who} : ${e.message}`); }
+  }
+  const missing = todo.length - found.length;
+  const tail = (missing ? `\n\n${missing} client(s) resteront sans adresse (pas relié, pas d'adresse dans le logiciel, ou client d'un commanditaire qui le gère lui-même).` : '')
+    + (notes.length ? '\n\n' + notes.join('\n') : '');
+  if (!found.length) return alert('Aucune adresse à reprendre.' + tail);
+  if (!confirm(`${found.length} adresse(s) trouvée(s) :\n\n${found.slice(0, 15).map(x => `${x.c.name} (${x.sw}) : ${x.a}`).join('\n')}${found.length > 15 ? '\n…' : ''}${tail}\n\nEnregistrer ces adresses ?`)) return;
+  found.forEach(x => { x.c.address = x.a; if (x.link) setExt(x.c, x.link, mode, x.t); touch(x.c); });
   await persist(); toast(`${found.length} adresse(s) enregistrée(s)`);
 }
 
