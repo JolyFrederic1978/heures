@@ -292,7 +292,9 @@ function normalizeSettings() {
 // sous le même nom : simplement reliée (socRef). Une société ne se propose pas comme son propre client (clientOptions).
 // S = ma société et celles que je gère (serveur) ; sans serveur, toutes (l'administrateur gère tout). Renvoie true si une fiche a changé.
 function ensureSocClients() {
-  if (srvOn() && !state.lastSync) return false;          // appareil neuf : attendre les clients du serveur
+  // Appareil neuf ou pas connecté : attendre la 1re synchro (serveur ou OneDrive), sinon des fiches créées ici pourraient remplacer celles qui existent
+  // (ou une fiche supprimée exprès). Vu le 10/11 : appareil pas connecté → fiches créées dans ses données vides.
+  if (!OneDrive.signedIn() || !state.lastSync) return false;
   const mine = liveSocs().filter(s => !srvOn() || s.id === HOME || managedByMe(s.id));
   let changed = false;
   for (const S of mine) for (const T of activeSocs()) {
