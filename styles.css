@@ -296,3 +296,21 @@ ul.arts li { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; bor
 .empty { text-align: center; color: var(--muted); padding: 24px 8px; }
 pre.recap { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
   padding: 10px; font-size: 13px; margin: 8px 0 0; }
+
+/* ---------- Supervision (supervision.js) : onglet Serveurs ---------- */
+.pill.supv-ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+.pill.supv-warn { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.pill.supv-crit { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); font-weight: 600; }
+.pill.supv-mute, .pill.supv-none { background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
+.supv-t-ok { color: var(--ok); } .supv-t-warn { color: var(--warn); } .supv-t-crit { color: var(--danger); } .supv-t-mute { color: var(--muted); }
+.supv-old { color: var(--warn); }
+.supv-sec { margin: 16px 0 6px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.supv-alerts li { padding: 8px 0; overflow-wrap: anywhere; }
+.supv-alerts .pill { flex: none; margin-top: 2px; }
+.supv-vol { margin: 8px 0; overflow-wrap: anywhere; }
+.bar > i.supv-b-ok { background: var(--ok); } .bar > i.supv-b-warn { background: var(--warn); } .bar > i.supv-b-crit { background: var(--danger); }
+.supv-actions { flex-wrap: wrap; gap: 8px; }
+.supv-box { margin: 6px 0 2px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.supv-imp { display: grid; grid-template-columns: 1fr minmax(160px, 240px); gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+@media (max-width: 560px) { .supv-imp { grid-template-columns: 1fr; } }
+dialog table.tot.ro td { overflow-wrap: anywhere; }

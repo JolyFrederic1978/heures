@@ -493,9 +493,10 @@ async function sync() {
 const srvOn = () => !!state?.srv?.on;
 // Modules de la société (architecture.md, section 3) ; tous actifs avec les fichiers OneDrive.
 const mod = name => !srvOn() || !!state.srv.me?.modules?.[name];
-const MODULES = ['facturation', 'taches', 'forfaits', 'achats', 'soustraitance', 'dictee'];
+const MODULES = ['facturation', 'taches', 'forfaits', 'achats', 'soustraitance', 'dictee', 'supervision'];
 const MODULE_NAMES = { facturation: 'Facturation (Facturer, Billit)', taches: 'Tâches', forfaits: 'Forfaits serveur (maintenance, mises à jour)',
-  achats: 'Achats (refacturation, Articles)', soustraitance: 'Sous-traitance (commanditaires)', dictee: 'Dictée 🎤' };
+  achats: 'Achats (refacturation, Articles)', soustraitance: 'Sous-traitance (commanditaires)', dictee: 'Dictée 🎤',
+  supervision: 'Supervision (agents serveur)' };
 let srvChecked = false, srvFull = true;
 const omit = (o, ...keys) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !keys.includes(k)));
 const fp = o => hash(JSON.stringify(o));
@@ -657,9 +658,9 @@ async function migrateToServer(replace) {
 }
 
 // ---------- rendu ----------
-const TITLES = { today: "Aujourd'hui", taches: 'Tâches', list: 'Interventions', billing: 'Facturer', achats: 'Achats', articles: 'Articles', admin: 'Administration', settings: 'Réglages' };
+const TITLES = { today: "Aujourd'hui", taches: 'Tâches', list: 'Interventions', billing: 'Facturer', achats: 'Achats', articles: 'Articles', serveurs: 'Serveurs', admin: 'Administration', settings: 'Réglages' };
 // Achats et Articles (achats.js), Tâches (taches.js) : modules séparés, avec leurs propres données et leur propre synchro.
-const VIEWS = () => ({ today: viewToday, taches: Taches.view, list: viewList, billing: viewBilling, achats: Achats.view, articles: Achats.articles, admin: viewAdmin, settings: viewSettings });
+const VIEWS = () => ({ today: viewToday, taches: Taches.view, list: viewList, billing: viewBilling, achats: Achats.view, articles: Achats.articles, serveurs: Supervision.view, admin: viewAdmin, settings: viewSettings });
 // Bandeau de la version de développement, avec le dossier de données utilisé (en rouge s'il ne s'agit pas d'un dossier -DEV).
 function envBar() {
   if (ENV === 'prod') return;
@@ -677,6 +678,7 @@ const TAB_RULES = {
   taches: () => mod('taches'),
   billing: () => isAdmin() && mod('facturation'),
   achats: () => isAdmin() && mod('achats'), articles: () => isAdmin() && mod('achats'),
+  serveurs: () => srvOn() && mod('supervision'),      // supervision.js : en ligne seulement, avec le serveur LevelDesk
   admin: () => isAdmin()
 };
 const tabAllowed = t => TAB_RULES[t]?.() ?? true;
@@ -2260,12 +2262,14 @@ function editClient(c, opts = {}) {
       <label class="check grow"><input type="checkbox" id="cM365" ${c?.m365Enforce ? 'checked' : ''}> M365 Enforce</label>
       <label class="check grow"><input type="checkbox" id="cEset" ${c?.esetCloud ? 'checked' : ''}> ESET Cloud</label>
     </div>
+    <div id="cSupv"></div>
     ${c ? `<label class="check"><input type="checkbox" id="cArch" ${c.archived ? 'checked' : ''}> Archivé (masqué des listes)</label>` : ''}
     <div class="actions">
       ${c ? '<button class="btn danger" id="cDel" style="margin-right:auto">Supprimer</button>' : ''}
       <button class="btn" ${opts.onCancel ? 'id="cCancel"' : 'value="cancel"'}>${opts.onCancel ? 'Retour' : 'Annuler'}</button><button class="btn primary" id="cSave">Enregistrer</button></div>`;
   // M365 Enforce et ESET Cloud : seulement pour un client avec serveur(s).
   $('#cServer').onchange = ev => ['#cServersBox', '#cSrvOpts'].forEach(s => $(s).classList.toggle('hidden', !ev.target.checked));
+  if (c?.server) Supervision.clientBox($('#cSupv'), c);      // serveurs supervisés de ce client (module Supervision, administrateur)
   // Liste des clients du logiciel de la société socId : clients pas encore reliés ; si ce client l'est déjà, seulement « Reprendre l'adresse ».
   let pickRun = 0;
   const loadPick = async socId => {
@@ -2480,6 +2484,7 @@ async function signOut() {
   OneDrive.logout();
   await Achats.reset();
   await Taches.reset();
+  Supervision.reset();
   const od = state.onedrive;
   state = DB.defaults(); state.onedrive = od;
   await DB.save(state);
