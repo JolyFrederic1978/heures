@@ -113,7 +113,7 @@ const Supervision = (() => {
         <div class="bar"><i class="supv-b-${cls}" style="width:${used}%"></i></div></div>`;
     }).join('');
     f.innerHTML = `<h2>${esc(s.name)} <span class="small muted">· ${esc(cname(s.clientId))}</span> ${lvPill(s)}</h2>
-      <p class="small muted" style="margin:0 0 10px">${esc(ago(s.lastSeen))}${r ? ' · collecte du ' + esc(r.collectedAt || frDate(r.day)) + (m.meta?.durationSec ? ' (' + esc(Math.round(m.meta.durationSec / 60)) + ' min)' : '') : ''}
+      <p class="small muted" style="margin:0 0 10px">${s.lastSeen ? esc(ago(s.lastSeen)) : s.hasToken ? 'Agent prévu, aucun envoi reçu' : 'Pas d\'agent installé'}${r ? ' · collecte du ' + esc(r.collectedAt || frDate(r.day)) + (m.meta?.durationSec ? ' (' + esc(Math.round(m.meta.durationSec / 60)) + ' min)' : '') : ''}
         ${m.meta && m.meta.runAsAdmin === false ? ' · <span class="supv-old">collecte sans droits d\'administrateur</span>' : ''}</p>
       ${!r ? `<p class="empty">Aucun export reçu.${s.hasToken ? ' L\'agent est-il installé sur le serveur ?' : ' Installe l\'agent sur ce serveur.'}</p>` : `
       ${alerts.length ? `<div class="supv-sec">Points d'attention</div><ul class="list supv-alerts">${alerts.map(a => `<li><span class="pill supv-${lvCls(a.level === 'Info' ? '' : a.level)}">${esc(a.level)}</span>
@@ -135,9 +135,10 @@ const Supervision = (() => {
         ${hw ? row('SPP HPE', t(hw.sppDetected)) + row('iLO', t(hw.iloVersion || hw.iloFirmware)) + row('RAID', t(hw.raid)) : ''}
       </table>
       ${vols ? `<div class="supv-sec">Volumes</div>${vols}` : ''}
+      ${upsBlock(m.ups)}
       <div class="supv-sec">État</div>
       <table class="tot ro">
-        ${row('Sauvegarde', (m.backup?.expected ? esc(m.backup.expected) + ' · ' : '') + (m.backup?.lastSuccess ? 'dernière réussie le ' + esc(m.backup.lastSuccess) : (m.backup?.expected ? 'aucune réussie détectée' : '<span class="muted">pas de sauvegarde à contrôler sur ce serveur</span>')))}
+        ${row('Sauvegarde', (m.backup?.expected ? esc(m.backup.expected) + ' · ' : '') + (m.backup?.lastSuccess ? 'dernière faite le ' + esc(m.backup.lastSuccess) + (m.backup.withWarnings ? ' <span class="supv-old">(avec avertissements)</span>' : '') : (m.backup?.expected ? 'aucune réussie détectée' : '<span class="muted">pas de sauvegarde à contrôler sur ce serveur</span>')))}
         ${row('Mises à jour', (m.updates ? esc(m.updates.pending) + ' en attente' + (m.updates.rebootPending ? ' · <strong>redémarrage en attente</strong>' : '') + (m.updates.lastSecurityDate ? ' <span class="muted">· dernière cumulative ' + esc(m.updates.lastSecurityDate) + '</span>' : '') : ''))}
         ${row('Antivirus', [m.av?.eset, m.av?.defender].filter(Boolean).map(esc).join(' · ') || '<span class="muted">non détecté</span>')}
         ${row('Événements (31 j)', m.events ? `${num(m.events.sysCritical)} critiques · ${num(m.events.sysErrors)} erreurs système · ${num(m.events.appErrors)} erreurs applications · ${num(m.events.unexpectedShutdowns)} arrêt(s) inattendu(s)` : '')}
@@ -149,7 +150,7 @@ const Supervision = (() => {
           ${s.hasToken ? '<button type="button" class="btn" id="svRevoke">Révoquer le jeton</button>' : ''}
           <button type="button" class="btn" id="svInstall">Installer l'agent</button>` : ''}
         ${r ? '<button type="button" class="btn" id="svExport">Export complet (JSON)</button>' : ''}
-        <button class="btn primary" value="cancel">Fermer</button>
+        <button class="btn" value="cancel">Fermer</button>
       </div>`;
     if ($('#svExport')) $('#svExport').onclick = async () => {
       try {
@@ -167,6 +168,30 @@ const Supervision = (() => {
       'Son jeton est supprimé. L\'agent reste sur le serveur tant qu\'il n\'est pas désinstallé (Desinstaller-LevelDesk.ps1), mais ses envois seront refusés.', 'Retirer', async () => {
         await call({ op: 'serveur.delete', id }); $('#dlg').close(); toast('Serveur retiré'); load(true);
       }, () => openServer(id));
+  }
+
+  // Onduleur (agent 1.3.1, PowerChute Serial Shutdown) : état de la batterie et besoin de la remplacer.
+  function upsBlock(u) {
+    if (!u) return '';
+    const row = (l, v) => v === '' || v === null || v === undefined ? '' : `<tr><td>${esc(l)}</td><td>${v}</td></tr>`;
+    const warn = t => `<span class="supv-old">${t}</span>`;
+    const st = u.selfTestResult ? (/^(ok|pass(ed)?)$/i.test(u.selfTestResult) ? '<span class="supv-t-ok">Réussi</span>' : `<strong class="supv-t-crit">${esc(u.selfTestResult)} : batterie à remplacer</strong>`) : '';
+    const age = u.batteryAgeMonths != null ? `${num(Math.round(u.batteryAgeMonths / 12 * 10) / 10, ' an(s)')} <span class="muted">(depuis ${esc(u.batteryDate)}, ${u.batteryDateSource === 'saisie' ? 'date saisie' : 'date de fabrication'})</span>` : '';
+    const ver = u.version ? esc(u.version) + (u.upToDate === false ? ' ' + warn(`(version ${esc(u.latestVersion)} disponible)`) : u.upToDate ? ' <span class="muted">(à jour)</span>' : '') : '';
+    return `<div class="supv-sec">Onduleur</div>
+      <table class="tot ro">
+        ${row('Dernier auto-test', st + (u.lastSelfTest ? ` <span class="muted">· ${esc(u.lastSelfTest)}${u.selfTests ? ' · ' + esc(u.selfTests) + ' sur 31 j' : ''}</span>` : ''))}
+        ${row('Capacité de la batterie', u.batteryCapacityPct != null ? (u.batteryCapacityPct < 90 ? warn(num(u.batteryCapacityPct, ' %')) : num(u.batteryCapacityPct, ' %')) + (u.minCapacityPct != null && u.minCapacityPct < u.batteryCapacityPct ? ` <span class="muted">(min. ${num(u.minCapacityPct, ' %')} sur 31 j)</span>` : '') : '')}
+        ${row('Âge de la batterie', u.batteryAgeMonths > 48 ? warn(age) : age)}
+        ${row('Tension batterie', u.batteryVoltage != null ? num(u.batteryVoltage, ' V') : '')}
+        ${row('Température', u.internalTempC != null ? (u.internalTempC > 35 ? warn(num(u.internalTempC, ' °C')) : num(u.internalTempC, ' °C')) : '')}
+        ${row('Charge', u.loadPct != null ? num(u.loadPct, ' %') + (u.powerW != null ? ` <span class="muted">· ${num(u.powerW, ' W')}</span>` : '') : '')}
+        ${row('Réseau électrique', u.lineVoltage != null ? num(u.lineVoltage, ' V') + (u.onBatteryEvents ? ' · ' + warn(`${esc(u.onBatteryEvents)} passage(s) sur batterie (dernier ${esc(u.lastOnBattery)})`) : ' <span class="muted">· aucun passage sur batterie sur 31 j</span>') : '')}
+        ${row('Dernière mesure', u.lastSample ? esc(u.lastSample) + (u.sampleAgeHours > 2 ? ' ' + warn('(liaison perdue ?)') : '') : '')}
+        ${row('N° de série', u.serial ? esc(u.serial) + (u.manufactured ? ` <span class="muted">(fabriqué ${esc(u.manufactured)})</span>` : '') : '')}
+        ${row('PowerChute', [esc(u.software || ''), ver].filter(Boolean).join(' ') + (u.serviceState && u.serviceState !== 'Running' ? ' ' + warn('service ' + esc(u.serviceState)) : ''))}
+        ${u.note ? row('Remarque', esc(u.note)) : ''}
+      </table>`;
   }
 
   // Confirmation dans la fenêtre (pas de confirm() du navigateur : bloqué dans certains navigateurs intégrés).
@@ -196,6 +221,9 @@ const Supervision = (() => {
       <label>Sauvegarde exécutée sur ce serveur</label>
       <select id="svBackup">${[...new Set([...BACKUPS, d.backup || ''])].map(b => `<option value="${esc(b)}" ${b === (d.backup || '') ? 'selected' : ''}>${b ? esc(b) : 'Aucune (rien à contrôler ici)'}</option>`).join('')}</select>
       <label>Date d'installation</label><input type="date" id="svDate" value="${esc(d.dateInstallation || '')}">
+      <label>Batterie de l'onduleur remplacée en <span class="small">(mois ; vide = date de fabrication de l'onduleur)</span></label>
+      <input type="month" id="svUpsBat" value="${esc(d.upsBatteryDate || '')}">
+      <p class="small muted" style="margin:4px 0 0">Prise en compte par l'agent à sa prochaine installation.</p>
       <p class="small supv-old hidden" id="svErr"></p>
       <div class="actions"><button type="button" class="btn" id="svBack">${s ? 'Retour' : 'Annuler'}</button><button type="button" class="btn primary" id="svSave">Enregistrer</button></div>`);
     $('#svBack', f).onclick = () => s ? openServer(s.id) : $('#dlg').close();
@@ -208,20 +236,25 @@ const Supervision = (() => {
       try {
         await call({ op: 'serveur.save', id, clientId: $('#svClient', f).value, name, data: {
           type: $('#svType', f).value, roles: $$('[data-role]', f).filter(x => x.checked).map(x => x.dataset.role), description: $('#svDesc', f).value.trim(),
-          lob: $('#svLob', f).value.split(',').map(x => x.trim()).filter(Boolean), backup: $('#svBackup', f).value, dateInstallation: $('#svDate', f).value } });
+          lob: $('#svLob', f).value.split(',').map(x => x.trim()).filter(Boolean), backup: $('#svBackup', f).value, dateInstallation: $('#svDate', f).value,
+          upsBatteryDate: $('#svUpsBat', f).value } });
         toast('Enregistré'); await load(true); openServer(id);
       } catch (e) { ev.target.disabled = false; fail(e.message); }
     };
   }
 
   // ---------- script d'installation de l'agent ----------
+  // Même nom que celui donné par le serveur (lib/supervision.php, op serveur.installeur).
+  const safeName = x => String(x).replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '') || 'x';
+  const installerName = s => `Installer-LevelDesk-${safeName(cname(s.clientId))}-${safeName(s.name)}.ps1`;
   function installAgent(s) {
     const f = dialog(`<h2>Installer l'agent sur ${esc(s.name)}</h2>
       <p>${s.hasToken ? '<strong>Un nouveau jeton sera créé</strong> : l\'agent déjà installé sur ce serveur cessera d\'envoyer tant qu\'il n\'est pas réinstallé avec ce nouveau fichier.'
         : 'Un jeton propre à ce serveur sera créé et placé dans le fichier d\'installation.'}</p>
       <ol class="small">
         <li>Copier le fichier téléchargé sur le serveur (il contient le jeton : ne pas l'envoyer par e-mail).</li>
-        <li>Clic droit → « Exécuter avec PowerShell », en tant qu'administrateur.</li>
+        <li>Sur le serveur, ouvrir PowerShell <strong>en tant qu'administrateur</strong> (le clic droit « Exécuter avec PowerShell » ne suffit pas), aller dans le dossier du fichier et lancer :<br>
+          <code>powershell.exe -ExecutionPolicy Bypass -File .\\${esc(installerName(s))}</code></li>
         <li>Attendre « Premier envoi : OK », puis supprimer le fichier.</li>
       </ol>
       <p class="small muted">L'agent lit seulement : il n'ouvre aucun port et ne reçoit aucune instruction. Il envoie son export chaque jour vers 6 h.</p>
