@@ -615,10 +615,10 @@ const Achats = (() => {
         <p class="small muted" style="margin-top:0">À l'ouverture de l'app, puis toutes les heures et sur « Vérifier maintenant », l'app lit :</p>
         <ul class="small muted" style="margin:0 0 8px;padding-left:18px">
           <li>${inboxOn ? `les PDF déposés dans OneDrive <code>${esc(path.inbox())}</code>` : 'pas de dossier Entrant (pas de OneDrive) : importe les PDF avec « Importer un PDF » ci-dessous'} ;</li>
-          <li>${Compta.ready() ? `les nouvelles factures ${BILLIT_SUP.map(x => x[1]).join(', ').replace(/, ([^,]+)$/, ' et $1')} reçues dans Billit${billitFrom() ? ` depuis le ${frDate(billitFrom())}` : ''}
+          <li>${Compta.ready() ? `les nouvelles factures ${BILLIT_SUP.map(x => x[1]).join(', ').replace(/, ([^,]+)$/, ' et $1')} reçues dans ${esc(Compta.label())}${billitFrom() ? ` depuis le ${frDate(billitFrom())}` : ''}
             (${Compta.mode() === 'live' ? 'réel' : 'test'}, lecture seule ; les anciennes ne sont pas reprises)${bdone.length
               ? ` : ${bdone.filter(b => b.status === 'imported').length} importée(s), ${bdone.filter(b => b.status === 'known').length} déjà présente(s)` : ''}.`
-            : 'les factures reçues dans Billit : clé API Billit absente (Réglages).'}</li></ul>
+            : 'les factures reçues dans le logiciel de facturation : connecteur pas configuré (Réglages → Connecteur de facturation).'}</li></ul>
         <p class="small muted">Les factures sont rangées dans <code>${esc(base())}/Traités</code>${inboxOn ? '' : ' (serveur LevelDesk)'}. Les articles à 0 € sont ignorés.${A.lastSync ? ` Dernière vérification : ${new Date(lastCheck || A.lastSync).toLocaleTimeString('fr-BE', { hour: '2-digit', minute: '2-digit' })}.` : ''}</p>
         ${msg ? `<p class="small"><span class="pill warn">${esc(msg)}</span></p>` : ''}
         ${checks.length ? `<p class="small" style="margin:0 0 4px"><strong style="color:var(--warn)">⚠ ${checks.length} facture(s) dont le total des articles ne correspond pas au total de la facture :</strong>
@@ -1247,7 +1247,7 @@ const Achats = (() => {
           <p class="small muted" id="mapMore" style="margin:6px 0 0"></p>`
           : '<div class="empty">Vide : elle se remplit quand tu complètes les articles importés (onglet Achats).</div>'}
       </div>
-      <div class="card"><div class="row"><h2 class="grow" style="margin:0;border:0;padding:0">Articles Billit (${products ? products.length : '?'})</h2>
+      <div class="card"><div class="row"><h2 class="grow" style="margin:0;border:0;padding:0">Articles ${esc(Compta.label())} (${products ? products.length : '?'})</h2>
           <button class="btn primary" id="pNew" ${Compta.ready() && products ? '' : 'disabled'}>+ Nouvel article</button></div>
         <p class="small muted" style="margin:6px 0 10px">Billit ${Compta.mode() === 'live' ? 'réel' : 'test (sandbox)'}. Touche un article pour le modifier (nom, prix, TVA, catégorie).</p>
         ${productsErr ? `<p class="small"><span class="pill warn">${esc(productsErr)}</span></p>` : ''}

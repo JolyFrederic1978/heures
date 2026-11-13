@@ -1253,12 +1253,12 @@ function viewBillingTarget(key, all) {
 
   $('#view').innerHTML = `
     <button class="link" id="back">← Retour</button>
-    <div class="card" style="margin-top:8px"><h2>${esc(info.label)} <span class="small muted">→ Billit : ${esc(info.billitName)}</span></h2>
+    <div class="card" style="margin-top:8px"><h2>${esc(info.label)} <span class="small muted">→ ${esc(Compta.label())} : ${esc(info.billitName)}</span></h2>
       ${es.length ? `<label>Inclure jusqu'au</label><input type="date" id="until" value="${billUntil}">` : ''}
       <div style="margin-top:12px">${totalsTable(t, r, selA)}</div>
       ${sel.some(e => e.install) ? '<p class="small"><span class="pill warn">Contient des installations : article à ajouter dans Billit.</span></p>' : ''}
       <button class="btn primary big" id="doBill" style="margin-top:12px" ${what ? '' : 'disabled'}>Facturer ${what || '…'}</button>
-      <p class="small muted">${sel.length ? `Crée « Prestations - ${esc(info.label)} ${today()}.xlsx » dans OneDrive/A facturer et déplace ces interventions vers l'archive.` : ''}
+      <p class="small muted">${sel.length ? `Crée « Prestations - ${esc(info.label)} ${today()}.xlsx » dans le dossier « A facturer » et déplace ces interventions vers l'archive.` : ''}
         ${selA.length ? 'Les achats passent dans l\'archive des achats.' : ''}</p>
     </div>
     ${es.length ? `<div class="card"><h2>Interventions (${sel.length}/${es.length})</h2>
@@ -1688,7 +1688,7 @@ function viewAdmin() {
       <p class="small muted" style="margin:6px 0 8px">Techniciens et responsables des sociétés, reconnus par leur adresse Microsoft 365.</p>
       <ul class="list">${us.map(u => `<li class="tap" data-usr="${u.id}"><div class="grow" style="flex:1;min-width:0"><strong>${esc(u.name)}</strong>
           ${u.id === me().id ? '<span class="pill ok">toi</span>' : ''}${u.active === false ? '<span class="pill">inactif</span>' : ''}
-          <div class="small muted">${[soc(u.societeId).name, u.email || 'adresse à compléter', (u.roles || []).map(r => ROLES[r]).join(', '), seeLabel(u)].map(esc).join(' · ')}</div></div><span class="chev">›</span></li>`).join('')}</ul>
+          <div class="small muted">${[soc(u.societeId).name, u.email || (srvOn() && u.societeId !== HOME && !managedByMe(u.societeId) ? '' : 'adresse à compléter'), (u.roles || []).map(r => ROLES[r]).join(', '), seeLabel(u)].filter(Boolean).map(esc).join(' · ')}</div></div><span class="chev">›</span></li>`).join('')}</ul>
     </div>
     <div class="card"><h2>Droits</h2>
       <ul class="small" style="margin:0;padding-left:18px">
@@ -2287,6 +2287,14 @@ function editClient(c, opts = {}) {
     <div class="actions">
       ${c ? '<button class="btn danger" id="cDel" style="margin-right:auto">Supprimer</button>' : ''}
       <button class="btn" ${opts.onCancel ? 'id="cCancel"' : 'value="cancel"'}>${opts.onCancel ? 'Retour' : 'Annuler'}</button><button class="btn primary" id="cSave">Enregistrer</button></div>`;
+  // Client d'une autre société que je ne gère pas (ex. client One Level UP vu par l'administrateur d'Alescom) : lecture seule.
+  // Le serveur refuse de toute façon la modification (« interdit ») ; avant le 13/11 la fiche se laissait modifier puis tout était annulé.
+  if (c && srvOn() && clientSoc(c) !== HOME && !managedByMe(clientSoc(c))) {
+    $$('input, select, textarea', f).forEach(x => x.disabled = true);
+    ['#cDel', '#cSave'].forEach(s => $(s)?.classList.add('hidden'));
+    $('h2', f).textContent = 'Client';
+    $('h2', f).insertAdjacentHTML('afterend', `<p class="small"><span class="pill">Client de ${esc(soc(clientSoc(c)).name)} : lecture seule</span></p>`);
+  }
   // M365 Enforce et ESET Cloud : seulement pour un client avec serveur(s).
   $('#cServer').onchange = ev => ['#cServersBox', '#cSrvOpts'].forEach(s => $(s).classList.toggle('hidden', !ev.target.checked));
   if (c?.server) Supervision.clientBox($('#cSupv'), c);      // serveurs supervisés de ce client (module Supervision, administrateur)
