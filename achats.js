@@ -355,6 +355,7 @@ const Achats = (() => {
   // Date de la mise en service, synchronisée (Réglages de l'app) : sert aussi à ne demander à Billit que les factures modifiées depuis.
   // Factures d'achat lues par le connecteur de la société (compta.js, format LevelDesk { id, number, supplier, date, total, pdfId }).
   const billitFrom = () => state.settings.achatsBillitFrom?.[Compta.mode()] || '';
+  let oldFrom = '', oldSup = '';          // reprise d'anciennes factures (carte Factures fournisseurs)
   // Fournisseur (nom de la société dans le logiciel) → nom du lecteur.
   const BILLIT_SUP = [[/\bovh\b/i, 'OVH'], [/\bmgk\b/i, 'MGK'], [/lisam/i, 'lisam.cloud'], [/alescom/i, 'Alescom'], [/\bdsd\b/i, 'DSD']];
   const supOf = o => BILLIT_SUP.find(([re]) => re.test(o.supplier || ''))?.[1];
@@ -387,6 +388,11 @@ const Achats = (() => {
       let rec = A.bdocs.find(x => x.id === id);
       // Déjà traitée ; une erreur est réessayée seulement sur « Réessayer » ou quand un lecteur a été ajouté.
       if (rec && rec.status !== 'retry' && !(rec.status === 'error' && rec.readers !== readersSig())) continue;
+      // Facture inconnue mais datée de plus de 2 mois avant le début de la lecture (vieille facture modifiée récemment, ou hors de la liste
+      // lue à la mise en service) : notée « old », pas importée ; elle reste disponible dans « Reprendre des factures plus anciennes ».
+      if (!rec && from && dayOf(o.date) && dayOf(o.date) < isoDate(new Date(new Date(from + 'T00:00').getTime() - 62 * 864e5))) {
+        A.bdocs.push(touch({ id, orderId: o.id, mode, supplier: sup, number: o.number || '', date: dayOf(o.date), status: 'old' })); ch = true; continue;
+      }
       if (!rec) A.bdocs.push(rec = { id, orderId: o.id, mode });
       Object.assign(rec, { supplier: sup, number: o.number || '', date: dayOf(o.date), total: o.total ?? null });
       let res;
@@ -570,6 +576,7 @@ const Achats = (() => {
     const problems = alive(A.files), checks = invoices.filter(toCheck);
     const works = invoices.flatMap(i => (i.interventions || []).filter(x => !x.entryId && !x.dismissed).map(x => ({ i, x })));
     const bdone = alive(A.bdocs).filter(b => b.mode === Compta.mode()), bErr = bdone.filter(b => b.status === 'error');
+    const olds = Compta.ready() ? bdone.filter(b => b.status === 'old') : [];
     const gaps = ready.filter(l => priceGap(l)).length;
     $('#view').innerHTML = `
       <div class="kpis"><div class="kpi"><div class="v">${eur(ready.reduce((s, l) => s + saleTotal(l), 0))}</div><div class="l">${ready.length} article(s) prêt(s) à refacturer (HTVA)</div></div>
@@ -616,7 +623,7 @@ const Achats = (() => {
         <ul class="small muted" style="margin:0 0 8px;padding-left:18px">
           <li>${inboxOn ? `les PDF déposés dans OneDrive <code>${esc(path.inbox())}</code>` : 'pas de dossier Entrant (pas de OneDrive) : importe les PDF avec « Importer un PDF » ci-dessous'} ;</li>
           <li>${Compta.ready() ? `les nouvelles factures ${BILLIT_SUP.map(x => x[1]).join(', ').replace(/, ([^,]+)$/, ' et $1')} reçues dans ${esc(Compta.label())}${billitFrom() ? ` depuis le ${frDate(billitFrom())}` : ''}
-            (${Compta.mode() === 'live' ? 'réel' : 'test'}, lecture seule ; les anciennes ne sont pas reprises)${bdone.length
+            (${Compta.mode() === 'live' ? 'réel' : 'test'}, lecture seule ; les anciennes ne sont reprises que sur demande, ci-dessous)${bdone.length
               ? ` : ${bdone.filter(b => b.status === 'imported').length} importée(s), ${bdone.filter(b => b.status === 'known').length} déjà présente(s)` : ''}.`
             : 'les factures reçues dans le logiciel de facturation : connecteur pas configuré (Réglages → Connecteur de facturation).'}</li></ul>
         <p class="small muted">Les factures sont rangées dans <code>${esc(base())}/Traités</code>${inboxOn ? '' : ' (serveur LevelDesk)'}. Les articles à 0 € sont ignorés.${A.lastSync ? ` Dernière vérification : ${new Date(lastCheck || A.lastSync).toLocaleTimeString('fr-BE', { hour: '2-digit', minute: '2-digit' })}.` : ''}</p>
@@ -627,7 +634,14 @@ const Achats = (() => {
             <div class="small" style="color:var(--warn)">${esc(i.warn)}</div></div></li>`).join('')}</ul>` : ''}
         <div class="row"><button class="btn primary" id="aCheck" ${busy ? 'disabled' : ''}>🔄 Vérifier maintenant</button>
           <button class="btn" id="aPick">📄 Importer un PDF…</button><input type="file" id="aFile" accept="application/pdf,.pdf" multiple hidden></div>
-        ${bErr.length ? `<ul class="list" style="margin-top:10px">${bErr.map(b => `<li><div class="grow" style="flex:1;min-width:0">${supPill(b.supplier)} <strong>${esc(b.number || 'sans n°')}</strong> <span class="small muted">${frDate(b.date)} · Billit</span>
+        ${olds.length ? `<details class="opts" style="margin-top:10px"><summary class="small">Reprendre des factures plus anciennes (${olds.length} déjà dans ${esc(Compta.label())} à la mise en service, pas importées)</summary>
+          <p class="small muted" style="margin:6px 0">Par défaut, seules les factures arrivées après la mise en service sont importées. Choisis une date et un fournisseur pour reprendre aussi des anciennes :
+            chacune arrivera dans « Factures à traiter ».</p>
+          <div class="grid3"><div><label style="margin-top:0">Factures datées depuis le</label><input type="date" id="aOldFrom" value="${esc(oldFrom)}"></div>
+            <div><label style="margin-top:0">Fournisseur</label><select id="aOldSup"><option value="">Tous</option>${[...new Set(olds.map(b => b.supplier))].sort().map(s => `<option ${s === oldSup ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></div>
+            <div><label style="margin-top:0">&nbsp;</label><button class="btn" id="aOldGo" ${busy ? 'disabled' : ''}>Reprendre</button></div></div>
+          <p class="small muted" id="aOldInfo" style="margin:6px 0 0"></p></details>` : ''}
+        ${bErr.length ? `<ul class="list" style="margin-top:10px">${bErr.map(b => `<li><div class="grow" style="flex:1;min-width:0">${supPill(b.supplier)} <strong>${esc(b.number || 'sans n°')}</strong> <span class="small muted">${frDate(b.date)} · ${esc(Compta.label())}</span>
             <div class="small"><span class="pill warn">non lu</span> ${esc(b.msg)}</div></div>
             ${b.text ? `<button class="btn chip" data-btext="${b.id}">Texte</button>` : ''}<button class="btn chip" data-bretry="${b.id}">Réessayer</button></li>`).join('')}</ul>` : ''}
         ${problems.length ? `<ul class="list" style="margin-top:10px">${problems.map(p => `<li><div class="grow" style="flex:1;min-width:0"><strong>${esc(p.name)}</strong>
@@ -637,6 +651,26 @@ const Achats = (() => {
       </div>`;
 
     $('#aCheck').onclick = () => { msg = ''; const p = sync(true); render(); p.then(() => toast('Vérification terminée')); };
+    // Reprise d'anciennes factures du logiciel (notées « old » à la mise en service) : celles du fournisseur choisi, datées depuis la date choisie,
+    // repassent en « retry » et sont importées à la vérification qui suit. La date de départ de la lecture recule d'autant (moins 31 jours :
+    // le logiciel filtre sur la date de modification, pas sur la date de la facture).
+    if ($('#aOldGo')) {
+      const pick = () => olds.filter(b => (!oldSup || b.supplier === oldSup) && oldFrom && (b.date || '') >= oldFrom);
+      const info = () => { const n = pick().length; $('#aOldInfo').textContent = !oldFrom ? 'Choisis une date.' : `${n} facture(s) à reprendre.`; $('#aOldGo').disabled = busy || !n; };
+      $('#aOldFrom').onchange = ev => { oldFrom = ev.target.value; info(); };
+      $('#aOldSup').onchange = ev => { oldSup = ev.target.value; info(); };
+      info();
+      $('#aOldGo').onclick = async ev => {
+        ev.preventDefault();
+        const list = pick();
+        if (!list.length || !confirm(`Reprendre ${list.length} facture(s) ${oldSup || 'de tous les fournisseurs'} datée(s) depuis le ${frDate(oldFrom)} ?\nChacune sera lue puis mise dans « Factures à traiter ». Cela peut prendre plusieurs minutes.`)) return;
+        list.forEach(b => { b.status = 'retry'; touch(b); });
+        const d = new Date(oldFrom + 'T00:00'); d.setDate(d.getDate() - 31);
+        const mode = Compta.mode(), start = isoDate(d);
+        if (!billitFrom() || start < billitFrom()) { state.settings.achatsBillitFrom = { ...state.settings.achatsBillitFrom, [mode]: start }; state.settingsAt = Date.now(); await DB.save(state); }
+        await save(); msg = ''; const p = sync(true); render(); p.then(() => toast('Reprise terminée'));
+      };
+    }
     $('#aPick').onclick = () => $('#aFile').click();
     $('#aFile').onchange = async ev => {
       const files = [...ev.target.files]; ev.target.value = '';
@@ -824,7 +858,8 @@ const Achats = (() => {
   const OLU_PREFIXES = { 'service internet': 'int', reseau: 'net' };
   const refModel = () => {
     const r = state.settings.refModel;
-    return { pattern: r?.pattern || '{cat}-{n:3}', prefixes: r?.prefixes || (HOME === 'olu' && !r ? OLU_PREFIXES : {}) };
+    // manual : aucun code proposé, il est saisi à la main à la création de l'article (demande de Fred pour Alescom, 13/11).
+    return { pattern: r?.pattern || '{cat}-{n:3}', prefixes: r?.prefixes || (HOME === 'olu' && !r ? OLU_PREFIXES : {}), manual: !!r?.manual };
   };
   const TOKEN = /\{(cat|CAT|n|aaaa|aa)(?::(\d{1,2}))?\}/g;
   // Préfixe de la catégorie g (nom), selon le modèle et ses exceptions ; '' si pas de catégorie.
@@ -856,16 +891,17 @@ const Achats = (() => {
     const n = String(Math.max(0, ...used) + 1).padStart(numLen, '0');
     return parts.map(x => x === null ? n : x).join('');
   }
-  const nextRef = g => makeRef(refModel(), g, (products || []).map(p => p.ref));
-  const needsCat = () => /\{cat(:\d+)?\}/i.test(refModel().pattern);
+  const nextRef = g => refModel().manual ? '' : makeRef(refModel(), g, (products || []).map(p => p.ref));
+  const needsCat = () => !refModel().manual && /\{cat(:\d+)?\}/i.test(refModel().pattern);
 
   // Création d'un article dans Billit. back(ref) : retour à l'écran précédent (ref = article créé, ou rien si annulé).
   function createArticle(pre = {}, back = backToArticles) {
     const f = $('#dlgForm');
     const soft = Compta.label();
     f.innerHTML = `<h2>Nouvel article ${esc(soft)}</h2>
-      <p class="small muted">Créé dans ${esc(soft)} en mode ${Compta.mode() === 'live' ? 'réel' : 'test'}. Code proposé selon le modèle de ta société
-        (<code>${esc(refModel().pattern)}</code>, Réglages → Ma société → Codes articles).</p>
+      <p class="small muted">Créé dans ${esc(soft)} en mode ${Compta.mode() === 'live' ? 'réel' : 'test'}. ${refModel().manual
+        ? 'Code de l\'article à saisir toi-même (Réglages → Ma société → Codes articles).'
+        : `Code proposé selon le modèle de ta société (<code>${esc(refModel().pattern)}</code>, Réglages → Ma société → Codes articles).`}</p>
       <label>Catégorie ${esc(soft)} (obligatoire)</label><select id="pGroup"><option value="">— choisir —</option>
         ${categories().map(g => `<option value="${g.id}" ${String(g.id) === String(pre.catId ?? '') ? 'selected' : ''}>${esc(g.name)} (${g.refs.length})</option>`).join('')}</select>
       <label>Référence</label><input id="pRef" value="${esc(pre.ref)}" placeholder="ex. int-005" autocapitalize="off">

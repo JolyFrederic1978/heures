@@ -4,7 +4,8 @@
 // Formats LevelDesk :
 //   client  { id, name, tradeName, vat, email, address }
 //   article { id, ref, name, price, vat, buy, unit, catId, catName }
-//   facture { customerId, date, dueDate, title, lines: [{ articleId, ref, description, qty, price, vat }], files: [{ name, mime, content (base64) }] }
+//   facture { customerId, date, dueDate, title, lines: [{ articleId, ref, description, qty, price, vat }], files: [{ name, mime, content (base64) }],
+//             note (détail des interventions, texte : mis dans la note du devis quand la société crée des devis) }
 //   achat   { id, number, supplier, date, total, pdfId }
 // Avec le serveur : POST ?r=compta (connecteur et clés de la société sur le serveur, serveur/api/lib/compta.php).
 // Sans serveur (fichiers OneDrive, production actuelle) : Billit appelé depuis l'appareil (billit.js), réponses mises ici au même format.
@@ -99,6 +100,8 @@ const Compta = (() => {
     // sans serveur, clé Billit et PartyID sur cet appareil.
     ready: () => srv() ? !!cfg().admin && (!conf || !!(conf.modes?.[mode()]?.type && conf.modes[mode()].key)) : Billit.ready(),
     webName: () => NAMES[type()] || '',
+    // Document créé par l'envoi : facture en brouillon, ou devis en brouillon (Odoo, réglage du connecteur « doc » = quote).
+    quote: () => srv() && conf?.modes?.[mode()]?.doc === 'quote',
     // ---- configuration (serveur) ----
     config: () => conf,
     async loadConfig(force) {

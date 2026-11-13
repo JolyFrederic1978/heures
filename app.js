@@ -1356,7 +1356,7 @@ function billitStatus(b) {
   if (!x) return Compta.ready() ? '<span class="muted">Pas encore envoyée.</span>'
     : `<span class="muted">${srvOn() ? 'Configure le connecteur de facturation dans Réglages.' : 'Renseigne la clé API et le PartyID Billit dans Réglages.'}</span>`;
   const soft = { billit: 'Billit', odoo: 'Odoo' }[x.type || 'billit'] || '';
-  return `<span class="pill ok">✓ Envoyée (${billitModeLabel(x.mode)}) le ${new Date(x.at).toLocaleString('fr-BE', { dateStyle: 'short', timeStyle: 'short' })}</span>
+  return `<span class="pill ok">✓ ${x.doc === 'quote' ? 'Devis créé' : 'Envoyée'} (${billitModeLabel(x.mode)}) le ${new Date(x.at).toLocaleString('fr-BE', { dateStyle: 'short', timeStyle: 'short' })}</span>
     ${x.number ? ` · n° ${esc(x.number)}` : ''}${x.status ? ` · statut ${esc(x.status)}` : ''}
     ${/^https:\/\//.test(x.url || '') ? `· <a href="${esc(x.url)}" target="_blank" rel="noopener">Ouvrir dans ${esc(soft)}</a>` : ''}`;
 }
@@ -1376,7 +1376,8 @@ const COMPTA_HELP = {
   odoo: 'Odoo 13 à 19 (Odoo Online : seulement avec une formule qui ouvre l\'API externe ; Odoo.sh ou hébergé : toujours). Adresse : https://… du site Odoo, sans chemin. '
     + 'Base : nom de la base de données (Odoo.sh : celui de la branche ; « Test » = une base de test ou de staging). Utilisateur : son identifiant de connexion (e-mail). '
     + 'Clé API : dans Odoo, Mon profil → Sécurité du compte → Nouvelle clé API. Conseillé : un utilisateur dédié avec les droits Facturation (sans droit de validation si possible). '
-    + 'LevelDesk ne crée que des factures en brouillon et des articles : jamais de validation, d\'envoi ni de paiement.'
+    + 'LevelDesk ne crée que des factures ou des devis en brouillon et des articles : jamais de validation, de confirmation, d\'envoi ni de paiement. '
+    + 'Devis : chaque ligne doit avoir son article dans Odoo (codes des tarifs = références internes des articles Odoo).'
 };
 function bindComptaCard() {
   const cos = {};   // sociétés liées aux identifiants, connues après un contrôle
@@ -1392,6 +1393,8 @@ function bindComptaCard() {
           <div><label>Utilisateur (e-mail)</label><input data-co="${k}.login" autocapitalize="off" spellcheck="false"></div></div>
         <div class="grid2"><div><label>Clé API</label><input type="password" autocomplete="off" data-co="${k}.apiKey" placeholder="Saisir pour remplacer"></div>
           <div><label>Société</label><select data-cp="${k}" disabled><option value="">—</option></select></div></div>
+        <label>Document créé par « Envoyer vers Odoo »</label>
+        <select data-cd="${k}"><option value="invoice">Facture en brouillon</option><option value="quote">Devis en brouillon (détail des interventions dans la note)</option></select>
         <div class="row" style="margin-top:6px"><button class="btn primary" data-cs="${k}">Contrôler et enregistrer</button><button class="btn" data-cx="${k}" disabled>Effacer</button></div>`
       : `<div class="grid2"><div><label>Clé API</label><input type="password" autocomplete="off" data-ck="${k}" placeholder="Saisir pour remplacer"></div>
           <div><label>Société (PartyID)</label><select data-cp="${k}" disabled><option value="">—</option></select></div></div>
@@ -1414,6 +1417,8 @@ function bindComptaCard() {
       $(`[data-cx="${k}"]`).disabled = !x.key;
       $$(`[data-ck="${k}"], [data-co^="${k}."], [data-cs="${k}"]`).forEach(i => i.disabled = !x.access);
       if (mine) for (const f of ['url', 'db', 'login']) { const i = $(`[data-co="${k}.${f}"]`); if (i && !i.value) i.value = x[f] || ''; }
+      const dsel = $(`[data-cd="${k}"]`);
+      if (dsel) { if (mine && x.doc) dsel.value = x.doc; dsel.disabled = !x.access; }
     }
   };
   const failAll = e => ['test', 'live'].forEach(k => say(k, `<span class="pill warn">${esc(e.message)}</span>`));
@@ -1434,13 +1439,18 @@ function bindComptaCard() {
     $$('[data-cs]').forEach(b => b.onclick = ev => {
       ev.preventDefault();
       const k = b.dataset.cs, v = f => $(`[data-co="${k}.${f}"]`).value.trim();
-      const body = { url: v('url'), db: v('db'), login: v('login'), apiKey: v('apiKey') };
+      const body = { url: v('url'), db: v('db'), login: v('login'), apiKey: v('apiKey'), doc: $(`[data-cd="${k}"]`).value };
       if (!body.url || !body.db || !body.login) return say(k, '<span class="pill warn">Adresse, base et utilisateur requis.</span>');
       $(`[data-co="${k}.apiKey"]`).value = '';
       say(k, 'Contrôle par Odoo…');
       save(k, body, 'Connecteur Odoo enregistré sur le serveur');
     });
     $$('[data-cp]').forEach(sel => sel.onchange = () => sel.value && save(sel.dataset.cp, { partyId: sel.value }, 'Société enregistrée'));
+    // Facture ou devis : enregistré tout de suite si le connecteur Odoo de ce mode existe déjà (sinon avec « Contrôler et enregistrer »).
+    $$('[data-cd]').forEach(sel => sel.onchange = () => {
+      const k = sel.dataset.cd, x = conf?.modes?.[k];
+      if (x?.type === 'odoo' && x.key) save(k, { doc: sel.value }, sel.value === 'quote' ? 'Odoo : devis en brouillon' : 'Odoo : facture en brouillon');
+    });
     $$('[data-cx]').forEach(b => b.onclick = ev => {
       ev.preventDefault();
       const k = b.dataset.cx;
@@ -1463,6 +1473,7 @@ function refModelCard() {
   const m = Achats.refModel();
   return `<div class="card"><h2>Codes articles</h2>
     <p class="small muted" style="margin-top:0">Modèle du code proposé quand tu crées un article dans ${esc(Compta.label())} (onglet Articles, achats). Propre à ta société.</p>
+    <label class="check"><input type="checkbox" id="rmManual" ${m.manual ? 'checked' : ''}> Pas de code proposé : je saisis le code de chaque article moi-même</label>
     <label>Modèle</label><input id="rmPat" value="${esc(m.pattern)}" autocapitalize="off" spellcheck="false" maxlength="40">
     <p class="small muted" style="margin:4px 0 0">Repères : <code>{cat}</code> 3 premières lettres de la catégorie · <code>{CAT}</code> en majuscules · <code>{cat:4}</code> 4 lettres ·
       <code>{n:3}</code> numéro suivant sur 3 chiffres · <code>{aaaa}</code> / <code>{aa}</code> année. Le reste est recopié tel quel. Ex. <code>{cat}-{n:3}</code>, <code>ART-{n:5}</code>, <code>{CAT}{aa}-{n:4}</code>.</p>
@@ -1472,19 +1483,21 @@ function refModelCard() {
 }
 function bindRefModel(saveSettings) {
   if (!$('#rmPat')) return;
-  const read = () => ({ pattern: $('#rmPat').value.trim(),
+  const read = () => ({ manual: $('#rmManual').checked, pattern: $('#rmPat').value.trim(),
     prefixes: Object.fromEntries($('#rmEx').value.split('\n').map(l => l.split('=')).filter(p => p.length === 2 && p[0].trim() && p[1].trim())
       .map(([k, v]) => [fold(k).trim(), v.trim()])) });
   const prev = () => {
     const m = read(), ex = Object.keys(m.prefixes)[0];
-    const bad = !/\{n(:\d{1,2})?\}/.test(m.pattern) ? 'Le modèle doit contenir {n} (ou {n:3}…) : sinon deux articles auraient le même code.' : '';
+    $('#rmPat').disabled = $('#rmEx').disabled = m.manual;
+    if (m.manual) { $('#rmPrev').textContent = 'Aucun code proposé : le champ Référence reste vide à la création d\'un article.'; return true; }
+    const bad =!/\{n(:\d{1,2})?\}/.test(m.pattern) ? 'Le modèle doit contenir {n} (ou {n:3}…) : sinon deux articles auraient le même code.' : '';
     $('#rmPrev').innerHTML = bad ? `<span class="pill warn" style="white-space:normal">${esc(bad)}</span>`
       : 'Exemples : ' + ['Logiciel', 'Matériel', ...(ex ? [ex] : [])].map(n => `${esc(n)} → <code>${esc(Achats.makeRef(m, { name: n }, []) || '?')}</code>`).join(' · ');
     return !bad;
   };
   prev();
   $('#rmPat').oninput = $('#rmEx').oninput = prev;
-  $('#rmPat').onchange = $('#rmEx').onchange = () => { if (prev()) { state.settings.refModel = read(); saveSettings(); } };
+  $('#rmManual').onchange = $('#rmPat').onchange = $('#rmEx').onchange = () => { if (prev()) { state.settings.refModel = read(); saveSettings(); } };
 }
 
 // Réglages → Ma société → Fichiers : emplacement (réglage de la société) et fichiers rangés sur le serveur (téléchargement, suppression).
@@ -1591,15 +1604,18 @@ async function sendToBillit(b) {
   try {
     await Compta.loadConfig();
     if (!Compta.ready()) throw new Error(srvOn() ? 'Configure le connecteur de facturation dans Réglages.' : 'Renseigne la clé API et le PartyID Billit dans Réglages.');
-    if (b.billit && !confirm(`Cette facture a déjà été envoyée (${billitModeLabel(b.billit.mode)}).\nEn créer une nouvelle quand même ?`)) return;
+    // Société qui crée des devis (Odoo, Réglages → Connecteur) : devis en brouillon, détail des interventions dans sa note.
+    const quote = Compta.quote(), le = quote ? 'Le devis' : 'La facture';
+    if (b.billit && !confirm(`Cette facture a déjà été envoyée (${billitModeLabel(b.billit.mode)}).\nEn créer ${quote ? 'un nouveau devis' : 'une nouvelle'} quand même ?`)) return;
     const customerId = await resolveBillitCustomer(info, say);
     if (!customerId) return say('Envoi annulé.');
 
-    say('Vérification des factures non envoyées pour ce client…');
+    say(quote ? 'Vérification des devis en brouillon pour ce client…' : 'Vérification des factures non envoyées pour ce client…');
     const open = await Compta.openInvoices(customerId);
     if (open.length) {
       const desc = open.map(o => `- ${o.number || '(sans n°)'} du ${frDate(o.date)}${o.total != null ? ` : ${eur(o.total)} HTVA` : ''}`).join('\n');
-      if (!confirm(`${open.length} facture(s) non envoyée(s) existent déjà pour ${info.billitName} :\n${desc}\n\n${soft} ne permet pas d'y ajouter des lignes par l'API.\nCréer une NOUVELLE facture quand même ?\n(Annuler = compléter toi-même ou avec la tâche Claude)`)) {
+      if (!confirm(quote ? `${open.length} devis en brouillon existent déjà pour ${info.billitName} :\n${desc}\n\nLevelDesk n'y ajoute pas de lignes.\nCréer un NOUVEAU devis quand même ?\n(Annuler = compléter toi-même dans ${soft})`
+        : `${open.length} facture(s) non envoyée(s) existent déjà pour ${info.billitName} :\n${desc}\n\n${soft} ne permet pas d'y ajouter des lignes par l'API.\nCréer une NOUVELLE facture quand même ?\n(Annuler = compléter toi-même ou avec la tâche Claude)`)) {
         return say('Envoi annulé. Factures existantes : ' + open.map(o => /^https:\/\//.test(o.url || '') ? `<a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.number || 'facture ' + o.id)}</a>` : esc(o.number || o.id)).join(', '));
       }
     }
@@ -1610,27 +1626,31 @@ async function sendToBillit(b) {
     const total = lines.reduce((s, l) => s + l.qty * l.price, 0);
     const inst = live().filter(e => e.billId === b.id && e.install);
     const days = dueDays(info), due = new Date(); due.setDate(due.getDate() + days);
+    // Détail des interventions facturées (note du devis) : date, heures ou forfait, durée, client final pour un commanditaire, sur site, description.
+    const es = sortEntries(live().filter(e => e.billId === b.id));
+    const note = es.length ? ['Détail des interventions :', ...es.map(e => `${frDate(e.date)} ${e.forfait || !e.start ? 'forfait' : `${e.start}–${e.end}`} (${fmtDur(e.minutes)})`
+      + `${info.partner ? ' – ' + client(e.clientId).name : ''}${e.onSite ? ' – sur site' : ''} : ${(e.description || '').trim() || '—'}${e.install ? ' · ' + e.install : ''}`)].join('\n') : '';
     // Toujours en brouillon (« Projet » dans Billit) : imposé aussi par le serveur et par compta.js.
     const inv = {
-      customerId: String(customerId), date: today(), dueDate: isoDate(due), title: billTitle(b), lines,
+      customerId: String(customerId), date: today(), dueDate: isoDate(due), title: billTitle(b), lines, note,
       // Fichier Prestations seulement s'il y a des interventions (une facture peut ne contenir que des achats).
       files: b.from ? [{ name: prestationsName(b), content: await toBase64(await prestationsFile(b)), mime: Xlsx.MIME }] : []
     };
     const summary = lines.map(l => `- ${l.ref} ${l.description} : ${l.qty} × ${eur(l.price)}`).join('\n');
-    if (!confirm(`${m === 'live' ? '⚠ MODE RÉEL – vraie comptabilité' : 'Mode TEST (sandbox)'}\n\nFacture pour ${info.billitName}\n${inv.title}\n${summary}\nTotal HTVA : ${eur(total)}`
-      + `\nÉchéance : ${frDate(inv.dueDate)} (${days} jours)`
-      + (missing.length ? `\n\nArticles introuvables dans ${soft} (prix de l'app utilisé) : ${missing.join(', ')}` : '')
+    if (!confirm(`${m === 'live' ? '⚠ MODE RÉEL – vraie comptabilité' : 'Mode TEST (sandbox)'}\n\n${quote ? 'Devis' : 'Facture'} pour ${info.billitName}\n${inv.title}\n${summary}\nTotal HTVA : ${eur(total)}`
+      + (quote ? (es.length ? `\nNote du devis : détail des ${es.length} intervention(s)` : '') : `\nÉchéance : ${frDate(inv.dueDate)} (${days} jours)`)
+      + (missing.length ? `\n\nArticles introuvables dans ${soft} ${quote ? '(un devis exige un article par ligne : il sera refusé)' : "(prix de l'app utilisé)"} : ${missing.join(', ')}` : '')
       + (inst.length ? `\n\nInstallations NON ajoutées (à ajouter dans ${soft}) : ${inst.map(e => e.install).join(', ')}` : '')
-      + '\n\nCréer la facture ?')) return say('Envoi annulé.');
+      + `\n\nCréer ${quote ? 'le devis' : 'la facture'} ?`)) return say('Envoi annulé.');
 
-    say('Création de la facture…');
+    say(quote ? 'Création du devis…' : 'Création de la facture…');
     const r = await Compta.draftInvoice(inv);
-    b.billit = { id: r.id, type: Compta.type(), mode: m, at: Date.now(), url: r.url || '', number: r.number || '', status: r.status || '' };
+    b.billit = { id: r.id, type: Compta.type(), mode: m, at: Date.now(), url: r.url || '', number: r.number || '', status: r.status || '', ...(quote ? { doc: 'quote' } : {}) };
     touch(b); await persist();
     say(billitStatus(b) + (r.draft
-      ? `<p class="small"><span class="pill ok">Créée en brouillon</span> Vérifie-la dans ${esc(soft)} avant de la créer définitivement.</p>`
-      : `<p class="small"><span class="pill warn">Attention : ${esc(soft)} ne l'a pas créée en brouillon (statut ${esc(b.billit.status || 'inconnu')}${b.billit.number ? ', n° ' + esc(b.billit.number) : ''}).</span></p>`));
-    toast(`Facture créée dans ${soft}`);
+      ? `<p class="small"><span class="pill ok">${quote ? 'Devis créé en brouillon' : 'Créée en brouillon'}</span> ${quote ? `Vérifie-le dans ${esc(soft)} avant de le confirmer.` : `Vérifie-la dans ${esc(soft)} avant de la créer définitivement.`}</p>`
+      : `<p class="small"><span class="pill warn">Attention : ${esc(soft)} ne l'a pas ${quote ? 'créé' : 'créée'} en brouillon (statut ${esc(b.billit.status || 'inconnu')}${b.billit.number ? ', n° ' + esc(b.billit.number) : ''}).</span></p>`));
+    toast(`${le} est ${quote ? 'créé' : 'créée'} dans ${soft}`);
   } catch (e) {
     say(`<span class="pill warn">${esc(e.message)}</span>`);
   }

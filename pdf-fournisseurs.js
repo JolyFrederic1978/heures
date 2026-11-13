@@ -95,8 +95,10 @@ const Fournisseurs = (() => {
   //   Sans engagement
   //   SOUS TOTAL | 39,48 €
   // La période peut aussi venir sur la ligne qui suit les montants. Le nom peut commencer par « jmd.be - .be ».
+  // v2 (13/11, factures d'Alescom) : tableaux « Installation » et « Offres » lus aussi. Une ligne « Offres » est une promotion (montant négatif) :
+  // elle est déduite de l'article de la même période (même domaine d'abord) ; sans article correspondant, elle reste une ligne négative.
   const ovh = {
-    id: 'ovh', name: 'OVH',
+    id: 'ovh', name: 'OVH', v: 2,
     detect: rows => rows.some(r => /^OVH - .*ROUBAIX/i.test(r.text)) || rows.some(r => /ovh/i.test(r.text) && /Rubrique/i.test(r.text)),
     parse(rows, fileName) {
       const number = find(rows, /Référence de la facture\s*:?\s*([A-Z]{2}\d{5,})/i)?.[1]
@@ -111,7 +113,7 @@ const Fournisseurs = (() => {
         const t = r.text;
         const sec = /^Rubrique\s+(.+)$/i.exec(t);
         if (sec) { section = sec[1]; inTable = false; pending = []; continue; }
-        if (/^Abonnement\b.*Prix HT/i.test(t)) { inTable = true; pending = []; continue; }
+        if (/^(Abonnement|Installation|Offres)\b.*Prix HT/i.test(t)) { inTable = true; pending = []; continue; }
         if (!inTable) continue;
         if (/^SOUS TOTAL/i.test(t) || FOOT.test(t)) { inTable = false; pending = []; continue; }
         if (/^(Prix|unitaire)$/i.test(t) || /engagement/i.test(t)) continue;
@@ -133,7 +135,19 @@ const Fournisseurs = (() => {
           if (last && !last.from) Object.assign(last, period(t));
         } else pending.push(t);
       }
-      return { supplier: 'OVH', number, date, totalExcl: totalM ? num(totalM[1]) : null, lines };
+      // Promotions (lignes négatives du tableau « Offres ») : déduites de l'article concerné.
+      const cents = n => Math.round(n * 100);
+      for (const p of lines.filter(l => l.total < 0)) {
+        const same = lines.filter(l => l.total > 0 && cents(l.total) >= -cents(p.total) && l.from === p.from && l.to === p.to);
+        const byDom = same.filter(l => p.domain && l.domain === p.domain);
+        const hit = byDom.length === 1 ? byDom[0] : same.length === 1 ? same[0] : same.find(l => cents(l.total) === -cents(p.total)) || null;
+        if (!hit) continue;
+        hit.total = (cents(hit.total) + cents(p.total)) / 100;
+        hit.unit = hit.qty ? Math.round(hit.total / hit.qty * 100) / 100 : hit.total;
+        hit.detail += ` · promotion ${String(p.total.toFixed(2)).replace('.', ',')} € (${p.label})`;
+        p.merged = true;
+      }
+      return { supplier: 'OVH', number, date, totalExcl: totalM ? num(totalM[1]) : null, lines: lines.filter(l => !l.merged) };
     }
   };
 
@@ -144,35 +158,50 @@ const Fournisseurs = (() => {
   //   Nombre de postes: 5 / Public ID: … / SKU Code: ENOD-NB5-R-1Y
   //   Date du document: | 30.09.2025 | Total | 33.05 €
   // Pas de domaine : le client est retrouvé par le contact (hint). Correspondance par code SKU (postes, durée et prix différents).
+  // v2 (13/11, factures d'Alescom) : factures mensuelles « Vos licences ESET MSP du 01/10/2026 au 31/10/2026 » :
+  //   1 | 2018-MSP ESET PROTECT Complete MSP - | 21,390 | 0.0658 | 1,407.46      ← quantité en postes × jours, nombres à l'américaine
+  //   tier: 500-999                                                                ← suite du nom
+  // Pas de client sur ces factures (consommation de tous les clients) : à répartir à la main ou à passer en usage interne.
   const mgk = {
-    id: 'mgk', name: 'MGK',
+    id: 'mgk', name: 'MGK', v: 2,
     detect: rows => rows.some(r => /MGK Technologies/i.test(r.text)),
     parse(rows, fileName) {
       const number = find(rows, /No\. de document\s*:?\s*([A-Z]{2,}\d{4}-\d+)/i)?.[1] || /(FAC\d{4}-\d+)/i.exec(fileName || '')?.[1] || '';
       const date = isoDate(find(rows, /Date du document\s*:?\s*(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{4})/i)?.[1]);
       const totalM = find(rows, /\bTotal\s+(-?[\d .  ,]+[.,]\d{2})\s*€?\s*$/i);
-      const items = [];
+      const items = [], head = [];
       let inTable = false;
+      // Nombres MGK à l'américaine : « 1,407.46 », « 21,390 », « 0.0658 ».
+      const US = /^-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$/, usNum = s => parseFloat(String(s).replace(/[€\s,]/g, ''));
+      const isUs = s => US.test(String(s).replace(/\s*€$/, '').trim());
       for (const r of rows) {
         const t = r.text;
         if (/^No\.\s.*Montant/i.test(t)) { inTable = true; continue; }
         if (!inTable) continue;
         if (/^Date du document/i.test(t)) { inTable = false; continue; }
-        if (/^produit\b/i.test(t)) continue;
-        const cells = [...r.cells], amounts = [];
-        while (cells.length && isAmount(cells[cells.length - 1])) amounts.unshift(num(cells.pop()));
-        if (/^\d+$/.test(cells[0] || '') && amounts.length >= 2) {
-          const qty = cells.length > 1 && /^\d+(?:[.,]\d+)?$/.test(cells[cells.length - 1]) ? parseFloat(cells.pop().replace(',', '.')) : 1;
+        if (/^(produit|spécifique)\b/i.test(t) || /^produit\s*\|\s*spécifique$/i.test(t)) continue;
+        const cells = [...r.cells];
+        const n = cells.length, money = s => /\.\d{2}$/.test(String(s).replace(/\s*€$/, '').trim()) && isUs(s);
+        if (/^\d+$/.test(cells[0] || '') && n >= 4 && money(cells[n - 1]) && isUs(cells[n - 2])) {
+          const total = usNum(cells.pop()), unit = usNum(cells.pop());
+          const qty = cells.length > 1 && isUs(cells[cells.length - 1]) ? usNum(cells.pop()) : 1;
           if (cells.length > 3 && /^-?\d+(?:[.,]\d+)?\s*%?$/.test(cells[cells.length - 1])) cells.pop();   // remise
           cells.shift();                                                                                   // n° de ligne
           let ref = cells.shift() || '';
-          if (!/^\d+$/.test(ref)) { const m = /^(\d+)\s+(.*)$/.exec(ref); if (m) { cells.unshift(m[2]); ref = m[1]; } }
-          items.push({ ref, desc: cells.shift() || '', hint: cells.join(' '), qty,
-            unit: amounts[amounts.length - 2], total: amounts[amounts.length - 1], info: [] });
+          if (!/^\d+(?:-[A-Z]+)?$/.test(ref)) { const m = /^(\d+(?:-[A-Z]+)?)\s+(.*)$/.exec(ref); if (m) { cells.unshift(m[2]); ref = m[1]; } }
+          items.push({ ref, desc: cells.shift() || '', hint: cells.join(' '), qty, unit, total, info: [] });
         } else if (items.length) items[items.length - 1].info.push(t);
+        else head.push(t);
       }
+      const msp = period(head.join(' '));          // « Vos licences ESET MSP du … au … »
       const lines = items.map(it => {
         const info = it.info.join(' ');
+        // Licences MSP (réf. « 2018-MSP ») : le nom continue sur les lignes suivantes, pas de contact ni de SKU ; période = mois facturé.
+        if (/-MSP$/i.test(it.ref)) {
+          const label = `${it.desc} ${info}`.replace(/\s+/g, ' ').trim();
+          return { label, detail: `Licences ESET MSP · réf. MGK ${it.ref}`, key: 'ref:' + it.ref.toLowerCase(), domain: '', hint: '', ref: it.ref,
+            qty: it.qty, unit: it.unit, total: it.total, from: msp.from || null, to: msp.to || null };
+        }
         const get = re => (re.exec(info) || [])[1]?.trim() || '';
         return mgkLine(it, date, { sku: get(/SKU Code\s*:\s*(\S+)/i), seats: get(/Nombre de postes\s*:\s*(\d+)/i),
           type: get(/Type d'achat\s*:\s*(\w+)/i), validity: get(/Période de validité\s*:\s*(\d+\s*[^\s,;]+)/i),
@@ -202,8 +231,9 @@ const Fournisseurs = (() => {
   //   Certificat SSL de domaine avec gestion de votre CSR (2026-07-01 -> 2027-06-30)
   //   NOS COORDONNEES BANCAIRE | TOTAUX DE CETTE FACTURE … Montant HT | 54,00
   // Une ligne = 1 article au prix total (la durée fait partie du nom).
+  // v2 (13/11) : mise en page depuis août 2026 : « remote.x.be | 12 Mois | 4,50 € | 54,00 € | 21,00 % » et « … | Période du 2026-09-17 au 2027-09-18 ».
   const lisam = {
-    id: 'lisam', name: 'lisam.cloud',
+    id: 'lisam', name: 'lisam.cloud', v: 2,
     detect: rows => rows.some(r => /LISAM\.CLOUD/i.test(r.text)),
     parse(rows) {
       const number = find(rows, /FACTURE\s+(\d{4}#\d+)/i)?.[1] || '';
@@ -217,14 +247,14 @@ const Fournisseurs = (() => {
         if (!inTable) continue;
         if (/^NOS COORDONNEES|TOTAUX DE CETTE FACTURE/i.test(t)) { inTable = false; continue; }
         const c = r.cells, n = c.length;
-        if (n >= 4 && /^\d+(?:[.,]\d+)?$/.test(c[n - 1]) && isAmount(c[n - 2]) && isAmount(c[n - 3])) {
+        if (n >= 4 && /^\d+(?:[.,]\d+)?\s*%?$/.test(c[n - 1]) && isAmount(c[n - 2]) && isAmount(c[n - 3])) {
           const dur = n >= 5 ? c[n - 4] : '';
           lines.push({ what: c.slice(0, n >= 5 ? n - 4 : n - 3).join(' '), dur, total: num(c[n - 2]), desc: [] });
         } else if (lines.length) lines[lines.length - 1].desc.push(t);
       }
       return { supplier: 'lisam.cloud', number, date, totalExcl: totalM ? num(totalM[1]) : null, lines: lines.map(l => {
-        const desc = l.desc.join(' '), per = /(\d{4}-\d{2}-\d{2})[^>]*->\s*(\d{4}-\d{2}-\d{2})/.exec(desc);
-        const label = [desc.replace(/\([^)]*->[^)]*\)/, '').replace(/\s+/g, ' ').trim() || l.what, plain(l.dur).replace(/\s+/g, ' ')].filter(Boolean).join(' – ');
+        const desc = l.desc.join(' '), per = /(\d{4}-\d{2}-\d{2})[^>]*->\s*(\d{4}-\d{2}-\d{2})/.exec(desc) || /du\s+(\d{4}-\d{2}-\d{2})\s+au\s+(\d{4}-\d{2}-\d{2})/i.exec(desc);
+        const label = [desc.replace(/\([^)]*->[^)]*\)/, '').replace(/P[ée]riode du\s+\d{4}-\d{2}-\d{2}\s+au\s+\d{4}-\d{2}-\d{2}/i, '').replace(/\s+/g, ' ').trim() || l.what, plain(l.dur).replace(/\s+/g, ' ')].filter(Boolean).join(' – ');
         return { label, detail: [l.what, l.dur].filter(Boolean).join(' · '), key: keyOf(label), domain: domains(l.what)[0] || domains(desc)[0] || '',
           ref: l.what, qty: 1, unit: l.total, total: l.total, from: per?.[1] || null, to: per?.[2] || null };
       }) };
