@@ -275,7 +275,7 @@ ul.treat .tdest .check { margin: 0; white-space: nowrap; }
 ul.treat .tclient { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; align-items: flex-start; }
 ul.treat .tclient.hidden, ul.treat .tart.hidden { display: none; }
 ul.treat .tclient select, ul.treat .tclient input { margin: 0; }
-ul.treat .tclient > select { flex: 1 1 200px; width: auto; }
+ul.treat .tclient > select, ul.treat .tclient > .apick[data-kind="cli"] { flex: 1 1 200px; width: auto; }
 ul.treat .tclient > .apick { flex: 2 1 280px; }
 ul.treat .tclient > input[type=number] { flex: 0 1 130px; width: auto; }
 ul.treat .tart { margin-top: 6px; }

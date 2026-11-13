@@ -137,6 +137,14 @@ const Achats = (() => {
   function priceOf(l, m = mapOf(l)) {
     // Prix de vente saisi à la main sur la ligne (attribution, demande de Fred, 13/11) : il passe avant toute marge.
     if (isSet(l.saleUnit)) return { unit: round2(+l.saleUnit), from: 'prix saisi', margin: false };
+    // Licences ESET MSP (achetées au jour, vendues au MOIS, demande de Fred, 13/11) : prix de l'article Odoo par poste et par mois, quel que soit le nombre
+    // de jours du mois ; prix fixé à part pour une société partenaire (One Level UP).
+    if (m?.fixedPrice) {
+      const partner = typeof achatPartnerOf === 'function' && achatPartnerOf(l.clientId);
+      if (partner && isSet(m.partnerPrice)) return { unit: round2(+m.partnerPrice), from: 'prix partenaire par poste', margin: false, partner: true };
+      const p = product(m.billitRef), u = p ? productPrice(p) : isSet(m.billitPrice) ? +m.billitPrice : null;
+      return u == null ? null : { unit: u, from: `prix mensuel de l'article ${Compta.label()}`, margin: false };
+    }
     const g = marginOf(l, m);
     if (g) return { unit: round2(l.unit * (1 + g.pct / 100)), from: `marge ${g.from} ${pct(g.pct)}`, margin: true, partner: !!g.partner };
     const p = product(m?.billitRef), u = p ? productPrice(p) : m?.billitRef && isSet(m?.billitPrice) ? +m.billitPrice : null;
@@ -1135,6 +1143,76 @@ const Achats = (() => {
       i.refsRead = true; touch(i); await save();
     } catch (_) { /* PDF illisible ou absent : client à choisir à la main */ }
   }
+  // --- licences ESET MSP (MGK) : une ligne « postes-jours » remplacée par une ligne par client, d'après l'e-mail de détail (demande de Fred, 13/11) ---
+  // Décisions de Fred : quantité = postes maximum du mois (« Tiers Maxi »), un mois incomplet compte comme complet ; prix de vente = article Odoo par poste
+  // et par mois (même prix en février qu'en octobre), prix à part pour One Level UP ; lignes « OLU … » refacturées à One Level UP ; « ALESCOM Internal » = interne ;
+  // bon de commande : postes × coût moyen. Les petits clients s'additionnent dans Facturer de mois en mois jusqu'à ce qu'on les facture.
+  const isMsp = l => !l.eset && l.status !== 'billed' && /mgk/i.test(l.supplier) && (/-MSP$/i.test(l.ref || '') || /\bMSP\b/.test(l.label));
+  const esetKey = name => /protect/i.test(name) ? 'eset:protect' : /vulnerab/i.test(name) ? 'eset:vpm' : 'eset:' + keyOfName(name);
+  const keyOfName = s => fold(s).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  // Client ESET → client : appris (contacts → clients), « OLU … » = fiche One Level UP, sinon nom ressemblant (un seul candidat).
+  function esetClient(supplier, name) {
+    const h = clientByHint(supplier, name);
+    if (h) return { c: h };
+    if (/alescom/i.test(name) && /intern/i.test(name)) return { internal: true };
+    if (/^OLU\b/i.test(name.trim())) { const c = state.clients.find(x => myClient(x) && x.socRef && x.socRef !== HOME && /one level up/i.test(x.name + ' ' + (x.billitName || ''))); if (c) return { c }; }
+    const k = compact(name.replace(/\(.*?\)/g, '')), cs = state.clients.filter(c => myClient(c) && c.socRef !== HOME);
+    let hit = cs.filter(c => [c.name, c.billitName].some(n => n && compact(n) === k));
+    if (hit.length !== 1) hit = cs.filter(c => [c.name, c.billitName].some(n => { const x = compact(n); return x.length >= 4 && (k.includes(x) || (k.length >= 4 && x.includes(k))); }));
+    return hit.length === 1 ? { c: hit[0] } : {};
+  }
+  async function esetSetup(i, det) {
+    const f = $('#dlgForm'), ls = alive(A.lines).filter(l => l.invoiceId === i.id && isMsp(l));
+    const prods = [...new Set(det.rows.map(r => r.product))];
+    // Ligne MSP de la facture pour chaque produit ESET (PROTECT ↔ « ESET PROTECT Complete MSP », Vulnerability ↔ « … Vulnerability & Patch … »).
+    const lineOf = p => ls.find(l => esetKey(l.label) === esetKey(p)) || (prods.length === 1 && ls.length === 1 ? ls[0] : null);
+    const sum = p => round2(det.rows.filter(r => r.product === p).reduce((s, r) => s + r.price, 0));
+    const defRef = p => { const m = findMap(i.supplier, esetKey(p)); if (m?.billitRef) return m.billitRef; return /protect/i.test(p) && product('ESEPROTECTCOMPLETE') ? 'ESEPROTECTCOMPLETE' : ''; };
+    const olu = state.clients.some(x => myClient(x) && x.socRef && x.socRef !== HOME);
+    f.innerHTML = `<h2>Détail ESET MSP · ${esc(det.period.label || '')}</h2>
+      <p class="small muted" style="margin-top:0">${det.rows.length} client(s) dans l'e-mail de MGK. Chaque client devient une ligne : postes du mois (mois incomplet = complet),
+        prix d'achat de MGK, prix de vente = article ${esc(Compta.label())} par poste et par mois.</p>
+      <ul class="list">${prods.map((p, k) => { const l = lineOf(p), m = findMap(i.supplier, esetKey(p));
+        return `<li><div class="grow" style="flex:1;min-width:0"><strong>${esc(p)}</strong>
+          <div class="small ${l && Math.abs(l.total - sum(p)) > 0.5 ? 'warnc' : 'muted'}">${det.rows.filter(r => r.product === p).length} client(s) · ${det.rows.filter(r => r.product === p).reduce((s, r) => s + r.seats, 0)} poste(s) · ${eur(sum(p))}
+            ${l ? ` · ligne de la facture : ${eur(l.total)}` : ' · <span class="pill warn">aucune ligne correspondante sur la facture</span>'}</div>
+          <label>Article ${esc(Compta.label())} (prix par poste et par mois)</label>${articlePicker('es_' + k, defRef(p))}
+          ${olu ? `<label>Prix par poste pour One Level UP (vide = prix de l'article)</label><input type="number" step="0.01" min="0" id="esp_${k}" value="${esc(m?.partnerPrice ?? '')}" style="max-width:160px">` : ''}
+        </div></li>`; }).join('')}</ul>
+      <p class="small" id="esErr"></p>
+      <div class="actions"><button class="btn" id="esBack">Retour</button><button class="btn primary" id="esOk">Remplacer par une ligne par client</button></div>`;
+    $('#esBack').onclick = ev => { ev.preventDefault(); treatInvoice(i); };
+    $('#esOk').onclick = async ev => {
+      ev.preventDefault();
+      const miss = prods.filter((p, k) => !$('#es_' + k).value || !lineOf(p));
+      if (miss.length) return $('#esErr').innerHTML = `<span class="pill warn">Article ou ligne de facture manquant pour : ${miss.map(esc).join(', ')}</span>`;
+      let n = 0;
+      prods.forEach((p, k) => {
+        const orig = lineOf(p), ref = $('#es_' + k).value, key = esetKey(p);
+        let mp = findMap(i.supplier, key);
+        if (!mp) A.mapping.push(mp = { id: uid('am'), supplier: i.supplier, key, label: `ESET ${p} (MSP, au mois)`, createdAt: Date.now() });
+        const pp = $('#esp_' + k)?.value.trim().replace(',', '.');
+        Object.assign(touch(mp), { billitRef: ref, fixedPrice: true, ignore: false, ...priceCache(ref), ...(pp != null ? { partnerPrice: pp === '' ? '' : +pp } : {}) });
+        const rows = det.rows.filter(r => r.product === p);
+        // Total de la facture gardé : la différence d'arrondi de MGK (quelques centimes) va sur la plus grosse ligne.
+        const diff = round2(orig.total - rows.reduce((s, r) => s + r.price, 0));
+        const big = rows.reduce((a, b) => (b.price > a.price ? b : a), rows[0]);
+        for (const r of rows) {
+          const total = round2(r.price + (r === big ? diff : 0)), g = esetClient(i.supplier, r.name);
+          A.lines.push(touch({ id: uid('al'), invoiceId: i.id, supplier: i.supplier, key, label: `ESET ${p} – ${r.seats} poste${r.seats > 1 ? 's' : ''} – ${det.period.label}`,
+            detail: `ESET MSP · ${r.name} · ${r.days} postes-jours`, domain: '', hint: r.name, ref: orig.ref || '', from: det.period.from || orig.from || null, to: det.period.to || orig.to || null,
+            qty: r.seats, unit: Math.round(total / r.seats * 10000) / 10000, total, clientId: g.c?.id || null, mapId: mp.id, status: g.internal ? 'ignored' : 'open', eset: true, splitFrom: orig.id }));
+          n++;
+        }
+        orig.deleted = true; touch(orig);
+      });
+      Object.assign(touch(i), { eset: { period: det.period.label, rows: n, at: Date.now() } });
+      await save(); scheduleSync();
+      toast(`${n} ligne(s) client créées depuis le détail ESET`);
+      treatInvoice(i);
+    };
+    openDlg();
+  }
   async function treatInvoice(i, drafts = null) {
     await loadProducts(0);
     if (!drafts) await fillRefs(i);
@@ -1158,11 +1236,17 @@ const Achats = (() => {
     const attrib = stockCo() && i.status === 'done';
     const tmpMap = x => ({ billitRef: x.ref, margin: x.margin });
     // Prix de vente avec les choix pas encore enregistrés (client choisi : marge commanditaire éventuelle).
-    const draftUnit = (l, x) => saleUnit({ ...l, clientId: x.clientId || null, saleUnit: isSet(x.price) ? +x.price : null }, tmpMap(x));
+    // La correspondance enregistrée est gardée (prix fixe ESET, prix partenaire), seuls l'article et la marge viennent de l'écran.
+    const draftUnit = (l, x) => saleUnit({ ...l, clientId: x.clientId || null, saleUnit: isSet(x.price) ? +x.price : null },
+      { ...(mapOf(l) || findMap(l.supplier, l.key) || {}), billitRef: x.ref, margin: x.margin });
     const f = $('#dlgForm');
     f.innerHTML = `<h2>${attrib ? 'Attribuer les articles' : 'Traiter la facture'} ${esc(i.supplier)} ${esc(i.number)}</h2>
       <p class="small muted" style="margin-top:0">Du ${frDate(i.date)} · total HTVA ${i.totalExcl != null ? eur(i.totalExcl) : '?'} · ${ls.length} article(s)
         ${i.file ? ' · <button class="link" id="tPdf">📄 voir le PDF</button>' : ''}</p>
+      ${ls.some(isMsp) ? `<p class="small" style="margin-top:0"><span class="pill warn">Licences ESET MSP</span> La facture ne donne que le total en postes-jours :
+          ajoute l'e-mail de MGK « Détail de vos consommations MSP ESET » pour avoir une ligne par client.
+          <button class="btn chip" id="tEset">📧 Ajouter le détail ESET (.msg)</button><input type="file" id="tEsetF" accept=".msg,.txt" hidden></p>`
+        : i.eset ? `<p class="small muted" style="margin-top:0">Détail ESET de ${esc(i.eset.period || '')} : ${i.eset.rows} client(s), vendus au mois (prix de l'article par poste).</p>` : ''}
       ${poStep ? `<p class="small" style="margin-top:0">Pour chaque ligne : l'article ${esc(Compta.label())} (🔍), puis la destination. « Valider » crée le
           <strong>bon de commande fournisseur en brouillon</strong> dans ${esc(Compta.label())} (toutes les lignes sauf « Ne pas traiter » ; tu le confirmes, fais la réception
           et valides la facture dans ${esc(Compta.label())}) et envoie les lignes Client dans Facturer. Ce qui reste en stock se vend ensuite depuis ${esc(Compta.label())}, plus rien à faire ici.</p>` : ''}
@@ -1181,7 +1265,7 @@ const Achats = (() => {
           ${poStep ? `<div class="tart">${articlePicker('tr_' + l.id, x.ref, true, billed)}</div>` : ''}
           <div class="row tdest">${Object.keys(DEST).map(k => `<label class="check"><input type="radio" name="td_${l.id}" value="${k}" ${x.dest === k ? 'checked' : ''} ${billed ? 'disabled' : ''}> ${destName(k)}</label>`).join('')}</div>
           <div class="tclient ${x.dest === 'client' ? '' : 'hidden'}">
-            <select data-tc="${l.id}" ${billed ? 'disabled' : ''}><option value="">— client —</option>${clientOptions(x.clientId)}</select>
+            ${clientPicker(l.id, x.clientId, billed)}
             ${poStep ? '' : articlePicker('tr_' + l.id, x.ref, !billed, billed)}
             <input type="number" step="0.1" data-tm="${l.id}" value="${esc(x.margin)}" placeholder="marge fournisseur" title="Marge de l'article en % (vide = marge du fournisseur)" ${billed ? 'disabled' : ''}>
             <input type="number" step="0.01" min="0" data-tpv="${l.id}" value="${esc(x.price)}" placeholder="prix de vente / pièce" title="Prix de vente unitaire HTVA saisi à la main (vide = calculé avec la marge)" ${billed ? 'disabled' : ''}>
@@ -1196,6 +1280,18 @@ const Achats = (() => {
     setLarge(true);
     $('#dlg').addEventListener('close', () => setLarge(false), { once: true });
     if ($('#tPdf')) $('#tPdf').onclick = ev => { ev.preventDefault(); setLarge(false); showPdf(i); };
+    if ($('#tEset')) {
+      $('#tEset').onclick = ev => { ev.preventDefault(); $('#tEsetF').click(); };
+      $('#tEsetF').onchange = async ev => {
+        const file = ev.target.files[0]; ev.target.value = '';
+        if (!file) return;
+        let det;
+        try { const buf = await file.arrayBuffer(); det = /\.txt$/i.test(file.name) ? Fournisseurs.esetFromText(new TextDecoder().decode(buf)) : Fournisseurs.esetFromMsg(buf); }
+        catch (e) { return alert(e.message); }
+        setLarge(false);
+        esetSetup(i, det);
+      };
+    }
     const read = () => {
       for (const l of editable) {
         const x = d[l.id];
@@ -1282,6 +1378,8 @@ const Achats = (() => {
         // Domaine appris : la ligne a un domaine que la fiche du client choisi n'a pas encore (et qu'aucun autre de mes clients n'a) → ajouté à sa fiche,
         // pour que les prochaines factures le retrouvent toutes seules.
         if (x.dest === 'client' && x.clientId && l.domain) learnDomain(x.clientId, l.domain);
+        // Contact / nom de client du fournisseur appris (MGK : contact, ESET MSP : nom du client chez ESET) → retrouvé tout seul le mois suivant.
+        if (x.dest === 'client' && x.clientId && l.hint && !hintOf(l.supplier, l.hint)) A.hints.push(touch({ id: uid('ah'), supplier: l.supplier, text: hintKey(l.hint), label: l.hint, clientId: x.clientId }));
       }
     };
     if ($('#tKeep')) $('#tKeep').onclick = async ev => { ev.preventDefault(); apply(); $('#dlg').close(); await changed(); toast('Choix enregistrés (facture pas encore validée)'); };
@@ -1298,10 +1396,13 @@ const Achats = (() => {
         for (const l of editable) {
           const x = d[l.id];
           if (x.dest === 'none') continue;
-          const p = product(x.ref), k = p.id + '|' + l.unit, g = groups.get(k);
-          if (g) g.qty = Math.round((g.qty + l.qty) * 1000) / 1000; else groups.set(k, { articleId: p.id, qty: l.qty, unit: l.unit, label: l.label, ref: p.ref });
+          // Licences ESET : une seule ligne par article, postes additionnés, prix = coût moyen par poste (le total de la facture est gardé).
+          const p = product(x.ref), k = p.id + '|' + (l.eset ? 'eset' : l.unit), g = groups.get(k);
+          if (g) { g.qty = Math.round((g.qty + l.qty) * 1000) / 1000; g.total = round2(g.total + l.total); }
+          else groups.set(k, { articleId: p.id, qty: l.qty, unit: l.unit, total: l.total, label: l.eset ? `${p.name} (ESET MSP ${i.eset?.period || ''})` : l.label, ref: p.ref, eset: !!l.eset });
         }
-        const lines = [...groups.values()];
+        for (const g of groups.values()) if (g.eset) g.unit = Math.round(g.total / g.qty * 10000) / 10000;
+        const lines = [...groups.values()].map(({ total, eset, ...x }) => x);
         const count = k => editable.filter(l => d[l.id].dest === k).length;
         if (!confirm(`${Compta.mode() === 'live' ? '⚠ MODE RÉEL – vraie comptabilité\n\n' : ''}Valider ${i.supplier} ${i.number} ?\n\n`
           + (lines.length ? `Bon de commande fournisseur en brouillon dans ${soft} :\n` + lines.map(x => `- ${x.qty} × ${x.ref} ${x.label} (${eur(x.unit)})`).join('\n').slice(0, 1400)
@@ -1620,6 +1721,19 @@ const Achats = (() => {
       <input type="search" class="apin" data-for="${id}" value="${esc(txt)}" title="${esc(txt)}" placeholder="🔍 Article ${esc(Compta.label())} : réf., nom, catégorie…" autocomplete="off" ${disabled ? 'disabled' : ''}>
       <div class="aplist hidden"></div></div>`;
   }
+  // Même champ de recherche pour choisir un CLIENT (traitement d'une facture : une facture ESET MSP a ~150 lignes, 150 listes de 170 clients = 25 000 options).
+  // La valeur (id du client) est dans un champ caché qui porte `data-tc` (lu comme l'ancienne liste). Champ vide au focus : les clients par ordre alphabétique.
+  const pickClients = () => state.clients.filter(c => myClient(c) && c.socRef !== HOME).sort((a, b) => a.name.localeCompare(b.name));
+  function clientPicker(lineId, sel, disabled = false) {
+    const c = sel && state.clients.find(x => x.id === sel), txt = c ? c.name : '';
+    return `<div class="apick" data-kind="cli"><input type="hidden" id="tc_${lineId}" data-tc="${lineId}" value="${esc(sel || '')}">
+      <input type="search" class="apin" data-for="tc_${lineId}" value="${esc(txt)}" placeholder="🔍 Client…" autocomplete="off" ${disabled ? 'disabled' : ''}>
+      <div class="aplist hidden"></div></div>`;
+  }
+  const pickText = (kind, v) => {
+    if (kind === 'cli') return state.clients.find(x => x.id === v)?.name || '';
+    const p = product(v); return p ? `${p.ref} · ${p.name}` : v;
+  };
   function apSearch(q) {
     const words = fold(q).split(/\s+/).filter(Boolean);
     if (!words.length || !products) return [];
@@ -1627,15 +1741,27 @@ const Achats = (() => {
     return products.filter(p => { const t = fold([p.ref, p.name, p.catName].join(' ')); return words.every(w => t.includes(w)); })
       .sort((a, b) => rank(a) - rank(b) || String(a.ref).localeCompare(String(b.ref))).slice(0, 60);     // la liste défile (« ovh » = tous les articles OVH)
   }
+  function cliSearch(q) {
+    const words = fold(q).split(/\s+/).filter(Boolean), cs = pickClients();
+    if (!words.length) return cs.slice(0, 80);
+    return cs.filter(c => { const t = fold([c.name, c.billitName, ...(c.domains || [])].join(' ')); return words.every(w => t.includes(w)); })
+      .sort((a, b) => (fold(b.name).startsWith(words[0]) - fold(a.name).startsWith(words[0])) || a.name.localeCompare(b.name)).slice(0, 80);
+  }
   function apShow(inp) {
-    const wrap = inp.closest('.apick'), box = wrap.querySelector('.aplist'), q = inp.value.trim();
-    const sel = document.getElementById(inp.dataset.for)?.value, p = product(sel);
-    if (p && q === `${p.ref} · ${p.name}`) { box.classList.add('hidden'); return; }      // article déjà choisi, texte inchangé
-    const res = apSearch(q);
-    box.innerHTML = (wrap.dataset.new ? `<div class="apitem new" data-apv="__new">+ Nouvel article ${esc(Compta.label())}…</div>` : '')
-      + (q && !res.length ? '<div class="apitem none">Aucun article trouvé</div>' : '')
-      + res.map(p => `<div class="apitem" data-apv="${esc(p.ref)}"><strong>${esc(p.ref)}</strong> · ${esc(shortName(p.name))}
-          <span class="muted">· ${eur(productPrice(p))}${p.catName ? ' · ' + esc(p.catName) : ''}</span></div>`).join('');
+    const wrap = inp.closest('.apick'), box = wrap.querySelector('.aplist'), q = inp.value.trim(), kind = wrap.dataset.kind || 'art';
+    const sel = document.getElementById(inp.dataset.for)?.value;
+    if (sel && q === pickText(kind, sel)) { box.classList.add('hidden'); return; }      // déjà choisi, texte inchangé
+    if (kind === 'cli') {
+      const res = cliSearch(q);
+      box.innerHTML = (q && !res.length ? '<div class="apitem none">Aucun client trouvé</div>' : '')
+        + res.map(c => `<div class="apitem" data-apv="${esc(c.id)}"><strong>${esc(c.name)}</strong>${c.billitName && c.billitName !== c.name ? ` <span class="muted">· ${esc(shortName(c.billitName))}</span>` : ''}</div>`).join('');
+    } else {
+      const res = apSearch(q);
+      box.innerHTML = (wrap.dataset.new ? `<div class="apitem new" data-apv="__new">+ Nouvel article ${esc(Compta.label())}…</div>` : '')
+        + (q && !res.length ? '<div class="apitem none">Aucun article trouvé</div>' : '')
+        + res.map(p => `<div class="apitem" data-apv="${esc(p.ref)}"><strong>${esc(p.ref)}</strong> · ${esc(shortName(p.name))}
+            <span class="muted">· ${eur(productPrice(p))}${p.catName ? ' · ' + esc(p.catName) : ''}</span></div>`).join('');
+    }
     const first = box.querySelector('[data-apv]:not(.new)') || box.querySelector('[data-apv]');
     first?.classList.add('on');
     box.classList.toggle('hidden', !box.children.length);
@@ -1643,7 +1769,7 @@ const Achats = (() => {
   function apPick(item) {
     const wrap = item.closest('.apick'), inp = wrap.querySelector('.apin'), hid = document.getElementById(inp.dataset.for), v = item.dataset.apv;
     wrap.querySelector('.aplist').classList.add('hidden');
-    if (v !== '__new') { const p = product(v); inp.value = inp.title = p ? `${p.ref} · ${p.name}` : v; }
+    if (v !== '__new') inp.value = inp.title = pickText(wrap.dataset.kind || 'art', v);
     hid.value = v; hid.dispatchEvent(new Event('change', { bubbles: true }));
   }
   document.addEventListener('input', ev => { if (ev.target.classList?.contains('apin')) apShow(ev.target); });
@@ -1681,9 +1807,10 @@ const Achats = (() => {
     setTimeout(() => {
       const wrap = inp.closest('.apick'); if (!wrap || wrap.dataset.hold || document.activeElement === inp) return;
       wrap.querySelector('.aplist').classList.add('hidden');
-      const hid = document.getElementById(inp.dataset.for), p = product(hid?.value);
-      if (!inp.value.trim() && hid?.value) { hid.value = ''; hid.dispatchEvent(new Event('change', { bubbles: true })); }   // texte effacé = plus d'article
-      else if (hid?.value) inp.value = p ? `${p.ref} · ${p.name}` : `${hid.value} (inconnu dans ${Compta.label()})`;      // texte tapé sans choisir : on remet le choix
+      const hid = document.getElementById(inp.dataset.for), kind = wrap.dataset.kind || 'art';
+      if (!inp.value.trim() && hid?.value) { hid.value = ''; hid.dispatchEvent(new Event('change', { bubbles: true })); }   // texte effacé = plus de choix
+      else if (hid?.value) inp.value = kind === 'cli' ? pickText(kind, hid.value)                                           // texte tapé sans choisir : on remet le choix
+        : (product(hid.value) ? pickText(kind, hid.value) : `${hid.value} (inconnu dans ${Compta.label()})`);
     }, 150);
   });
   document.addEventListener('keydown', ev => {

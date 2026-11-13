@@ -503,6 +503,81 @@ const Fournisseurs = (() => {
   }
 
   // id (+ « @v » si le lecteur a été corrigé) : un PDF « non lu » est relu quand cette liste change. Monter `v` à chaque correction d'un lecteur.
-  return { read, readRows, fromRows, render, domains, keyOf, ublPdfs, fromUbl,
+  // --- détail des consommations ESET MSP envoyé par MGK par e-mail (demande de Fred, 13/11) ---
+  // La facture MGK « Vos licences ESET MSP du … au … » n'a qu'une ligne (postes-jours × prix) ; le détail par client est seulement dans l'e-mail
+  // « Détail de vos consommations MSP ESET » (Période, puis par produit et par client : Tiers Maxi = postes, Monthly Seat Days, prix d'achat HT).
+  // esetFromMsg lit le fichier Outlook .msg (format « Compound File » : flux __substg1.0_1000001F = texte de l'e-mail en UTF-16, ou 1000001E en ANSI,
+  // ou 10130102 = HTML) ; esetFromText lit le texte (aussi pour un texte copié-collé).
+  function cfbStreams(buf) {
+    const dv = new DataView(buf), u16 = o => dv.getUint16(o, true), u32 = o => dv.getUint32(o, true);
+    if (u32(0) !== 0xE011CFD0 || u32(4) !== 0xE11AB1A1) throw new Error("Ce fichier n'est pas un message Outlook (.msg).");
+    const ss = 1 << u16(0x1E), mss = 1 << u16(0x20), cutoff = u32(0x38);
+    const off = s => (s + 1) * ss;
+    // Table d'allocation (FAT) : 109 premiers secteurs dans l'en-tête, puis secteurs DIFAT chaînés.
+    const fatSecs = [];
+    for (let k = 0; k < 109; k++) { const s = u32(0x4C + k * 4); if (s < 0xFFFFFFFA) fatSecs.push(s); }
+    for (let s = u32(0x44), n = 0; s < 0xFFFFFFFA && n < u32(0x48); n++) {
+      for (let k = 0; k < ss / 4 - 1; k++) { const x = u32(off(s) + k * 4); if (x < 0xFFFFFFFA) fatSecs.push(x); }
+      s = u32(off(s) + ss - 4);
+    }
+    const fat = []; for (const s of fatSecs) for (let k = 0; k < ss / 4; k++) fat.push(u32(off(s) + k * 4));
+    const chain = (s, table) => { const out = []; while (s < 0xFFFFFFFA && out.length <= table.length) { out.push(s); s = table[s]; } return out; };
+    const readBig = (s, size) => { const out = new Uint8Array(size); let p = 0; for (const x of chain(s, fat)) { const n = Math.min(ss, size - p); if (n <= 0) break; out.set(new Uint8Array(buf, off(x), n), p); p += n; } return out; };
+    // Répertoire.
+    const dirBytes = readBig(u32(0x30), chain(u32(0x30), fat).length * ss), dd = new DataView(dirBytes.buffer);
+    const entries = [];
+    for (let o = 0; o + 128 <= dirBytes.length; o += 128) {
+      const nl = dd.getUint16(o + 0x40, true), type = dd.getUint8(o + 0x42);
+      let name = ''; for (let k = 0; k < Math.max(0, nl / 2 - 1); k++) name += String.fromCharCode(dd.getUint16(o + k * 2, true));
+      entries.push({ name, type, left: dd.getUint32(o + 0x44, true), right: dd.getUint32(o + 0x48, true), child: dd.getUint32(o + 0x4C, true), start: dd.getUint32(o + 0x74, true), size: dd.getUint32(o + 0x78, true) });
+    }
+    const root = entries[0];
+    const mini = readBig(root.start, root.size), minifat = [];
+    for (const x of chain(u32(0x3C), fat)) for (let k = 0; k < ss / 4; k++) minifat.push(u32(off(x) + k * 4));
+    const readMini = (s, size) => { const out = new Uint8Array(size); let p = 0; for (const x of chain(s, minifat)) { const n = Math.min(mss, size - p); if (n <= 0) break; out.set(mini.subarray(x * mss, x * mss + n), p); p += n; } return out; };
+    // Flux directement sous la racine (le message lui-même, pas ses pièces jointes).
+    const top = {}, walk = (i, seen = new Set()) => {
+      if (i >= entries.length || i === 0xFFFFFFFF || seen.has(i)) return; seen.add(i);
+      const e = entries[i]; walk(e.left, seen); walk(e.right, seen);
+      if (e.type === 2) top[e.name] = () => e.size < cutoff ? readMini(e.start, e.size) : readBig(e.start, e.size);
+    };
+    walk(root.child);
+    return top;
+  }
+  function msgText(buf) {
+    const top = cfbStreams(buf);
+    if (top['__substg1.0_1000001F']) return new TextDecoder('utf-16le').decode(top['__substg1.0_1000001F']());
+    if (top['__substg1.0_1000001E']) return new TextDecoder('windows-1252').decode(top['__substg1.0_1000001E']());
+    if (top['__substg1.0_10130102']) {
+      const html = new TextDecoder('utf-8').decode(top['__substg1.0_10130102']());
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      doc.querySelectorAll('td, p, div, br, tr').forEach(n => n.append('\n'));
+      return doc.body?.textContent || '';
+    }
+    throw new Error("Texte de l'e-mail introuvable dans le fichier .msg.");
+  }
+  function esetFromText(text) {
+    const v = String(text || '').split(/\r?\n/).map(s => s.replace(/ /g, ' ').trim()).filter(Boolean);
+    const n = s => { const t = String(s).replace(/[\s€]/g, ''); return /^-?\d+(\.\d+)?$/.test(t) ? +t : (/^-?\d+,\d+$/.test(t) ? +t.replace(',', '.') : NaN); };
+    const money = s => /€\s*$/.test(s) && !isNaN(n(s));
+    const at = v.findIndex(s => /^P[ée]riode\s*:?$/i.test(s) || /^P[ée]riode\s*:/i.test(s));
+    const plabel = at >= 0 ? (v[at].replace(/^P[ée]riode\s*:?\s*/i, '') || v[at + 1] || '') : '';
+    const pm = /([a-zéû]+)\s+(\d{4})/i.exec(plain(plabel)), mo = pm ? MONTHS.indexOf(pm[1]) : -1;
+    const from = mo >= 0 ? `${pm[2]}-${pad(mo + 1)}-01` : null;
+    const to = mo >= 0 ? new Date(Date.UTC(+pm[2], mo + 1, 0)).toISOString().slice(0, 10) : null;
+    const rows = [], products = [];
+    let product = '';
+    for (let k = 0; k < v.length; k++) {
+      if (v[k] !== 'Regular') continue;
+      const [a, b, c, d] = [v[k + 1], v[k + 2], v[k + 3], v[k + 4]];
+      if (a && !isNaN(n(b)) && !isNaN(n(c)) && d && money(d)) { rows.push({ product, name: a, seats: n(b), days: n(c), price: n(d) }); k += 4; }
+      else if (a && !isNaN(n(b)) && c && money(c)) { product = a; products.push({ name: a, days: n(b), price: n(c) }); k += 3; }
+    }
+    if (!rows.length) throw new Error("Aucun client trouvé : ce n'est pas l'e-mail « Détail de vos consommations MSP ESET » de MGK ?");
+    return { period: { label: plabel, from, to }, products, rows };
+  }
+  const esetFromMsg = buf => esetFromText(msgText(buf));
+
+  return { read, readRows, fromRows, render, domains, keyOf, ublPdfs, fromUbl, esetFromMsg, esetFromText,
     readers: () => READERS.map(r => ({ id: r.v ? `${r.id}@${r.v}` : r.id, name: r.name })) };
 })();
