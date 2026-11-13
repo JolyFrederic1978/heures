@@ -81,11 +81,17 @@ const Achats = (() => {
   // Hébergement OVH : seul le nom technique est sur la facture (« lesetaf.cluster031.hosting.ovh.net » = 7 premières lettres du domaine principal).
   // Client = celui dont un domaine commence par ces lettres (un seul candidat). Domaine retrouvé : écrit sur la ligne (affiché, et appris avec le client).
   const hostPrefix = l => /^([a-z0-9]{3,})\.cluster\d+\.hosting\.ovh\.net$/i.exec(l.ref || '')?.[1]?.toLowerCase() || '';
+  // OVH prend les 7 premières lettres du domaine, et change la 7ᵉ quand le nom est déjà pris (« enercec » = enercetec.be) :
+  // 7 lettres d'abord, sinon 6 ; un seul candidat, sinon rien.
+  function byHostPrefix(list, domainsOf, p) {
+    const hit = n => list.filter(x => domainsOf(x).some(d => compact(d).startsWith(p.slice(0, n))));
+    let h = hit(p.length);
+    if (h.length !== 1 && p.length >= 7) h = hit(6);
+    return h.length === 1 ? h[0] : null;
+  }
   function clientByHost(l) {
     const p = hostPrefix(l);
-    if (!p) return null;
-    const hits = state.clients.filter(myClient).filter(c => (c.domains || []).some(x => compact(x).startsWith(p)));
-    return hits.length === 1 ? hits[0] : null;
+    return p ? byHostPrefix(state.clients.filter(myClient), c => c.domains || [], p) : null;
   }
   const PUBLIC_DOMAIN = /^(gmail|googlemail|hotmail|outlook|live|msn|windowslive|yahoo|ymail|icloud|me|mac|aol|gmx|web|orange|free|wanadoo|laposte|sfr|neuf|protonmail|proton|skynet|telenet|proximus|belgacom|voo|scarlet|base|edpnet|mobistar|tiscali|caramail|zoho|mail|yandex|notaire)\.[a-z.]+$|\.ovh\.net$|^premium\.support$/i;
   function learnDomain(clientId, d) {
@@ -100,8 +106,8 @@ const Achats = (() => {
   function hostDomain(l) {
     const p = hostPrefix(l);
     if (!p || !A) return '';
-    const ds = [...new Set(alive(A.lines).filter(x => x.invoiceId === l.invoiceId && x.domain).map(x => x.domain))].filter(d => compact(d).startsWith(p));
-    return ds.length === 1 ? ds[0] : '';
+    const ds = [...new Set(alive(A.lines).filter(x => x.invoiceId === l.invoiceId && x.domain).map(x => x.domain))];
+    return byHostPrefix(ds, d => [d], p) || '';
   }
   const hintKey = s => fold(s).replace(/\s+/g, ' ').trim();
   const hintOf = (supplier, hint) => hint ? alive(A.hints).find(h => h.supplier === supplier && h.text === hintKey(hint)) : null;
@@ -528,7 +534,7 @@ const Achats = (() => {
     for (const l of kept) {
       const m = findMap(i.supplier, l.key), c = clientFor({ ...l, supplier: i.supplier });
       A.lines.push(touch({ id: uid('al'), invoiceId: invoice.id, supplier: i.supplier, key: l.key, label: l.label, detail: l.detail,
-        domain: l.domain, hint: l.hint || '', from: l.from || null, to: l.to || null, qty: l.qty, unit: l.unit, total: l.total,
+        domain: l.domain, hint: l.hint || '', ref: l.ref || '', from: l.from || null, to: l.to || null, qty: l.qty, unit: l.unit, total: l.total,
         clientId: c?.id || null, mapId: m?.id || null, status: 'open' }));
     }
     return `${i.supplier} ${i.number || name} : ${kept.length} article(s) importé(s)${invoice.skipped ? `, ${invoice.skipped} à 0 € ignoré(s)` : ''}`
@@ -1109,8 +1115,29 @@ const Achats = (() => {
   const destOf = l => l.status === 'stock' ? 'stock' : l.status === 'none' ? 'none' : (l.status === 'ignored' || mapOf(l)?.ignore) ? 'interne'
     : !l.clientId && Compta.stockDefault() ? 'stock' : 'client';
   const setLarge = on => $('#dlg').classList.toggle('large', on);
+  // Lignes importées avant le 13/11 : la « référence » OVH (nom technique d'un hébergement, ex. sodimfo.cluster027.hosting.ovh.net) n'était pas gardée.
+  // À l'ouverture du traitement d'une facture OVH, le PDF est relu une fois pour la retrouver (lignes reprises dans l'ordre, par nom et montant).
+  async function fillRefs(i) {
+    const ls = alive(A.lines).filter(l => l.invoiceId === i.id);
+    if (i.refsRead || !/ovh/i.test(i.supplier) || !i.file || !ls.some(l => l.ref == null && !l.domain)) return;
+    try {
+      let buf = pdfCache.get(i.id);
+      if (!buf) { const got = await Fichiers.get(i.file, 'buffer'); if (!got) return; pdfCache.set(i.id, buf = got.data); }
+      const r = await Fournisseurs.read(buf.slice(0), i.file.split('/').pop());
+      const src = (r.invoice?.lines || []).filter(x => (x.total || x.unit) && !x.skip);
+      let k = 0;
+      for (const l of ls) {
+        const at = src.findIndex((x, j) => j >= k && x.label === l.label && Math.abs((x.total || 0) - (l.total || 0)) < 0.005);
+        if (at < 0) continue;
+        k = at + 1;
+        if (l.ref == null) { l.ref = src[at].ref || ''; touch(l); }
+      }
+      i.refsRead = true; touch(i); await save();
+    } catch (_) { /* PDF illisible ou absent : client à choisir à la main */ }
+  }
   async function treatInvoice(i, drafts = null) {
     await loadProducts(0);
+    if (!drafts) await fillRefs(i);
     const ls = alive(A.lines).filter(l => l.invoiceId === i.id);
     const editable = ls.filter(l => l.status !== 'billed');
     // Brouillon par ligne : destination, client, article, marge (préremplis : domaine / contact, correspondance, « ne jamais refacturer »).
