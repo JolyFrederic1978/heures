@@ -127,8 +127,8 @@ const Compta = (() => {
     openInvoices: customerId => srv() ? op('factures.ouvertes', { customerId: String(customerId) }) : direct.openInvoices(customerId),
     purchases: since => srv() ? op('achats', { since }) : direct.purchases(since),
     purchase: id => srv() ? op('achat', { id: String(id) }) : direct.purchase(id),
-    // Odoo : valider une facture fournisseur et mettre ses articles en stock (lines : [{ articleId, qty, unit, label }]).
-    validatePurchase: (id, lines) => op('achat.valider', { id: String(id), lines }),
+    // Odoo : bon de commande fournisseur en brouillon à partir d'une facture fournisseur (lines : [{ articleId, qty, unit, label }]).
+    purchaseOrder: (id, lines) => op('achat.commande', { id: String(id), lines }),
     async file(id) {
       if (!srv()) return direct.file(id);
       const f = await op('fichier', { id: String(id) });

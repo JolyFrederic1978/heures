@@ -91,6 +91,8 @@ const Achats = (() => {
   // Prix de vente unitaire : achat × (1 + marge) ; sans marge, le prix de l'article dans le logiciel de facturation
   // (liste chargée, sinon dernier prix connu gardé dans la correspondance : billitPrice). from = origine, pour l'affichage.
   function priceOf(l, m = mapOf(l)) {
+    // Prix de vente saisi à la main sur la ligne (attribution, demande de Fred, 13/11) : il passe avant toute marge.
+    if (isSet(l.saleUnit)) return { unit: round2(+l.saleUnit), from: 'prix saisi', margin: false };
     const g = marginOf(l, m);
     if (g) return { unit: round2(l.unit * (1 + g.pct / 100)), from: `marge ${g.from} ${pct(g.pct)}`, margin: true, partner: !!g.partner };
     const p = product(m?.billitRef), u = p ? productPrice(p) : m?.billitRef && isSet(m?.billitPrice) ? +m.billitPrice : null;
@@ -1071,26 +1073,28 @@ const Achats = (() => {
     // Brouillon par ligne : destination, client, article, marge (préremplis : domaine / contact, correspondance, « ne jamais refacturer »).
     const d = drafts || Object.fromEntries(ls.map(l => {
       const m = mapOf(l) || findMap(l.supplier, l.key);
-      return [l.id, { dest: destOf({ ...l, mapId: l.mapId || m?.id }), clientId: l.clientId || '', ref: m?.billitRef || '', margin: m?.margin ?? '' }];
+      return [l.id, { dest: destOf({ ...l, mapId: l.mapId || m?.id }), clientId: l.clientId || '', ref: m?.billitRef || '', margin: m?.margin ?? '', price: l.saleUnit ?? '' }];
     }));
     // Société qui suit son stock dans Odoo (Alescom, demande de Fred, 13/11) : deux temps.
-    //   1. odooStep : facture reçue dans Odoo, pas encore traitée → choisir l'article Odoo de chaque ligne, puis « Valider dans Odoo et mettre en stock »
-    //      (le serveur valide la facture fournisseur et fait la réception de TOUS les articles) ;
+    //   1. odooStep : facture reçue dans Odoo, pas encore traitée → choisir l'article Odoo de chaque ligne (recherche), puis « Créer le bon de commande »
+    //      (le serveur crée un bon de commande fournisseur EN BROUILLON ; Manu le confirme, fait la réception et valide la facture dans Odoo) ;
     //   2. attrib : facture validée → attribuer ensuite, quand on veut, des quantités à des clients (à refacturer) ou en usage interne ; le reste reste en stock.
     const odooStep = stockCo() && Compta.type() === 'odoo' && toTreat(i) && !!i.billitOrderId && !i.odoo;
     const attrib = stockCo() && i.status === 'done';
     const tmpMap = x => ({ billitRef: x.ref, margin: x.margin });
     // Prix de vente avec les choix pas encore enregistrés (client choisi : marge commanditaire éventuelle).
-    const draftUnit = (l, x) => saleUnit({ ...l, clientId: x.clientId || null }, tmpMap(x));
+    const draftUnit = (l, x) => saleUnit({ ...l, clientId: x.clientId || null, saleUnit: isSet(x.price) ? +x.price : null }, tmpMap(x));
     const f = $('#dlgForm');
-    f.innerHTML = `<h2>${odooStep ? 'Valider dans Odoo' : attrib ? 'Attribuer les articles' : 'Traiter la facture'} ${esc(i.supplier)} ${esc(i.number)}</h2>
+    f.innerHTML = `<h2>${odooStep ? 'Bon de commande Odoo' : attrib ? 'Attribuer les articles' : 'Traiter la facture'} ${esc(i.supplier)} ${esc(i.number)}</h2>
       <p class="small muted" style="margin-top:0">Du ${frDate(i.date)} · total HTVA ${i.totalExcl != null ? eur(i.totalExcl) : '?'} · ${ls.length} article(s)
         ${i.file ? ' · <button class="link" id="tPdf">📄 voir le PDF</button>' : ''}</p>
-      ${odooStep ? `<p class="small" style="margin-top:0">Étape 1 : choisis l'article ${esc(Compta.label())} de chaque ligne, puis valide.
-          LevelDesk <strong>valide la facture fournisseur dans ${esc(Compta.label())}</strong> et <strong>met tous les articles en stock</strong> (réception validée ;
-          « Suivre l'inventaire » activé sur les articles qui ne l'ont pas). Ensuite (étape 2), tu attribues des quantités aux clients à refacturer.</p>` : ''}
-      ${attrib && i.odoo ? `<p class="small" style="margin-top:0"><span class="pill ok">✓ Validée dans ${esc(Compta.label())}${i.odoo.number ? ' · ' + esc(i.odoo.number) : ''}</span>
-          <span class="pill ok">📦 réception ${esc(i.odoo.pickingName || '')}</span> Tout est en stock : attribue des quantités aux clients à refacturer (le reste reste en stock).</p>` : ''}
+      ${odooStep ? `<p class="small" style="margin-top:0">Étape 1 : choisis l'article ${esc(Compta.label())} de chaque ligne (🔍 recherche), puis crée le bon de commande.
+          LevelDesk crée un <strong>bon de commande fournisseur en brouillon</strong> dans ${esc(Compta.label())} (fournisseur et n° de la facture, articles, quantités, prix d'achat ;
+          « Suivre l'inventaire » activé sur les articles qui ne l'ont pas). Tu le confirmes, fais la réception et valides la facture dans ${esc(Compta.label())}.
+          Ensuite (étape 2), tu attribues ici des quantités aux clients à refacturer.</p>` : ''}
+      ${attrib && i.odoo ? `<p class="small" style="margin-top:0"><span class="pill ok">📝 Bon de commande ${esc(i.odoo.poName || i.odoo.pickingName || '')}${i.odoo.po ? ' (brouillon)' : ''}</span>
+          ${/^https:\/\//.test(i.odoo.url || '') ? `<a href="${esc(i.odoo.url)}" target="_blank" rel="noopener">Ouvrir dans ${esc(Compta.label())}</a> · ` : ''}
+          Attribue des quantités aux clients à refacturer (le reste reste en stock).</p>` : ''}
       ${toCheck(i) ? `<p class="small"><span class="pill warn">⚠ ${esc(i.warn)}</span></p>` : ''}
       <div class="treatbar ${odooStep ? 'hidden' : ''}">
         <select id="tAllC"><option value="">Même client pour toutes les lignes…</option>${clientOptions('')}</select>
@@ -1100,19 +1104,20 @@ const Achats = (() => {
           <div><strong>${esc(l.label)}</strong> ${billed ? '<span class="pill ok">déjà facturé</span>' : ''}</div>
           <div class="small muted">${[whereOf(l), l.from && `du ${frDate(l.from)} au ${frDate(l.to)}`, `${l.qty} × ${eur(l.unit)} = ${eur(l.total)}`].filter(Boolean).map(esc).join(' · ')}
             ${!billed && !odooStep && l.qty > 1 ? ` <button class="btn chip" data-tsplit="${l.id}" title="Une partie en stock, une partie à un ou plusieurs clients">✂ Répartir</button>` : ''}</div>
-          ${odooStep ? `<div class="tart">${productSelect('tr_' + l.id, x.ref, true)}</div>` : `
+          ${odooStep ? `<div class="tart">${productSelect('tr_' + l.id, x.ref, true, true)}</div>` : `
           <div class="row tdest">${Object.keys(DEST).map(k => `<label class="check"><input type="radio" name="td_${l.id}" value="${k}" ${x.dest === k ? 'checked' : ''} ${billed ? 'disabled' : ''}> ${destName(k)}</label>`).join('')}</div>
           <div class="tclient ${x.dest === 'client' ? '' : 'hidden'}">
             <select data-tc="${l.id}" ${billed ? 'disabled' : ''}><option value="">— client —</option>${clientOptions(x.clientId)}</select>
             ${productSelect('tr_' + l.id, x.ref, !billed)}
             <input type="number" step="0.1" data-tm="${l.id}" value="${esc(x.margin)}" placeholder="marge fournisseur" title="Marge de l'article en % (vide = marge du fournisseur)" ${billed ? 'disabled' : ''}>
+            <input type="number" step="0.01" min="0" data-tpv="${l.id}" value="${esc(x.price)}" placeholder="prix de vente / pièce" title="Prix de vente unitaire HTVA saisi à la main (vide = calculé avec la marge)" ${billed ? 'disabled' : ''}>
           </div>`}
           <div class="small" data-tp="${l.id}"></div>
         </div></li>`; }).join('')}</ul>
       <div class="card" style="margin:10px 0 0;padding:10px" id="tTot"></div>
       <p class="small" id="tErr"></p>
       <div class="actions">${attrib ? '' : '<button class="btn" id="tKeep" style="margin-right:auto">Enregistrer sans valider</button>'}
-        <button class="btn" value="cancel">Fermer</button><button class="btn primary" id="tOk">${odooStep ? `✓ Valider dans ${esc(Compta.label())} et mettre en stock`
+        <button class="btn" value="cancel">Fermer</button><button class="btn primary" id="tOk">${odooStep ? `✓ Créer le bon de commande dans ${esc(Compta.label())}`
           : attrib ? 'Enregistrer l\'attribution' : '✓ Valider la facture'}</button></div>`;
     setLarge(true);
     $('#dlg').addEventListener('close', () => setLarge(false), { once: true });
@@ -1126,6 +1131,7 @@ const Achats = (() => {
         const r = ($(`#tr_${l.id}`)?.value || '').trim();
         if (r !== '__new' && $(`#tr_${l.id}`)) x.ref = r;
         if ($(`[data-tm="${l.id}"]`)) x.margin = $(`[data-tm="${l.id}"]`).value.trim();
+        if ($(`[data-tpv="${l.id}"]`)) x.price = $(`[data-tpv="${l.id}"]`).value.trim().replace(',', '.');
       }
     };
     // Ce qui manque à une ligne « Client » pour être refacturable ; étape « Valider dans Odoo » : l'article Odoo de chaque ligne.
@@ -1139,7 +1145,7 @@ const Achats = (() => {
         const x = d[l.id], el = $(`[data-tp="${l.id}"]`);
         if (odooStep) {
           sum.stock += l.total; const miss = lacks(l);
-          el.innerHTML = miss.length ? `<span class="pill warn">${miss.join(' + ')}</span>` : `<span class="muted">→ entrera en stock dans ${esc(Compta.label())} (${l.qty} × ${eur(l.unit)})</span>`;
+          el.innerHTML = miss.length ? `<span class="pill warn">${miss.join(' + ')}</span>` : `<span class="muted">→ ligne du bon de commande : ${l.qty} × ${eur(l.unit)}</span>`;
           continue;
         }
         $(`[data-tl="${l.id}"] .tclient`).classList.toggle('hidden', x.dest !== 'client');
@@ -1147,8 +1153,8 @@ const Achats = (() => {
           const u = l.status === 'billed' ? lineUnit(l) : draftUnit(l, x), miss = lacks(l);
           sum.client += l.total; sum.sale += u != null ? round2(u * l.qty) : 0;
           el.innerHTML = miss.length ? `<span class="pill warn">${miss.join(' + ')} à choisir</span>`
-            : `→ ${stockCo() ? 'en stock dans Odoo, à mettre sur le devis du client : ' : 'refacturé '}${eur(round2(u * l.qty))} HTVA (${l.qty} × ${eur(u)})`;
-        } else { sum[x.dest] += l.total; el.innerHTML = `<span class="muted">${x.dest === 'stock' ? (stockCo() ? '→ en stock dans Odoo, pas encore attribué' : '→ mis en stock') : '→ usage interne, non refacturé'}</span>`; }
+            : `→ ${stockCo() ? 'en stock dans Odoo, à mettre sur le devis du client : ' : 'refacturé '}${eur(round2(u * l.qty))} HTVA (${l.qty} × ${eur(u)}${isSet(x.price) ? ', prix saisi' : ''})`;
+        } else { sum[x.dest] += l.total; el.innerHTML = `<span class="muted">${x.dest === 'stock' ? (stockCo() ? '→ en stock (Odoo), pas encore attribué' : '→ mis en stock') : '→ usage interne, non refacturé'}</span>`; }
       }
       const all = round2(sum.client + sum.stock + sum.interne), off = i.totalExcl != null && Math.abs(all - i.totalExcl) > 0.02;
       $('#tTot').innerHTML = `<div class="small">Refacturé : achat <strong>${eur(sum.client)}</strong> → vente <strong>${eur(sum.sale)}</strong> HTVA</div>
@@ -1157,7 +1163,7 @@ const Achats = (() => {
       $('#tErr').innerHTML = '';
     };
     const box = $('ul.treat', f);
-    box.oninput = draw;
+    box.oninput = ev => { if (!filterProducts(ev.target)) draw(); };
     box.onclick = ev => {
       const b = ev.target.closest('[data-tsplit]');
       if (!b) return;
@@ -1196,6 +1202,7 @@ const Achats = (() => {
           if (mp) Object.assign(touch(mp), { billitRef: x.ref, margin: x.margin === '' ? '' : +x.margin, ignore: false, ...priceCache(x.ref) });
         }
         Object.assign(touch(l), { clientId: x.dest === 'client' ? x.clientId || null : l.clientId, mapId: mp?.id || l.mapId || null,
+          saleUnit: x.dest === 'client' && isSet(x.price) && +x.price >= 0 ? round2(+x.price) : null,
           status: { client: 'open', stock: 'stock', interne: 'ignored' }[x.dest] });
       }
     };
@@ -1209,17 +1216,17 @@ const Achats = (() => {
       }
       if (odooStep) {
         const soft = Compta.label(), lines = editable.map(l => ({ articleId: product(d[l.id].ref).id, qty: l.qty, unit: l.unit, label: l.label }));
-        if (!confirm(`${Compta.mode() === 'live' ? '⚠ MODE RÉEL – vraie comptabilité\n\n' : ''}Valider la facture ${i.supplier} ${i.number} dans ${soft} et mettre en stock ${lines.length} article(s) ?\n`
-          + editable.map(l => `- ${l.qty} × ${d[l.id].ref} ${l.label}`).join('\n').slice(0, 1500)
-          + `\n\nLa facture fournisseur sera validée dans ${soft} (elle reçoit son numéro) et une réception sera validée : ce n'est pas annulable depuis LevelDesk.`)) return;
-        const btn = $('#tOk'); btn.disabled = true; $('#tErr').textContent = `Validation dans ${soft}…`;
+        if (!confirm(`${Compta.mode() === 'live' ? '⚠ MODE RÉEL – vraie comptabilité\n\n' : ''}Créer un bon de commande fournisseur en brouillon dans ${soft} pour ${i.supplier} ${i.number} ?\n`
+          + editable.map(l => `- ${l.qty} × ${d[l.id].ref} ${l.label} (${eur(l.unit)})`).join('\n').slice(0, 1500)
+          + `\n\nIl reste en brouillon : à confirmer, réceptionner et facturer par toi dans ${soft}.`)) return;
+        const btn = $('#tOk'); btn.disabled = true; $('#tErr').textContent = `Création du bon de commande dans ${soft}…`;
         let res;
-        try { res = await Compta.validatePurchase(i.billitOrderId, lines); }
+        try { res = await Compta.purchaseOrder(i.billitOrderId, lines); }
         catch (e) { btn.disabled = false; return $('#tErr').innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
         apply();
         Object.assign(touch(i), { status: 'done', validatedAt: Date.now(), validatedBy: me().id, seen: true,
-          odoo: { number: res.number || '', picking: res.picking || '', pickingName: res.pickingName || '', posted: !!res.posted, at: Date.now() } });
-        await changed(); toast(`Facture validée dans ${soft}, articles en stock${res.pickingName ? ' (' + res.pickingName + ')' : ''}`);
+          odoo: { po: res.po || '', poName: res.poName || '', url: res.url || '', at: Date.now() } });
+        await changed(); toast(res.already ? `Bon de commande ${res.poName} déjà créé pour cette facture` : `Bon de commande ${res.poName || ''} créé en brouillon dans ${soft}`);
         return treatInvoice(i);          // étape 2 : attribution
       }
       apply();
@@ -1306,7 +1313,7 @@ const Achats = (() => {
     f.innerHTML = `<h2>Traitement : ${esc(i.supplier)} ${esc(i.number)}</h2>
       <p class="small muted" style="margin-top:0">Facture du ${frDate(i.date)} · ${i.totalExcl != null ? eur(i.totalExcl) + ' HTVA' : ''}
         ${i.validatedAt ? ` · validée le ${frDate(isoDate(new Date(i.validatedAt)))}${i.validatedBy ? ' par ' + esc(user(i.validatedBy).name) : ''}` : ''}
-        ${i.odoo ? ` · dans ${esc(Compta.label())} : ${esc(i.odoo.number || 'facture validée')}, réception ${esc(i.odoo.pickingName || '')}` : ''}</p>
+        ${i.odoo ? ` · dans ${esc(Compta.label())} : ${i.odoo.po ? `bon de commande ${esc(i.odoo.poName || '')} (créé en brouillon)` : `${esc(i.odoo.number || 'facture validée')}, réception ${esc(i.odoo.pickingName || '')}`}` : ''}</p>
       <ul class="list">${ls.map(l => `<li><div class="grow" style="flex:1;min-width:0"><strong>${esc(l.label)}</strong>
         <div class="small muted">${[whereOf(l), `${l.qty} × ${eur(l.unit)} = ${eur(l.total)}`].filter(Boolean).map(esc).join(' · ')}</div>
         <div class="small">${what(l)}</div></div></li>`).join('')}</ul>
@@ -1494,18 +1501,35 @@ const Achats = (() => {
   // Liste déroulante des articles Billit, par catégorie. La référence actuelle reste proposée même si elle n'existe pas (ou plus) dans Billit.
   // Liste Billit indisponible (pas de clé, erreur) : saisie de la référence à la main.
   // canNew : option « + Nouvel article… » (traitement d'une facture : article absent du logiciel de facturation, créé sans quitter l'écran).
-  function productSelect(id, sel, canNew = false) {
+  // search : champ de recherche au-dessus de la liste (référence, nom, catégorie ; demande de Fred, 13/11) ; catégories triées par nom.
+  function productSelect(id, sel, canNew = false, search = false) {
     if (!products) return `<input id="${id}" value="${esc(sel)}" autocapitalize="off" placeholder="ex. int-004">`;
     const ps = products.slice().sort((a, b) => String(a.ref).localeCompare(String(b.ref)));
     // Nom raccourci : la liste ouverte du navigateur prend la largeur de l'option la plus longue (noms Billit de plusieurs centaines de caractères).
     const short = s => { s = String(s || ''); return s.length > 60 ? s.slice(0, 57).trimEnd() + '…' : s; };
-    const opt = p => `<option value="${esc(p.ref)}" title="${esc(p.name || '')}" ${fold(p.ref) === fold(sel) ? 'selected' : ''}>${esc(p.ref)} · ${esc(short(p.name))} · ${eur(productPrice(p))}</option>`;
-    const groups = categories().map(g => ({ name: g.name, ps: ps.filter(p => p.catId === g.id) }))
+    const opt = (p, cat) => `<option value="${esc(p.ref)}" title="${esc(p.name || '')}" data-find="${esc(fold([p.ref, p.name, cat].join(' ')))}" ${fold(p.ref) === fold(sel) ? 'selected' : ''}>${esc(p.ref)} · ${esc(short(p.name))} · ${eur(productPrice(p))}</option>`;
+    const groups = categories().map(g => ({ name: g.name, ps: ps.filter(p => p.catId === g.id) })).sort((a, b) => a.name.localeCompare(b.name))
       .concat([{ name: 'Sans catégorie', ps: ps.filter(p => !p.catId) }]).filter(g => g.ps.length);
-    return `<select id="${id}"><option value="">— aucun article —</option>
+    return `${search ? `<input type="search" class="psearch" data-for="${id}" placeholder="🔍 Rechercher l'article (réf., nom, catégorie)…" autocomplete="off">` : ''}
+      <select id="${id}"><option value="">— aucun article —</option>
       ${canNew ? `<option value="__new">+ Nouvel article ${esc(Compta.label())}…</option>` : ''}
       ${sel && !product(sel) ? `<option value="${esc(sel)}" selected>${esc(sel)} (inconnu dans Billit)</option>` : ''}
-      ${groups.map(g => `<optgroup label="${esc(g.name)}">${g.ps.map(opt).join('')}</optgroup>`).join('')}</select>`;
+      ${groups.map(g => `<optgroup label="${esc(g.name)}">${g.ps.map(p => opt(p, g.name)).join('')}</optgroup>`).join('')}</select>`;
+  }
+  // Filtre la liste d'articles liée à un champ de recherche (.psearch) : mots cherchés dans la référence, le nom et la catégorie.
+  // Un seul article trouvé : il est choisi. Renvoie true si l'événement venait d'un champ de recherche.
+  function filterProducts(input) {
+    if (!input?.classList?.contains('psearch')) return false;
+    const sel = document.getElementById(input.dataset.for);
+    if (!sel) return true;
+    const words = fold(input.value).split(/\s+/).filter(Boolean), hits = [];
+    sel.querySelectorAll('optgroup').forEach(g => {
+      let any = false;
+      g.querySelectorAll('option').forEach(o => { const ok = words.every(w => (o.dataset.find || '').includes(w)); o.hidden = o.disabled = !ok; if (ok) { any = true; hits.push(o); } });
+      g.hidden = !any;
+    });
+    if (words.length && hits.length === 1 && sel.value !== hits[0].value) { sel.value = hits[0].value; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+    return true;
   }
 
   async function editMap(m) {
