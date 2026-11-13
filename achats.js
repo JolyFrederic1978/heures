@@ -1625,7 +1625,7 @@ const Achats = (() => {
     if (!words.length || !products) return [];
     const rank = p => { const r = fold(p.ref), n = fold(p.name); return r === words[0] ? 0 : r.startsWith(words[0]) ? 1 : n.startsWith(words[0]) ? 2 : 3; };
     return products.filter(p => { const t = fold([p.ref, p.name, p.catName].join(' ')); return words.every(w => t.includes(w)); })
-      .sort((a, b) => rank(a) - rank(b) || String(a.ref).localeCompare(String(b.ref))).slice(0, 12);
+      .sort((a, b) => rank(a) - rank(b) || String(a.ref).localeCompare(String(b.ref))).slice(0, 60);     // la liste défile (« ovh » = tous les articles OVH)
   }
   function apShow(inp) {
     const wrap = inp.closest('.apick'), box = wrap.querySelector('.aplist'), q = inp.value.trim();
@@ -1647,13 +1647,39 @@ const Achats = (() => {
     hid.value = v; hid.dispatchEvent(new Event('change', { bubbles: true }));
   }
   document.addEventListener('input', ev => { if (ev.target.classList?.contains('apin')) apShow(ev.target); });
-  document.addEventListener('focusin', ev => { if (ev.target.classList?.contains('apin')) { ev.target.select(); apShow(ev.target); } });
-  document.addEventListener('mousedown', ev => { const it = ev.target.closest?.('.apitem[data-apv]'); if (it) { ev.preventDefault(); apPick(it); } });
+  document.addEventListener('focusin', ev => {
+    const inp = ev.target;
+    if (!inp.classList?.contains('apin')) return;
+    const wrap = inp.closest('.apick');
+    if (wrap?.dataset.refocus) { delete wrap.dataset.refocus; return; }     // retour après la barre de défilement : liste et position gardées
+    inp.select(); apShow(inp);
+  });
+  // Clic sur un article : choisi. Clic ailleurs dans la liste (barre de défilement, bord) : la liste reste ouverte (demande de Fred, 13/11 :
+  // la liste se fermait en voulant la faire défiler, le champ perdait le focus) ; le focus revient dans le champ au relâchement.
+  const apHold = ev => {
+    const it = ev.target.closest?.('.apitem[data-apv]');
+    if (it) { if (ev.type === 'mousedown') ev.preventDefault(); return ev.type === 'mousedown' && apPick(it); }
+    const list = ev.target.closest?.('.aplist');
+    if (list) list.closest('.apick').dataset.hold = '1';
+  };
+  const apRelease = () => {
+    for (const wrap of document.querySelectorAll('.apick[data-hold]')) {
+      delete wrap.dataset.hold;
+      const inp = wrap.querySelector('.apin');
+      if (document.activeElement !== inp) { wrap.dataset.refocus = '1'; inp.focus({ preventScroll: true }); }
+    }
+  };
+  document.addEventListener('mousedown', apHold);
+  document.addEventListener('touchstart', apHold, { passive: true });
+  document.addEventListener('mouseup', () => setTimeout(apRelease, 0));
+  document.addEventListener('touchend', () => setTimeout(apRelease, 0));
+  // Sur téléphone, toucher un article choisit (le « mousedown » simulé arrive après le défilement, pas pendant).
+  document.addEventListener('click', ev => { const it = ev.target.closest?.('.apitem[data-apv]'); if (it && it.closest('.aplist:not(.hidden)')) apPick(it); });
   document.addEventListener('focusout', ev => {
     const inp = ev.target;
     if (!inp.classList?.contains('apin')) return;
     setTimeout(() => {
-      const wrap = inp.closest('.apick'); if (!wrap) return;
+      const wrap = inp.closest('.apick'); if (!wrap || wrap.dataset.hold || document.activeElement === inp) return;
       wrap.querySelector('.aplist').classList.add('hidden');
       const hid = document.getElementById(inp.dataset.for), p = product(hid?.value);
       if (!inp.value.trim() && hid?.value) { hid.value = ''; hid.dispatchEvent(new Event('change', { bubbles: true })); }   // texte effacé = plus d'article
