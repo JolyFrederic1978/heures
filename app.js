@@ -307,7 +307,7 @@ function ensureSocClients() {
   for (const S of mine) for (const T of activeSocs()) {
     if (T.id === S.id) continue;
     const id = `c_soc_${S.id}_${T.id}`;
-    if (state.clients.some(c => c.id === id || (c.socRef === T.id && clientSoc(c) === S.id))) continue;
+    if (srvRefused('clients', id) || state.clients.some(c => c.id === id || (c.socRef === T.id && clientSoc(c) === S.id))) continue;
     const same = state.clients.find(c => !c.deleted && clientSoc(c) === S.id && fold(c.name) === fold(T.name));
     if (same) { same.socRef = T.id; touch(same); changed = true; continue; }
     // Client de ma société : nom et liens de facturation repris du partenaire (Réglages → Partenaires), sinon le nom de la société.
@@ -498,6 +498,12 @@ async function sync() {
 // OneDrive ne sert plus qu'aux fichiers (Excel, Prestations, Achats), pour un administrateur qui a OneDrive.
 // Envoi : chaque objet dont l'empreinte diffère de celle de la dernière version reçue du serveur (state.srv.ack) ; aucune modification à suivre ailleurs.
 const srvOn = () => !!state?.srv?.on;
+// Objet que le serveur a refusé de créer pour ce compte (ex. tâche du même id existant déjà chez une autre société, invisible d'ici) :
+// les créations automatiques ne le refont pas, sinon création → refus → suppression → création… en boucle (vu le 13/11, compte Alescom).
+const srvRefused = (t, id) => !!state?.srv?.refused?.[t + ':' + id];
+// Refus comptés depuis l'ouverture de l'app (srvSync) : à partir de 2 pour le même objet, il n'est plus envoyé (srvBlocked).
+const srvRefusals = new Map();
+const srvBlocked = (t, id) => (srvRefusals.get(t + ':' + id) || 0) >= 2;
 // Modules de la société (architecture.md, section 3) ; tous actifs avec les fichiers OneDrive.
 const mod = name => !srvOn() || !!state.srv.me?.modules?.[name];
 const MODULES = ['facturation', 'taches', 'forfaits', 'achats', 'soustraitance', 'dictee', 'supervision'];
@@ -550,16 +556,16 @@ async function srvSync() {
       const ids = new Set();
       for (const o of list) {
         ids.add(o.id);
-        if (ack[o.id] === fp(o)) continue;
+        if (ack[o.id] === fp(o) || srvBlocked(t, o.id)) continue;
         o.updatedAt ||= Date.now();
         changes.push({ t, id: o.id, updatedAt: o.updatedAt, deleted: !!o.deleted, data: o, fp: fp(o) });
       }
-      for (const id of Object.keys(ack)) if (!ids.has(id)) changes.push({ t, id, deleted: true, updatedAt: Date.now() });
+      for (const id of Object.keys(ack)) if (!ids.has(id) && !srvBlocked(t, id)) changes.push({ t, id, deleted: true, updatedAt: Date.now() });
     }
     for (const [t, x] of Object.entries(singles)) {
       const ack = S.ack[t] ||= {}, d = { id: x.id, ...x.get() };
       // Jamais envoyé avant la 1re synchro complète : un appareil neuf n'efface ni le chrono, ni le PIN, ni les réglages du serveur.
-      if (!x.write || !(x.id in ack) || ack[x.id] === fp(d)) continue;
+      if (!x.write || !(x.id in ack) || ack[x.id] === fp(d) || srvBlocked(t, x.id)) continue;
       d.updatedAt = x.at || Date.now();
       changes.push({ t, id: x.id, updatedAt: d.updatedAt, data: d, fp: fp(d) });
     }
@@ -596,11 +602,18 @@ async function srvSync() {
     res.rows.forEach(r => apply(r, false));
     const why = [];
     for (const x of res.rejected) {
-      if (x.row) { apply(x.row, true); if (x.reason !== 'ancienne') why.push(x.reason); continue; }
+      // Même objet refusé plusieurs fois (quelque chose le remodifie ici à chaque fois) : après 2 refus, il n'est plus envoyé ni signalé
+      // jusqu'au rechargement de l'app, pour ne pas tourner en boucle (message + page redessinée sans fin, vu le 13/11 avec le compte Alescom).
+      const k = x.t + ':' + x.id, n = x.reason === 'ancienne' ? 0 : (srvRefusals.set(k, (srvRefusals.get(k) || 0) + 1), srvRefusals.get(k));
+      if (n) console.warn('Refusé par le serveur', k, x.reason, n);
+      if (x.row) { apply(x.row, true); if (n === 1) why.push(`${x.reason} (${k})`); continue; }
       const list = lists[x.t];
       if (list) { const i = list.findIndex(o => o.id === x.id); if (i >= 0) list.splice(i, 1); }
       delete S.ack[x.t]?.[x.id];
-      why.push(x.reason); changed = true;
+      // Retenu : un objet créé automatiquement (tâche récurrente, fiche d'une société) n'est pas recréé puis renvoyé sans fin (srvRefused).
+      (S.refused ||= {})[x.t + ':' + x.id] = x.reason;
+      if (n <= 1) why.push(`${x.reason} (${k})`);
+      changed = true;
     }
     // Synchro complète : ce que le serveur ne renvoie plus (droits retirés, autre appareil) disparaît d'ici.
     if (srvFull) {

@@ -73,11 +73,15 @@ const Taches = (() => {
   }
   function ensureRecurring() {
     if (!isAdmin() || !mod('forfaits')) return false;        // seul un administrateur les crée (pour lui-même)
+    // Serveur : une société gérée par une autre (Alescom, gérée par One Level UP) ne les crée pas, c'est la société qui la gère qui le fait ;
+    // et seulement pour ses propres clients et ceux des sociétés qu'elle gère. Vu le 13/11 : l'administrateur d'Alescom recréait toutes les 2 s
+    // celles de 4 clients One Level UP (BDS, JMD, MC&S, Vedi), déjà créées par Fred et invisibles pour lui → refus « interdit » en boucle.
+    if (srvOn() && soc(HOME).managedBy) return false;
     const month = today().slice(0, 7);
     let ch = false;
-    for (const c of activeClients().filter(x => x.server)) {
+    for (const c of activeClients().filter(x => x.server && (!srvOn() || clientSoc(x) === HOME || managedByMe(clientSoc(x))))) {
       const id = updId(c.id, month);
-      if (task(id)) continue;
+      if (task(id) || srvRefused('tasks', id)) continue;      // refusée par le serveur : pas recréée (sinon boucle de synchro)
       if (live().some(e => e.forfait === 'update' && e.clientId === c.id && e.date.startsWith(month))) continue;
       T.tasks.push(touch({ id, kind: 'upd', recur: { every: 'month', nth: 2, weekday: 3 }, title: `Mise à jour serveur – ${c.name}`, notes: '',
         clientId: c.id, assigneeId: me().id, createdBy: me().id, createdAt: Date.now(), due: secondWednesday(month), time: '', priority: 3,
@@ -108,9 +112,12 @@ const Taches = (() => {
   // Avec le serveur : les tâches sont envoyées et reçues par srvSync (app.js) ; ici, seulement les tâches récurrentes et l'affichage.
   async function serverSync() {
     await load();
-    if (ensureRecurring()) { await save(); scheduleSync(); }
+    const ch = ensureRecurring(), had = !!msg;
+    if (ch) { await save(); scheduleSync(); }
     msg = '';
-    afterSync(true);
+    // La page Tâches n'est redessinée que s'il y a du neuf ici : les tâches reçues du serveur le sont déjà par srvSync (app.js).
+    // Avant : redessinée après CHAQUE synchro (toutes les minutes), ce qui effaçait la saisie et la position dans la page.
+    afterSync(ch || had);
   }
   function afterSync(redraw) {
     if (redraw && tab === 'taches' && !$('#dlg').open) render();
