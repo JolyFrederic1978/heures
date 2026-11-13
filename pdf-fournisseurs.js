@@ -79,7 +79,7 @@ const Fournisseurs = (() => {
   };
   // Domaines des clients ; les noms techniques du fournisseur (serveurs, OVH lui-même) ne comptent pas.
   const DOMAIN = /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}\b/gi;
-  const NOT_CLIENT = /(^|\.)(ovh|ovhcloud|kimsufi|soyoustart|ovh-hosting)\.[a-z]+$|^(ns|vps|ip|dedibox|sd)-?\d|\.ip-[\d-]+\.[a-z]+$/i;
+  const NOT_CLIENT = /(^|\.)(ovh|ovhcloud|kimsufi|soyoustart|ovh-hosting)\.[a-z]+$|^(ns|vps|ip|dedibox|sd)-?\d|\.ip-[\d-]+\.[a-z]+$|^premium\.support$/i;
   const domains = s => (String(s || '').toLowerCase().match(DOMAIN) || [])
     .map(d => d.replace(/^www\./, '')).filter(d => !NOT_CLIENT.test(d) && !/^\d+(\.\d+)+$/.test(d) && !/\.(pdf|xlsx?|docx?)$/.test(d));
   const keyOf = s => plain(s).replace(/[^\s@]+@/g, ' ').replace(DOMAIN, ' ').replace(new RegExp(DATE.source, 'g'), ' ')
