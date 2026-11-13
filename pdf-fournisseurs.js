@@ -510,19 +510,22 @@ const Fournisseurs = (() => {
   // ou 10130102 = HTML) ; esetFromText lit le texte (aussi pour un texte copié-collé).
   function cfbStreams(buf) {
     const dv = new DataView(buf), u16 = o => dv.getUint16(o, true), u32 = o => dv.getUint32(o, true);
+    // Fichier choisi par l'utilisateur mais venu de l'extérieur (e-mail) : tailles et boucles bornées, un fichier abîmé ou piégé ne fige pas le navigateur.
+    if (buf.byteLength < 1536 || buf.byteLength > 40 * 1048576) throw new Error('Fichier .msg vide ou trop gros (40 Mo au plus).');
     if (u32(0) !== 0xE011CFD0 || u32(4) !== 0xE11AB1A1) throw new Error("Ce fichier n'est pas un message Outlook (.msg).");
+    const cap = n => { if (n > buf.byteLength) throw new Error('Fichier .msg abîmé.'); return n; };
     const ss = 1 << u16(0x1E), mss = 1 << u16(0x20), cutoff = u32(0x38);
     const off = s => (s + 1) * ss;
     // Table d'allocation (FAT) : 109 premiers secteurs dans l'en-tête, puis secteurs DIFAT chaînés.
     const fatSecs = [];
     for (let k = 0; k < 109; k++) { const s = u32(0x4C + k * 4); if (s < 0xFFFFFFFA) fatSecs.push(s); }
-    for (let s = u32(0x44), n = 0; s < 0xFFFFFFFA && n < u32(0x48); n++) {
+    for (let s = u32(0x44), n = 0; s < 0xFFFFFFFA && n < Math.min(u32(0x48), 4096); n++) {
       for (let k = 0; k < ss / 4 - 1; k++) { const x = u32(off(s) + k * 4); if (x < 0xFFFFFFFA) fatSecs.push(x); }
       s = u32(off(s) + ss - 4);
     }
     const fat = []; for (const s of fatSecs) for (let k = 0; k < ss / 4; k++) fat.push(u32(off(s) + k * 4));
     const chain = (s, table) => { const out = []; while (s < 0xFFFFFFFA && out.length <= table.length) { out.push(s); s = table[s]; } return out; };
-    const readBig = (s, size) => { const out = new Uint8Array(size); let p = 0; for (const x of chain(s, fat)) { const n = Math.min(ss, size - p); if (n <= 0) break; out.set(new Uint8Array(buf, off(x), n), p); p += n; } return out; };
+    const readBig = (s, size) => { const out = new Uint8Array(cap(size)); let p = 0; for (const x of chain(s, fat)) { const n = Math.min(ss, size - p); if (n <= 0) break; out.set(new Uint8Array(buf, off(x), n), p); p += n; } return out; };
     // Répertoire.
     const dirBytes = readBig(u32(0x30), chain(u32(0x30), fat).length * ss), dd = new DataView(dirBytes.buffer);
     const entries = [];
@@ -534,7 +537,7 @@ const Fournisseurs = (() => {
     const root = entries[0];
     const mini = readBig(root.start, root.size), minifat = [];
     for (const x of chain(u32(0x3C), fat)) for (let k = 0; k < ss / 4; k++) minifat.push(u32(off(x) + k * 4));
-    const readMini = (s, size) => { const out = new Uint8Array(size); let p = 0; for (const x of chain(s, minifat)) { const n = Math.min(mss, size - p); if (n <= 0) break; out.set(mini.subarray(x * mss, x * mss + n), p); p += n; } return out; };
+    const readMini = (s, size) => { const out = new Uint8Array(cap(size)); let p = 0; for (const x of chain(s, minifat)) { const n = Math.min(mss, size - p); if (n <= 0) break; out.set(mini.subarray(x * mss, x * mss + n), p); p += n; } return out; };
     // Flux directement sous la racine (le message lui-même, pas ses pièces jointes).
     const top = {}, walk = (i, seen = new Set()) => {
       if (i >= entries.length || i === 0xFFFFFFFF || seen.has(i)) return; seen.add(i);
@@ -576,7 +579,7 @@ const Fournisseurs = (() => {
     if (!rows.length) throw new Error("Aucun client trouvé : ce n'est pas l'e-mail « Détail de vos consommations MSP ESET » de MGK ?");
     return { period: { label: plabel, from, to }, products, rows };
   }
-  const esetFromMsg = buf => esetFromText(msgText(buf));
+  const esetFromMsg = buf => { let t; try { t = msgText(buf); } catch (e) { throw new Error(e instanceof RangeError ? 'Fichier .msg abîmé ou incomplet.' : e.message); } return esetFromText(t); };
 
   return { read, readRows, fromRows, render, domains, keyOf, ublPdfs, fromUbl, esetFromMsg, esetFromText,
     readers: () => READERS.map(r => ({ id: r.v ? `${r.id}@${r.v}` : r.id, name: r.name })) };

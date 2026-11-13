@@ -1315,7 +1315,7 @@ const Achats = (() => {
         const x = d[l.id], el = $(`[data-tp="${l.id}"]`);
         $(`[data-tl="${l.id}"] .tclient`).classList.toggle('hidden', x.dest !== 'client');
         $(`[data-tl="${l.id}"] .tart`)?.classList.toggle('hidden', x.dest === 'none');
-        const miss = lacks(l), warn = miss.length ? `<span class="pill warn">${miss.join(' + ')} à choisir</span> ` : '';
+        const miss = lacks(l), warn = miss.length ? `<span class="pill warn">${esc(miss.join(' + '))} à choisir</span> ` : '';
         if (x.dest === 'client') {
           const u = l.status === 'billed' ? lineUnit(l) : draftUnit(l, x);
           sum.client += l.total; sum.sale += u != null ? round2(u * l.qty) : 0;
@@ -1387,7 +1387,7 @@ const Achats = (() => {
       ev.preventDefault(); draw();
       const bad = ls.map(l => [l, lacks(l)]).filter(([, m]) => m.length);
       if (bad.length) {
-        $('#tErr').innerHTML = `<span class="pill warn">À compléter avant de valider :</span> ${bad.map(([l, m]) => `${esc(l.label)} (${m.join(', ')})`).join(' ; ')}`;
+        $('#tErr').innerHTML = `<span class="pill warn">À compléter avant de valider :</span> ${bad.map(([l, m]) => `${esc(l.label)} (${esc(m.join(', '))})`).join(' ; ')}`;
         return $(`[data-tl="${bad[0][0].id}"]`).scrollIntoView({ block: 'center', behavior: 'smooth' });
       }
       if (poStep) {
