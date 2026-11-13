@@ -156,7 +156,14 @@ function achatPartnerOf(clientId) {
 }
 const achatPartnerMargin = id => { const p = achatPartnerOf(id); return p ? partnerOf(p).achMargin : null; };
 // Groupe de facturation d'un achat : le client lui-même ; pour un client d'un commanditaire, la facture du commanditaire (avec ses interventions).
-const achatKey = id => { const p = achatPartnerOf(id); return !p || client(id).socRef ? 'c:' + id : p === 'alescom' ? 'alescom' : 's:' + p; };
+// La fiche client du commanditaire (fiche « Alescom », socRef) va sur la MÊME facture que les clients du commanditaire (13/11 : Fred
+// ne trouvait pas ses achats « Alescom », rangés dans un 2e groupe du même nom). Même client Billit, mêmes tarifs partenaire.
+const socKey = s => s === 'alescom' ? 'alescom' : 's:' + s;
+const partnerFiche = id => {
+  const c = id && state.clients.find(x => x.id === id);
+  return c?.socRef && c.socRef !== HOME && clientSoc(c) === HOME && state.societes.some(s => s.id === c.socRef && !s.deleted) ? c.socRef : null;
+};
+const achatKey = id => { const p = achatPartnerOf(id); return !p || (client(id).socRef && !partnerFiche(id)) ? 'c:' + id : socKey(p); };
 const achFor = k => Achats.readyClients().filter(id => achatKey(id) === k).flatMap(id => Achats.readyFor(id));
 const socRates = s => partnerOf(s.id).rates;
 // Clients visibles par l'utilisateur connecté (réglés dans Administration, par société) ; un administrateur voit tout.
@@ -208,7 +215,7 @@ function mergeRemoteClients() {
 // ---------- facturation ----------
 // Un groupe de facturation = un client (commanditaire One Level UP), ou un autre commanditaire qui regroupe plusieurs clients
 // ('alescom' : clé des factures existantes ; 's:<id>' pour les suivants).
-const groupKey = e => { const c = cmdOf(e); return c === HOME ? 'c:' + e.clientId : c === 'alescom' ? 'alescom' : 's:' + c; };
+const groupKey = e => { const c = cmdOf(e); if (c !== HOME) return socKey(c); const p = partnerFiche(e.clientId); return p ? socKey(p) : 'c:' + e.clientId; };
 function groupInfo(key) {
   const rates = state.settings.rates;
   if (!key.startsWith('c:')) {
