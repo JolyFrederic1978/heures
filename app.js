@@ -1395,6 +1395,7 @@ function bindComptaCard() {
           <div><label>Société</label><select data-cp="${k}" disabled><option value="">—</option></select></div></div>
         <label>Document créé par « Envoyer vers Odoo »</label>
         <select data-cd="${k}"><option value="invoice">Facture en brouillon</option><option value="quote">Devis en brouillon (détail des interventions dans la note)</option></select>
+        <label class="check"><input type="checkbox" data-cstk="${k}"> Nouveaux articles créés par LevelDesk : « Suivre l'inventaire » coché par défaut</label>
         <div class="row" style="margin-top:6px"><button class="btn primary" data-cs="${k}">Contrôler et enregistrer</button><button class="btn" data-cx="${k}" disabled>Effacer</button></div>`
       : `<div class="grid2"><div><label>Clé API</label><input type="password" autocomplete="off" data-ck="${k}" placeholder="Saisir pour remplacer"></div>
           <div><label>Société (PartyID)</label><select data-cp="${k}" disabled><option value="">—</option></select></div></div>
@@ -1419,6 +1420,8 @@ function bindComptaCard() {
       if (mine) for (const f of ['url', 'db', 'login']) { const i = $(`[data-co="${k}.${f}"]`); if (i && !i.value) i.value = x[f] || ''; }
       const dsel = $(`[data-cd="${k}"]`);
       if (dsel) { if (mine && x.doc) dsel.value = x.doc; dsel.disabled = !x.access; }
+      const stk = $(`[data-cstk="${k}"]`);
+      if (stk) { if (mine) stk.checked = !!x.stock; stk.disabled = !x.access; }
     }
   };
   const failAll = e => ['test', 'live'].forEach(k => say(k, `<span class="pill warn">${esc(e.message)}</span>`));
@@ -1439,7 +1442,7 @@ function bindComptaCard() {
     $$('[data-cs]').forEach(b => b.onclick = ev => {
       ev.preventDefault();
       const k = b.dataset.cs, v = f => $(`[data-co="${k}.${f}"]`).value.trim();
-      const body = { url: v('url'), db: v('db'), login: v('login'), apiKey: v('apiKey'), doc: $(`[data-cd="${k}"]`).value };
+      const body = { url: v('url'), db: v('db'), login: v('login'), apiKey: v('apiKey'), doc: $(`[data-cd="${k}"]`).value, stock: $(`[data-cstk="${k}"]`).checked };
       if (!body.url || !body.db || !body.login) return say(k, '<span class="pill warn">Adresse, base et utilisateur requis.</span>');
       $(`[data-co="${k}.apiKey"]`).value = '';
       say(k, 'Contrôle par Odoo…');
@@ -1450,6 +1453,10 @@ function bindComptaCard() {
     $$('[data-cd]').forEach(sel => sel.onchange = () => {
       const k = sel.dataset.cd, x = conf?.modes?.[k];
       if (x?.type === 'odoo' && x.key) save(k, { doc: sel.value }, sel.value === 'quote' ? 'Odoo : devis en brouillon' : 'Odoo : facture en brouillon');
+    });
+    $$('[data-cstk]').forEach(cb => cb.onchange = () => {
+      const k = cb.dataset.cstk, x = conf?.modes?.[k];
+      if (x?.type === 'odoo' && x.key) save(k, { stock: cb.checked }, cb.checked ? 'Nouveaux articles : inventaire suivi' : 'Nouveaux articles : inventaire non suivi');
     });
     $$('[data-cx]').forEach(b => b.onclick = ev => {
       ev.preventDefault();

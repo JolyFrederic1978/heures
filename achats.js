@@ -393,6 +393,12 @@ const Achats = (() => {
       if (!rec && from && dayOf(o.date) && dayOf(o.date) < isoDate(new Date(new Date(from + 'T00:00').getTime() - 62 * 864e5))) {
         A.bdocs.push(touch({ id, orderId: o.id, mode, supplier: sup, number: o.number || '', date: dayOf(o.date), status: 'old' })); ch = true; continue;
       }
+      // Montant négatif dans le logiciel = note de crédit ou écriture de correction (vu chez Alescom : même PDF que la facture d'origine) : jamais importée.
+      if (o.total != null && o.total < 0) {
+        if (!rec) A.bdocs.push(rec = { id, orderId: o.id, mode });
+        Object.assign(touch(rec), { supplier: sup, number: o.number || '', date: dayOf(o.date), total: o.total, status: 'skip', msg: 'Note de crédit ou correction (montant négatif) : non importée.' });
+        ch = true; continue;
+      }
       if (!rec) A.bdocs.push(rec = { id, orderId: o.id, mode });
       Object.assign(rec, { supplier: sup, number: o.number || '', date: dayOf(o.date), total: o.total ?? null });
       let res;
@@ -418,7 +424,7 @@ const Achats = (() => {
       }
       if (!ok(r) && xml && pdf) { const x = Fournisseurs.fromUbl(xml, sup); if (ok(x)) r = x; }
     }
-    if (!ok(r)) return { status: 'error', msg: (r?.error || firstErr?.error || 'Facture non reconnue.') + ` (facture reçue dans ${Compta.label()})`,
+    if (!ok(r)) return { status: 'error', msg: (r?.error || firstErr?.error || (o.pdfId ? 'Facture non reconnue.' : 'Pas de PDF joint à cette facture.')) + ` (facture reçue dans ${Compta.label()})`,
       text: (firstErr?.rows || []).map(x => x.cells.join(' | ')).join('\n').slice(0, 30000) };
     const i = r.invoice;
     if (!i.lines.length) return { status: 'error', msg: `Facture ${sup} lue, mais aucun article trouvé.` };
@@ -911,6 +917,7 @@ const Achats = (() => {
         <div><label>Prix de vente HTVA</label><input type="number" step="0.01" id="pPrice" value="${esc(pre.price)}"></div></div>
       <div class="grid2"><div><label>TVA %</label><input type="number" step="1" id="pVat" value="${esc(pre.vat ?? 21)}"></div>
         <div><label>Marge</label><p class="small muted" id="pMargin" style="margin:10px 0 0"></p></div></div>
+      ${Compta.stockOption() ? `<label class="check"><input type="checkbox" id="pStock" ${Compta.stockDefault() ? 'checked' : ''}> Suivre l'inventaire (article stocké dans ${esc(soft)})</label>` : ''}
       <div class="actions"><button class="btn" id="pBack">Retour</button><button class="btn primary" id="pSave">Créer dans ${esc(soft)}</button></div>`;
     const showMargin = () => {
       const buy = +$('#pBuy').value, sale = +$('#pPrice').value;
@@ -934,7 +941,7 @@ const Achats = (() => {
     $('#pSave').onclick = async ev => {
       ev.preventDefault();
       const item = { ref: $('#pRef').value.trim(), name: $('#pDesc').value.trim(), price: +$('#pPrice').value, vat: +$('#pVat').value,
-        ...($('#pBuy').value !== '' ? { buy: +$('#pBuy').value } : {}), catId: $('#pGroup').value };
+        ...($('#pBuy').value !== '' ? { buy: +$('#pBuy').value } : {}), catId: $('#pGroup').value, ...($('#pStock')?.checked ? { storable: true } : {}) };
       if (!$('#pGroup').value && categories().length) return alert(`Choisis la catégorie ${soft} de l'article.`);
       if (!item.ref || !item.name) return alert('Référence et description requises.');
       if (!(item.price >= 0) || $('#pPrice').value === '') return alert('Prix requis.');

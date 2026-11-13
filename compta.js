@@ -102,6 +102,9 @@ const Compta = (() => {
     webName: () => NAMES[type()] || '',
     // Document créé par l'envoi : facture en brouillon, ou devis en brouillon (Odoo, réglage du connecteur « doc » = quote).
     quote: () => srv() && conf?.modes?.[mode()]?.doc === 'quote',
+    // Odoo : « Suivre l'inventaire » proposé à la création d'un article (case cochée par défaut selon le connecteur).
+    stockOption: () => srv() && type() === 'odoo',
+    stockDefault: () => srv() && !!conf?.modes?.[mode()]?.stock,
     // ---- configuration (serveur) ----
     config: () => conf,
     async loadConfig(force) {

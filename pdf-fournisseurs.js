@@ -97,8 +97,9 @@ const Fournisseurs = (() => {
   // La période peut aussi venir sur la ligne qui suit les montants. Le nom peut commencer par « jmd.be - .be ».
   // v2 (13/11, factures d'Alescom) : tableaux « Installation » et « Offres » lus aussi. Une ligne « Offres » est une promotion (montant négatif) :
   // elle est déduite de l'article de la même période (même domaine d'abord) ; sans article correspondant, elle reste une ligne négative.
+  // v3 (13/11) : une ligne de prix qui commence par « Sans engagement | domaine | 1 | 7,89 € | 7,89 € » était ignorée (FR75189217 : 7,97 € manquants).
   const ovh = {
-    id: 'ovh', name: 'OVH', v: 2,
+    id: 'ovh', name: 'OVH', v: 3,
     detect: rows => rows.some(r => /^OVH - .*ROUBAIX/i.test(r.text)) || rows.some(r => /ovh/i.test(r.text) && /Rubrique/i.test(r.text)),
     parse(rows, fileName) {
       const number = find(rows, /Référence de la facture\s*:?\s*([A-Z]{2}\d{5,})/i)?.[1]
@@ -108,16 +109,16 @@ const Fournisseurs = (() => {
       const FOOT = /Page \d+\/\d+|^OVH - |^SAS au capital|^SIREN|^FR\d+$/i;
       const PERIOD_ONLY = /^\(?\s*\d{1,2}\/\d{1,2}\/\d{4}\s*-\s*\d{1,2}\/\d{1,2}\/\d{4}\s*\)?$/;
       const lines = [];
-      let inTable = false, section = '', pending = [];
+      let inTable = false, section = '', pending = [], nextPer = {};
       for (const r of rows) {
         const t = r.text;
         const sec = /^Rubrique\s+(.+)$/i.exec(t);
-        if (sec) { section = sec[1]; inTable = false; pending = []; continue; }
+        if (sec) { section = sec[1]; inTable = false; pending = []; nextPer = {}; continue; }
         if (/^(Abonnement|Installation|Offres)\b.*Prix HT/i.test(t)) { inTable = true; pending = []; continue; }
         if (!inTable) continue;
         if (/^SOUS TOTAL/i.test(t) || FOOT.test(t)) { inTable = false; pending = []; continue; }
-        if (/^(Prix|unitaire)$/i.test(t) || /engagement/i.test(t)) continue;
-        const cells = [...r.cells], amounts = [];
+        if (/^(Prix|unitaire)$/i.test(t) || /^Sans engagement$/i.test(t.trim())) continue;
+        const cells = r.cells.filter(c => !/^Sans engagement$/i.test(c.trim())), amounts = [];
         while (cells.length && isAmount(cells[cells.length - 1])) amounts.unshift(num(cells.pop()));
         if (amounts.length >= 2) {
           const qty = cells.length && /^\d+(?:[.,]\d+)?$/.test(cells[cells.length - 1]) ? parseFloat(cells.pop().replace(',', '.')) : 1;
@@ -126,14 +127,16 @@ const Fournisseurs = (() => {
           const full = [...pending, ...extra].join(' ').replace(/\s+/g, ' ').trim() || ref;
           // « jmd.be - .be demande de renouvellement - 12 mois » → « demande de renouvellement - 12 mois »
           const label = full.replace(/^[a-z0-9.-]+\.[a-z]{2,}\s*-\s*/i, '').replace(/^\.[a-z]{2,}\s+/i, '').trim() || full;
+          const own = period(t);
           lines.push({ label, detail: `${section} · ${full}`, key: keyOf(label),
             domain: domains(ref)[0] || domains(full)[0] || '', ref,
-            qty, unit: amounts[amounts.length - 2], total: amounts[amounts.length - 1], ...period(t) });
-          pending = [];
+            qty, unit: amounts[amounts.length - 2], total: amounts[amounts.length - 1], ...(own.from ? own : nextPer) });
+          pending = []; nextPer = {};
         } else if (PERIOD_ONLY.test(t)) {
+          // Période seule : celle de la ligne précédente si elle n'en a pas, sinon celle de la ligne suivante (« (période) » puis « Sans engagement | domaine | 1 | prix »).
           const last = lines[lines.length - 1];
-          if (last && !last.from) Object.assign(last, period(t));
-        } else pending.push(t);
+          if (last && !last.from) Object.assign(last, period(t)); else nextPer = period(t);
+        } else if (!/engagement/i.test(t)) pending.push(t);
       }
       // Promotions (lignes négatives du tableau « Offres ») : déduites de l'article concerné.
       const cents = n => Math.round(n * 100);
@@ -151,6 +154,34 @@ const Fournisseurs = (() => {
     }
   };
 
+  // OVH Télécom (VoIP, consommation du mois ; vu chez Alescom : FR74720208, FR75357524) :
+  //   Facture : | FR75357524 … Date : | 01/02/2026
+  //   Facture n°FR75357524 du 1 février 2026
+  //   Télécom | 5,36 €          ← famille (total des services qui suivent)
+  //   VOIP | 5,36 €             ← service
+  //   Total de la facture HT | 5,36 €
+  // Pas de domaine ni de ligne téléphonique lisible : client à choisir. Même fournisseur « OVH » que les autres factures OVH.
+  const ovhtel = {
+    id: 'ovhtel', name: 'OVH', v: 1,
+    detect: rows => rows.some(r => /ovhtelecom\.fr/i.test(r.text)) && rows.some(r => /^Facture n°\s*[A-Z]{2}\d{5,}/i.test(r.text)),
+    parse(rows) {
+      const number = find(rows, /^Facture\s*:?\s*\|?\s*([A-Z]{2}\d{5,})/i)?.[1] || find(rows, /Facture n°\s*([A-Z]{2}\d{5,})/i)?.[1] || '';
+      const date = isoDate(find(rows, /^Date\s*:?\s*\|?\s*(\d{1,2}\/\d{1,2}\/\d{4})/i)?.[1]) || isoDate(find(rows, /Facture n°\s*[A-Z]{2}\d+\s+du\s+(.+)$/i)?.[1]);
+      const totalM = find(rows, /Total de la facture HT\s*\|?\s*(-?[\d .  ]+[.,]\d{2})/i);
+      const i0 = rows.findIndex(r => /^Facture n°/i.test(r.text)), i1 = rows.findIndex((r, i) => i > i0 && /^Total de la facture HT/i.test(r.text));
+      const sums = (i0 >= 0 && i1 > i0 ? rows.slice(i0 + 1, i1) : []).filter(r => r.cells.length === 2 && isAmount(r.cells[1])).map(r => ({ label: r.cells[0].trim(), total: num(r.cells[1]) }));
+      // Une famille (« Télécom ») suivie de ses services : la famille n'est pas une ligne.
+      const out = sums.filter((s, i) => {
+        let rest = 0, j = i + 1;
+        while (j < sums.length && Math.round(rest * 100) < Math.round(s.total * 100)) rest += sums[j++].total;
+        return !(j > i + 1 && Math.round(rest * 100) === Math.round(s.total * 100) && /^t[ée]l[ée]com$/i.test(s.label));
+      });
+      const lines = out.map(s => ({ label: `OVH Télécom – ${s.label}`, detail: 'Télécom · consommation', key: keyOf(`telecom ${s.label}`),
+        domain: '', ref: '', qty: 1, unit: s.total, total: s.total, from: null, to: null }));
+      return { supplier: 'OVH', number, date, totalExcl: totalM ? num(totalM[1]) : null, lines };
+    }
+  };
+
   // MGK Technologies (licences ESET, vérifié sur 3 factures 2025-2026) :
   //   No. | Référence Description | Informations complémentaires | Remise | Qté | Prix unitaire | Montant   ← en-tête
   //   1 | 106 | ESET NOD32 Antivirus | Hugo Bauwens | 1 | 33.05 | 33.05      ← « Informations » = contact chez le client
@@ -162,8 +193,9 @@ const Fournisseurs = (() => {
   //   1 | 2018-MSP ESET PROTECT Complete MSP - | 21,390 | 0.0658 | 1,407.46      ← quantité en postes × jours, nombres à l'américaine
   //   tier: 500-999                                                                ← suite du nom
   // Pas de client sur ces factures (consommation de tous les clients) : à répartir à la main ou à passer en usage interne.
+  // v3 (13/11) : factures MSP de mai à août 2026 en nombres « à la française » : « 19 222 | 0,0658 | 1 264,81 ». Le format est déduit du montant de chaque ligne.
   const mgk = {
-    id: 'mgk', name: 'MGK', v: 2,
+    id: 'mgk', name: 'MGK', v: 3,
     detect: rows => rows.some(r => /MGK Technologies/i.test(r.text)),
     parse(rows, fileName) {
       const number = find(rows, /No\. de document\s*:?\s*([A-Z]{2,}\d{4}-\d+)/i)?.[1] || /(FAC\d{4}-\d+)/i.exec(fileName || '')?.[1] || '';
@@ -171,9 +203,12 @@ const Fournisseurs = (() => {
       const totalM = find(rows, /\bTotal\s+(-?[\d .  ,]+[.,]\d{2})\s*€?\s*$/i);
       const items = [], head = [];
       let inTable = false;
-      // Nombres MGK à l'américaine : « 1,407.46 », « 21,390 », « 0.0658 ».
-      const US = /^-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$/, usNum = s => parseFloat(String(s).replace(/[€\s,]/g, ''));
-      const isUs = s => US.test(String(s).replace(/\s*€$/, '').trim());
+      // Nombres MGK à l'américaine (« 1,407.46 », « 21,390 », « 0.0658 ») ou à la française (« 1 264,81 », « 19 222 », « 0,0658 »).
+      const clean = s => String(s).replace(/\s*€$/, '').trim();
+      const US = /^-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$/, EU = /^-?(?:\d{1,3}(?:[\s.  ]\d{3})+|\d+)(?:,\d+)?$/;
+      const fmt = s => /^-?[\d,]*\.\d{2}$/.test(clean(s)) && US.test(clean(s)) ? 'us' : /^-?[\d\s.  ]*,\d{2}$/.test(clean(s)) && EU.test(clean(s)) ? 'eu' : '';
+      const isNum = (s, f) => (f === 'eu' ? EU : US).test(clean(s));
+      const toNum = (s, f) => parseFloat(f === 'eu' ? clean(s).replace(/[\s.  ]/g, '').replace(',', '.') : clean(s).replace(/,/g, ''));
       for (const r of rows) {
         const t = r.text;
         if (/^No\.\s.*Montant/i.test(t)) { inTable = true; continue; }
@@ -181,10 +216,10 @@ const Fournisseurs = (() => {
         if (/^Date du document/i.test(t)) { inTable = false; continue; }
         if (/^(produit|spécifique)\b/i.test(t) || /^produit\s*\|\s*spécifique$/i.test(t)) continue;
         const cells = [...r.cells];
-        const n = cells.length, money = s => /\.\d{2}$/.test(String(s).replace(/\s*€$/, '').trim()) && isUs(s);
-        if (/^\d+$/.test(cells[0] || '') && n >= 4 && money(cells[n - 1]) && isUs(cells[n - 2])) {
-          const total = usNum(cells.pop()), unit = usNum(cells.pop());
-          const qty = cells.length > 1 && isUs(cells[cells.length - 1]) ? usNum(cells.pop()) : 1;
+        const n = cells.length, f = n ? fmt(cells[n - 1]) : '';
+        if (/^\d+$/.test(cells[0] || '') && n >= 4 && f && isNum(cells[n - 2], f)) {
+          const total = toNum(cells.pop(), f), unit = toNum(cells.pop(), f);
+          const qty = cells.length > 1 && isNum(cells[cells.length - 1], f) ? toNum(cells.pop(), f) : 1;
           if (cells.length > 3 && /^-?\d+(?:[.,]\d+)?\s*%?$/.test(cells[cells.length - 1])) cells.pop();   // remise
           cells.shift();                                                                                   // n° de ligne
           let ref = cells.shift() || '';
@@ -393,7 +428,7 @@ const Fournisseurs = (() => {
     }
   };
 
-  const READERS = [ovh, mgk, lisam, alescom, dsd];
+  const READERS = [ovhtel, ovh, mgk, lisam, alescom, dsd];
 
   // --- e-facture UBL (Peppol, reçue dans Billit) ---
   const ublDoc = xml => new DOMParser().parseFromString(xml, 'application/xml');
