@@ -482,13 +482,23 @@ const Taches = (() => {
         une fois enregistré, la tâche est terminée.</p>` : ''}
       ${t?.mail ? `<p class="small" style="margin-top:0"><span class="pill">📧 Outlook</span> ${esc([t.mail.from, t.mail.subject].filter(Boolean).join(' · '))}
         ${mailLink(t.mail.link) ? ` · <a href="${esc(mailLink(t.mail.link))}" target="_blank" rel="noopener noreferrer">Ouvrir l'e-mail</a>` : ''}</p>` : ''}
-      ${t ? `<div class="tkacts">
-        ${isOpen(t) && edit ? '<button class="btn tkok" id="kDone" type="button">✓ Terminer</button>' : ''}
-        ${!isOpen(t) && edit ? '<button class="btn" id="kReopen" type="button">↺ Rouvrir</button>' : ''}
-        ${canTake(t) ? '<button class="btn" id="kTake" type="button">🙋 Me l\'attribuer</button>' : ''}
-        ${isOpen(t) && edit && t.kind !== 'upd' && !isPrivate(t) ? '<button class="btn" id="kTimer" type="button">▶ Chrono</button><button class="btn" id="kEntry" type="button">+ Intervention</button>' : ''}
-        ${isOpen(t) && edit ? `<button class="btn" id="kOut" type="button" title="Rendez-vous de 1 h à l'heure de la tâche, sinon journée entière">📅 ${t.outlook?.[me().id] ? 'Mettre à jour Outlook' : 'Agenda Outlook'}</button>` : ''}
-      </div>` : ''}
+      ${t ? (() => {
+        // Deux actions en vue (la plus utile d'abord), les autres sous « ⋯ » (maquette A, 14/11).
+        const acts = [
+          isOpen(t) && edit && '<button class="btn tkok" id="kDone" type="button">✓ Terminer</button>',
+          !isOpen(t) && edit && '<button class="btn" id="kReopen" type="button">↺ Rouvrir</button>',
+          canTake(t) && '<button class="btn" id="kTake" type="button">🙋 Me l\'attribuer</button>',
+          isOpen(t) && edit && t.kind !== 'upd' && !isPrivate(t) && '<button class="btn" id="kTimer" type="button">▶ Chrono</button>',
+          isOpen(t) && edit && t.kind !== 'upd' && !isPrivate(t) && '<button class="btn" id="kEntry" type="button">+ Intervention</button>',
+          isOpen(t) && edit && `<button class="btn" id="kOut" type="button" title="Rendez-vous de 1 h à l'heure de la tâche, sinon journée entière">📅 ${t.outlook?.[me().id] ? 'Mettre à jour Outlook' : 'Agenda Outlook'}</button>`
+        ].filter(Boolean);
+        // Supprimer : toujours sous « ⋯ » (jamais à portée d'un clic par erreur).
+        const main = acts.slice(0, 2), more = [...acts.slice(2), edit && '<button class="btn danger" id="kDel" type="button">🗑 Supprimer</button>'].filter(Boolean);
+        if (!main.length && !more.length) return '';
+        return `<div class="tkacts">${main.join('')}
+          ${more.length ? `<button class="btn tkmore" id="kMore" type="button" aria-expanded="false" title="Autres actions" aria-label="Autres actions">⋯</button>` : ''}</div>
+          ${more.length ? `<div class="tkacts tkmorebox" id="kMoreBox" hidden>${more.join('')}</div>` : ''}`;
+      })() : ''}
       <label>Titre</label><input id="kTitle" value="${esc(d.title)}" ${ro}>
       ${edit ? lblMic('Description', 'kNotes') : '<label>Description</label>'}<textarea id="kNotes" ${ro}>${esc(d.notes || '')}</textarea>
       <div class="grid2">
@@ -512,7 +522,6 @@ const Taches = (() => {
       ${entries.length ? `<label>Interventions liées</label><ul class="list compact">${entries.map(e => `<li class="tap" data-tke="${e.id}"><span class="grow">${frDate(e.date)} · ${esc(client(e.clientId).name)} · ${esc(user(techOf(e)).name)}</span>
           <span class="dur">${fmtDur(e.minutes)}</span></li>`).join('')}</ul>` : ''}
       <div class="actions" style="flex-wrap:wrap">
-        ${t && edit ? '<button class="btn danger" id="kDel" type="button" style="margin-right:auto">Supprimer</button>' : ''}
         ${!t && edit ? `<button class="btn" id="kOut" type="button" title="Rendez-vous de 1 h à l'heure de la tâche, sinon journée entière" style="margin-right:auto">📅 Agenda Outlook</button>` : ''}
         <button class="btn" value="cancel">${edit ? 'Annuler' : 'Fermer'}</button>
         ${edit ? '<button class="btn primary" id="kSave">Enregistrer</button>' : ''}
@@ -582,6 +591,10 @@ const Taches = (() => {
       $('#kComAdd').onclick = addCom;
       $('#kCom').onkeydown = ev => { if (ev.key === 'Enter') { ev.preventDefault(); addCom(); } };
     }
+    if ($('#kMore')) $('#kMore').onclick = () => {
+      const box = $('#kMoreBox'), open = box.hidden;
+      box.hidden = !open; $('#kMore').setAttribute('aria-expanded', open); $('#kMore').classList.toggle('active', open);
+    };
     if ($('#kTake')) $('#kTake').onclick = async () => { assign(t, me().id); touch(t); await save(); scheduleSync(); toast('Tâche attribuée'); editTask(t); };
     if ($('#kDel')) $('#kDel').onclick = async () => {
       if (!confirm(`Supprimer la tâche « ${t.title} » ?${t.entryIds?.length ? '\n(les interventions liées sont conservées)' : ''}`)) return;

@@ -91,6 +91,11 @@ select.tkpost:hover, select.tkpost:focus { border-color: var(--line); background
 .tkacts { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
 .tkacts .btn { padding: 6px 11px; font-size: 13px; }
 .tkacts .btn.tkok { background: var(--ok); border-color: var(--ok); color: #fff; font-weight: 600; }
+.tkacts .btn.tkmore { min-width: 40px; font-weight: 700; letter-spacing: 1px; }
+.tkacts .btn.tkmore.active { background: var(--accent-soft); border-color: var(--accent); }
+.tkmorebox { margin-top: -2px; padding: 8px; border-radius: 12px; background: var(--accent-soft); }
+.tkmorebox[hidden] { display: none; }
+.tkmorebox .btn.danger { margin-left: auto; }
 .tk.p1 .tkdone { border-color: #d1453b; } .tk.p2 .tkdone { border-color: #eb8909; } .tk.p3 .tkdone { border-color: #246fe0; }
 .tk.done .tkdone { background: var(--ok, #2e7d4f); border-color: var(--ok, #2e7d4f); }
 .tk.done strong { text-decoration: line-through; color: var(--muted); }
