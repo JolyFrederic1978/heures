@@ -1274,7 +1274,8 @@ const Achats = (() => {
         </div></li>`; }).join('')}</ul>
       <div class="card" style="margin:10px 0 0;padding:10px" id="tTot"></div>
       <p class="small" id="tErr"></p>
-      <div class="actions">${attrib ? '' : '<button class="btn" id="tKeep" style="margin-right:auto">Enregistrer sans valider</button>'}
+      <div class="actions">${attrib ? '' : `<button class="btn" id="tKeep" style="margin-right:auto">Enregistrer sans valider</button>
+        <button class="btn" id="tManual" title="Facture déjà traitée en dehors de LevelDesk : rien n'est créé ni refacturé">✋ Traitée manuellement</button>`}
         <button class="btn" value="cancel">Fermer</button><button class="btn primary" id="tOk">${poStep ? '✓ Valider (bon de commande + attribution)'
           : attrib ? 'Enregistrer l\'attribution' : '✓ Valider la facture'}</button></div>`;
     setLarge(true);
@@ -1383,6 +1384,16 @@ const Achats = (() => {
       }
     };
     if ($('#tKeep')) $('#tKeep').onclick = async ev => { ev.preventDefault(); apply(); $('#dlg').close(); await changed(); toast('Choix enregistrés (facture pas encore validée)'); };
+    // « Traitée manuellement » (demande de Fred, 14/11) : facture déjà traitée en dehors de LevelDesk. Aucune ligne n'est traitée
+    // (ni bon de commande, ni stock, ni refacturation) ; la facture sort de « Factures à traiter ». « Rouvrir » reste possible.
+    if ($('#tManual')) $('#tManual').onclick = async ev => {
+      ev.preventDefault();
+      if (!confirm(`${i.supplier} ${i.number} : traitée manuellement ?\n\nAucun article ne sera commandé, mis en stock ni refacturé par LevelDesk. La facture sort de « Factures à traiter ».`)) return;
+      for (const l of editable) Object.assign(touch(l), { status: 'none', saleUnit: null });
+      Object.assign(touch(i), { status: 'done', manual: true, validatedAt: Date.now(), validatedBy: me().id, seen: true });
+      await changed(); toast('Facture notée « traitée manuellement »');
+      invoiceRecap(i);
+    };
     $('#tOk').onclick = async ev => {
       ev.preventDefault(); draw();
       const bad = ls.map(l => [l, lacks(l)]).filter(([, m]) => m.length);
@@ -1506,12 +1517,12 @@ const Achats = (() => {
     const f = $('#dlgForm');
     f.innerHTML = `<h2>Traitement : ${esc(i.supplier)} ${esc(i.number)}</h2>
       <p class="small muted" style="margin-top:0">Facture du ${frDate(i.date)} · ${i.totalExcl != null ? eur(i.totalExcl) + ' HTVA' : ''}
-        ${i.validatedAt ? ` · validée le ${frDate(isoDate(new Date(i.validatedAt)))}${i.validatedBy ? ' par ' + esc(user(i.validatedBy).name) : ''}` : ''}
+        ${i.validatedAt ? ` · ${i.manual ? '<strong>traitée manuellement</strong>' : 'validée'} le ${frDate(isoDate(new Date(i.validatedAt)))}${i.validatedBy ? ' par ' + esc(user(i.validatedBy).name) : ''}` : ''}
         ${i.odoo ? ` · dans ${esc(Compta.label())} : ${i.odoo.po ? `bon de commande ${esc(i.odoo.poName || '')} (créé en brouillon)` : `${esc(i.odoo.number || 'facture validée')}, réception ${esc(i.odoo.pickingName || '')}`}` : ''}</p>
       <ul class="list">${ls.map(l => `<li><div class="grow" style="flex:1;min-width:0"><strong>${esc(l.label)}</strong>
         <div class="small muted">${[whereOf(l), `${l.qty} × ${eur(l.unit)} = ${eur(l.total)}`].filter(Boolean).map(esc).join(' · ')}</div>
         <div class="small">${what(l)}</div></div></li>`).join('')}</ul>
-      <p class="small">Refacturé (achat) : <strong>${eur(round2(tot('ready') + tot('billed')))}</strong> · Stock : <strong>${eur(tot('stock'))}</strong> · Interne : <strong>${eur(tot('ignored'))}</strong></p>
+      <p class="small">Refacturé (achat) : <strong>${eur(round2(tot('ready') + tot('billed')))}</strong> · Stock : <strong>${eur(tot('stock'))}</strong> · Interne : <strong>${eur(tot('ignored'))}</strong>${tot('none') ? ` · Non traité : <strong>${eur(tot('none'))}</strong>` : ''}</p>
       <div class="actions">${i.file ? '<button class="btn" id="rPdf" style="margin-right:auto">📄 PDF</button>' : ''}
         ${!ls.some(l => l.status === 'billed') && !i.odoo ? '<button class="btn" id="rOpen">↺ Rouvrir</button>' : ''}
         <button class="btn primary" id="rOk">Fermer</button></div>`;
@@ -1521,7 +1532,7 @@ const Achats = (() => {
     if ($('#rPdf')) $('#rPdf').onclick = () => showPdf(i);
     if ($('#rOpen')) $('#rOpen').onclick = async () => {
       if (!confirm(`Rouvrir ${i.supplier} ${i.number} ?\nSes articles ne seront plus proposés dans Facturer jusqu'à une nouvelle validation.`)) return;
-      Object.assign(touch(i), { status: 'todo' }); await save(); scheduleSync(); treatInvoice(i);
+      Object.assign(touch(i), { status: 'todo', manual: false }); await save(); scheduleSync(); treatInvoice(i);
     };
     openDlg();
   }

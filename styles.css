@@ -368,4 +368,11 @@ pre.recap { white-space: pre-wrap; background: var(--bg); border: 1px solid var(
 .supv-box { margin: 6px 0 2px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
 .supv-imp { display: grid; grid-template-columns: 1fr minmax(160px, 240px); gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
 @media (max-width: 560px) { .supv-imp { grid-template-columns: 1fr; } }
+/* Compteurs de l'onglet Serveurs : cliquables (filtre), allumé = filtre actif */
+button.kpi.supv-kpi { text-align: left; font: inherit; color: inherit; cursor: pointer; width: 100%; }
+button.kpi.supv-kpi:hover:not(:disabled) { border-color: var(--accent); }
+button.kpi.supv-kpi.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft, rgba(31,95,139,.2)); }
+button.kpi.supv-kpi:disabled { cursor: default; opacity: .7; }
+.supv-nck { padding: 8px 0; border-top: 1px solid var(--line); }
+.supv-nck .row { gap: 4px 12px; flex-wrap: wrap; margin: 4px 0; }
 dialog table.tot.ro td { overflow-wrap: anywhere; }
