@@ -98,6 +98,9 @@ select.tkpost:hover, select.tkpost:focus { border-color: var(--line); background
 .tkmorebox .btn.danger { margin-left: auto; }
 .tk.p1 .tkdone { border-color: #d1453b; } .tk.p2 .tkdone { border-color: #eb8909; } .tk.p3 .tkdone { border-color: #246fe0; }
 .tk.done .tkdone { background: var(--ok, #2e7d4f); border-color: var(--ok, #2e7d4f); }
+/* Plusieurs techniciens : ma part est faite, pas encore celle des autres (rond vert clair). */
+.tk .tkdone.part { background: color-mix(in srgb, var(--ok) 25%, transparent); border-color: var(--ok); color: var(--ok); }
+.tkwho { gap: 6px; }
 .tk.done strong { text-decoration: line-through; color: var(--muted); }
 /* Boutons de priorité de la fiche tâche (mêmes couleurs que le rond de la liste). */
 .prio button.btn.chip.pr1.active { background: #d1453b; border-color: #d1453b; color: #fff; }
