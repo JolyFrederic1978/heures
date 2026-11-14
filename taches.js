@@ -7,7 +7,11 @@
 // Utilise les outils de app.js ($, esc, uid, touch, state, client, me, canSee, openEntry…) : chargé avant lui, appelé après le démarrage.
 const Taches = (() => {
   let T = null, busy = false, msg = '';
-  let filter = 'open', fClient = '', fTech = '';          // filtre par défaut : « Toutes » (demande de Fred, 30/10)
+  // Préférences d'affichage de cet appareil (filtre choisi, groupes repliés) : localStorage, sans importance si perdu.
+  const UI_KEY = 'heures.tkui';
+  const ui = (() => { try { return JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch { return {}; } })();
+  const saveUi = () => { try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch { /* stockage indisponible */ } };
+  let filter = ui.filter || 'open', fClient = '', fTech = '', q = '';   // filtre par défaut : « Toutes » (demande de Fred, 30/10)
 
   // --- cache local (base IndexedDB à part) ---
   function idb(mode, fn) {
@@ -52,6 +56,11 @@ const Taches = (() => {
   const overdue = t => isOpen(t) && t.due && t.due < today();
   const dueToday = t => isOpen(t) && t.due === today();
   const sortKey = t => `${t.due || '9999-99-99'} ${t.time || '99:99'} ${t.priority || 4}`;
+  // Planifiée : créée automatiquement chaque mois (mises à jour serveur) ; rangée à part dans la liste.
+  const isPlanned = t => t.kind === 'upd' || !!t.recur;
+  // Importée depuis Outlook (plus tard : assistant de boîte mail, t.source = 'outlook') ; rangée à part aussi.
+  const isOutlook = t => t.source === 'outlook';
+  const lateDays = t => Math.round((new Date(today() + 'T00:00') - new Date(t.due + 'T00:00')) / 864e5);
   const PRIO = { 1: 'P1 urgent', 2: 'P2 haute', 3: 'P3 moyenne', 4: 'P4 normale' };
 
   // Assignation : le nouveau technicien est prévenu dans son bandeau (newFor, effacé quand il ouvre la tâche).
@@ -109,10 +118,90 @@ const Taches = (() => {
     T.tasks = [...x.values()];
     return before !== JSON.stringify(T.tasks);
   }
+  // --- tâches de l'assistant de boîte mail (tâche planifiée de claude.ai, voir Claude/mailbox_assistant/PLAYBOOK.md, section 3) ---
+  // L'assistant ne peut pas appeler le serveur LevelDesk (pas de jeton Microsoft) : il écrit ses tâches dans le OneDrive de Fred,
+  // <dossier>/App/taches-outlook.json = { version: 1, items: [{ id, title, notes, client, from, subject, webLink, priority, due, time, createdAt,
+  //   comments: [{ id, at, text, priority }] }] }. Ce fichier appartient à l'assistant : LevelDesk le lit seulement.
+  // LevelDesk crée une tâche ol_<id> par élément (source 'outlook', assignée à la personne connectée) et ajoute les commentaires nouveaux.
+  // <dossier>/App/taches-outlook-etat.json (écrit par LevelDesk, lu par l'assistant) = { version: 1, tasks: { ol_<id>: { status, title } } } :
+  // dit à l'assistant ce qui est ouvert / terminé / supprimé, et aux autres appareils ce qui est déjà importé (une tâche supprimée n'est pas recréée).
+  // Seulement pour un administrateur dont le compte a un OneDrive ; au plus toutes les 5 minutes.
+  const olPath = () => `${state.onedrive.folder}/App/taches-outlook.json`;
+  const olStatePath = () => `${state.onedrive.folder}/App/taches-outlook-etat.json`;
+  const OL_EVERY = 5 * 60e3;
+  let olAt = 0, olBusy = false;
+  const olStr = (v, n) => String(v ?? '').replace(/\s+\n/g, '\n').trim().slice(0, n);
+  const olId = v => { const s = String(v ?? '').replace(/[^\w-]/g, '').slice(0, 60); return s ? 'ol_' + s : ''; };
+  const olTime = v => { const n = Date.parse(v); return n > 0 ? n : Date.now(); };
+  const mailLink = v => { try { const u = new URL(v); return u.protocol === 'https:' && /(^|\.)(office365\.com|office\.com|live\.com|cloud\.microsoft)$/.test(u.hostname) ? u.href : ''; } catch { return ''; } };
+  // Client : nom exact (ou nom Billit), sinon domaine de l'expéditeur dans la fiche d'un client. Sans client : tâche privée.
+  function olClient(it) {
+    const cs = activeClients().filter(canSee), n = fold(olStr(it.client, 100)), dom = fold(olStr(it.from, 200)).match(/@([\w.-]+\.[a-z]{2,})/)?.[1];
+    const c = (n && cs.find(x => fold(x.name) === n || fold(x.billitName) === n))
+      || (dom && cs.find(x => (x.domains || []).some(d => dom === fold(d) || dom.endsWith('.' + fold(d)))));
+    return c ? c.id : null;
+  }
+  async function importOutlook() {
+    if (olBusy || !isAdmin() || !navigator.onLine || !OneDrive.signedIn() || Date.now() - olAt < OL_EVERY) return false;
+    olBusy = true; olAt = Date.now();
+    let ch = false, created = 0;
+    try {
+      if (!(await OneDrive.hasDrive())) return false;
+      const f = await OneDrive.get(olPath());
+      if (!f) return false;
+      let items;
+      try { items = JSON.parse(f.data.replace(/^﻿/, '')).items; } catch { throw new Error('taches-outlook.json illisible (JSON invalide) : tâches Outlook pas importées.'); }
+      if (!Array.isArray(items)) return false;
+      const st = await OneDrive.get(olStatePath());
+      let known = {};
+      try { known = JSON.parse(st.data.replace(/^﻿/, '')).tasks || {}; } catch { /* pas encore de fichier d'état */ }
+      const pr = v => [1, 2, 3, 4].includes(+v) ? +v : 0;
+      for (const it of items.slice(-500)) {
+        const id = olId(it?.id), title = olStr(it?.title, 200);
+        if (!id || !title) continue;
+        let t = task(id);
+        if (!t && !known[id]) {
+          const due = /^\d{4}-\d{2}-\d{2}$/.test(it.due) ? it.due : '', link = mailLink(it.webLink);
+          T.tasks.push(t = touch({ id, source: 'outlook', title, notes: olStr(it.notes, 4000), clientId: olClient(it), assigneeId: me().id, newFor: me().id,
+            createdBy: me().id, createdAt: olTime(it.createdAt), due, time: due && /^\d{2}:\d{2}$/.test(it.time) ? it.time : '', priority: pr(it.priority) || 3,
+            status: 'open', checklist: [], comments: [], entryIds: [],
+            mail: { from: olStr(it.from, 200), subject: olStr(it.subject, 300), link } }));
+          ch = true; created++;
+        }
+        if (!t || t.deleted) continue;
+        // Suite du fil : commentaires ajoutés par l'assistant (une fois chacun) ; la priorité ne peut que monter.
+        for (const c of Array.isArray(it.comments) ? it.comments.slice(-100) : []) {
+          const cid = olId(c?.id).replace(/^ol_/, 'olc_'), text = olStr(c?.text, 2000);
+          if (!cid || !text || (t.comments || []).some(x => x.id === cid)) continue;
+          t.comments = [...(t.comments || []), { id: cid, by: 'outlook', at: olTime(c.at), text }];
+          if (pr(c.priority) && pr(c.priority) < (t.priority || 4)) t.priority = pr(c.priority);
+          if (isOpen(t) && t.assigneeId) t.newFor = t.assigneeId;
+          touch(t); ch = true;
+        }
+      }
+      // État pour l'assistant et les autres appareils (écrit seulement s'il change).
+      const tasks = { ...known };
+      for (const t of T.tasks.filter(isOutlook)) tasks[t.id] = { status: t.deleted ? 'deleted' : isOpen(t) ? 'open' : 'done', title: t.title };
+      const body = JSON.stringify({ version: 1, tasks }, null, 1);
+      if (!st || hash(st.data) !== hash(body)) {
+        const r = await OneDrive.put(olStatePath(), body, { etag: st?.etag, type: 'application/json' });
+        if (!r.ok && ![409, 412].includes(r.status)) throw new Error(`OneDrive (${r.status}) : écriture de taches-outlook-etat.json impossible.`);
+      }
+      if (created) toast(`📧 ${created} tâche${created > 1 ? 's' : ''} importée${created > 1 ? 's' : ''} depuis Outlook`);
+    } catch (e) {
+      if (!(e instanceof OneDrive.NeedLogin)) olMsg = e.message;
+      return ch;
+    } finally { olBusy = false; }
+    olMsg = '';
+    return ch;
+  }
+  let olMsg = '';
+
   // Avec le serveur : les tâches sont envoyées et reçues par srvSync (app.js) ; ici, seulement les tâches récurrentes et l'affichage.
   async function serverSync() {
     await load();
-    const ch = ensureRecurring(), had = !!msg;
+    const hadOl = olMsg;
+    const ch = ensureRecurring() | await importOutlook(), had = !!msg || hadOl !== olMsg;
     if (ch) { await save(); scheduleSync(); }
     msg = '';
     // La page Tâches n'est redessinée que s'il y a du neuf ici : les tâches reçues du serveur le sont déjà par srvSync (app.js).
@@ -134,6 +223,8 @@ const Taches = (() => {
       let cur = await OneDrive.get(dataPath());
       if (cur) redraw = merge(JSON.parse(cur.data));
       redraw = ensureRecurring() || redraw;            // après la fusion : les tâches du mois déjà créées ailleurs sont connues
+      const hadOl = olMsg;
+      redraw = await importOutlook() || hadOl !== olMsg || redraw;   // tâches de l'assistant de boîte mail (écrites plus bas avec les autres)
       for (let i = 0; i < 3; i++) {
         const body = JSON.stringify({ version: 1, tasks: T.tasks });
         if (cur && hash(cur.data) === hash(body)) break;            // rien de neuf à écrire
@@ -230,20 +321,45 @@ const Taches = (() => {
     const d = t.due === today() ? "aujourd'hui" : t.due === addDays(1) ? 'demain' : new Date(t.due + 'T00:00').toLocaleDateString('fr-BE', { weekday: 'short', day: '2-digit', month: '2-digit' });
     return d + (t.time ? ' ' + t.time : '');
   };
+  // Report rapide (liste et groupe « En retard ») : liste déroulante du système, simple au doigt comme à la souris.
+  const POSTPONE = [['0', "Aujourd'hui"], ['1', 'Demain'], ['mon', 'Lundi prochain'], ['7', 'Dans 1 semaine'], ['-', 'Sans date']];
+  const postponeSel = (attr, title, first = '📅') => `<select class="tkpost" ${attr} title="${title}" aria-label="${title}"><option value="">${first}</option>
+    ${POSTPONE.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>`;
+  const postDate = k => k === '-' ? '' : addDays(k === 'mon' ? inDays(1) : +k);
   function taskLi(t) {
-    const cl = t.checklist || [], done = cl.filter(x => x.done).length;
+    const cl = t.checklist || [], done = cl.filter(x => x.done).length, mine = t.assigneeId === me().id;
+    const late = overdue(t) ? lateDays(t) : 0;
     const meta = [
       t.clientId ? esc(client(t.clientId).name) : '🔒 privé',
-      t.assigneeId ?`👤 ${esc(userName(t.assigneeId))}` : '<span class="pill warn">à prendre</span>',
-      t.due && `<span class="${overdue(t) ? 'late' : dueToday(t) ? 'now' : ''}">📅 ${esc(dueLabel(t))}</span>`,
+      t.assigneeId ? (mine ? '' : `👤 ${esc(userName(t.assigneeId))}`) : '<span class="pill warn">à prendre</span>',
+      t.due && (late ? `<span class="late">${esc(dueLabel(t))}</span> <span class="pill bad">${late} j de retard</span>`
+        : `<span class="${dueToday(t) ? 'now' : ''}">${esc(dueLabel(t))}</span>`),
+      isPlanned(t) && '🔁', isOutlook(t) && '📧 Outlook',
       cl.length && `☑ ${done}/${cl.length}`,
       t.comments?.length && `💬 ${t.comments.length}`,
-      t.entryIds?.length && `🔗 ${t.entryIds.length} interv.`
+      t.entryIds?.length && `🔗 ${t.entryIds.length}`
     ].filter(Boolean).join(' · ');
     return `<li class="tk p${t.priority || 4} ${isOpen(t) ? '' : 'done'} ${t.id === flashId ? 'flash' : ''}" data-tk="${t.id}">
-      <button class="tkdone" data-tkdone="${t.id}" title="${isOpen(t) ? 'Terminer' : 'Rouvrir'}" ${canEdit(t) ? '' : 'disabled'}>${isOpen(t) ? '' : '✓'}</button>
-      <div class="grow tap" style="flex:1;min-width:0"><div><strong>${esc(t.title)}</strong>${t.newFor === me().id ? ' <span class="pill ok">nouvelle</span>' : ''}</div>
-        <div class="small muted">${meta}</div></div></li>`;
+      <button class="tkdone" data-tkdone="${t.id}" title="${isOpen(t) ? 'Terminer' : 'Rouvrir'}" aria-label="${isOpen(t) ? 'Terminer' : 'Rouvrir'}" ${canEdit(t) ? '' : 'disabled'}>${isOpen(t) ? '' : '✓'}</button>
+      <div class="grow tap tkbody"><div class="tkt">${esc(t.title)}${t.newFor === me().id ? ' <span class="pill ok">nouvelle</span>' : ''}${t.priority && t.priority < 3 ? ` <span class="pill pr${t.priority}">P${t.priority}</span>` : ''}</div>
+        <div class="small muted">${meta}</div></div>
+      ${isOpen(t) && canEdit(t) ? postponeSel(`data-tkpost="${t.id}"`, 'Reporter') : ''}</li>`;
+  }
+  // Clics d'une liste de tâches (page Tâches et tableau de bord) : ouvrir, terminer / rouvrir, reporter.
+  function bindRows(el, after) {
+    $$('[data-tk] .tap', el).forEach(x => x.onclick = () => editTask(task(x.closest('[data-tk]').dataset.tk)));
+    $$('[data-tkdone]', el).forEach(b => b.onclick = async ev => { ev.stopPropagation(); const t = task(b.dataset.tkdone); await (isOpen(t) ? finish(t) : reopen(t)); after?.(); });
+    $$('[data-tkpost]', el).forEach(s => s.onchange = async () => {
+      if (!s.value) return;
+      await postpone([task(s.dataset.tkpost)], s.value); after?.();
+    });
+  }
+  async function postpone(ts, k) {
+    const due = postDate(k);
+    for (const t of ts) { t.due = due; if (!due) t.time = ''; touch(t); }
+    await save(); scheduleSync();
+    toast(`${ts.length > 1 ? ts.length + ' tâches reportées' : 'Tâche reportée'} · ${due ? frDate(due) : 'sans date'}`);
+    if (tab === 'taches') render();
   }
 
   const QUICK_HELP = "Exemples : « demain 14h », « lundi », « le 12 novembre », « p1 » ou « urgent », « @Geoffrey », « #Vedi ». Champ vide + Ajouter : fiche vierge.";
@@ -259,43 +375,84 @@ const Taches = (() => {
       o.unknownClient && `<span class="pill warn">client « ${esc(o.unknownClient)} » inconnu</span>`
     ].filter(Boolean).join(' · ');
   }
-  // Filtre où une tâche apparaît (après création : on y va, pour qu'elle ne semble pas perdue).
-  const FILTER_OF = x => !isOpen(x) ? 'done' : overdue(x) || dueToday(x) ? 'today' : x.due ? 'upcoming' : 'open';
-  const FILTER_NAME = { today: "Aujourd'hui et en retard", upcoming: 'À venir', open: 'Toutes', done: 'Terminées' };
+  // Filtres (puces) ; « Toutes » par défaut, le dernier choix est gardé sur l'appareil.
+  const filters = u => ({
+    me: ['Mes tâches', t => isOpen(t) && t.assigneeId === u.id],
+    open: ['Toutes', t => isOpen(t)],
+    free: ['À prendre', t => canTake(t)],
+    byme: ['Assignées par moi', t => isOpen(t) && t.createdBy === u.id && t.assigneeId !== u.id],
+    done: ['Terminées', t => !isOpen(t)]
+  });
+  const setFilter = k => { filter = k; ui.filter = k; saveUi(); };
+  // Après création : filtre qui montre la tâche (sinon elle semblait perdue).
+  const FILTER_OF = x => !isOpen(x) ? 'done' : (filters(me())[filter]?.[1](x) ? filter : 'open');
+  const FILTER_NAME = { me: 'Mes tâches', open: 'Toutes', free: 'À prendre', byme: 'Assignées par moi', done: 'Terminées' };
   let flashId = null;
+  // Groupes par échéance (maquette A, 13/11) ; les tâches planifiées et celles d'Outlook sont rangées à part, en dessous.
+  const GROUPS = [
+    ['late', 'En retard'], ['today', "Aujourd'hui"], ['tomorrow', 'Demain'], ['week', 'Cette semaine'], ['later', 'Plus tard'], ['nodate', 'Sans date'],
+    ['outlook', '📧 Depuis Outlook'], ['planned', '🔁 Planifiées · mises à jour serveur']
+  ];
+  const groupOf = t => isPlanned(t) ? 'planned' : isOutlook(t) ? 'outlook' : !t.due ? 'nodate' : overdue(t) ? 'late' : dueToday(t) ? 'today'
+    : t.due === addDays(1) ? 'tomorrow' : t.due <= addDays(7) ? 'week' : 'later';
+  const matches = t => !q || fold([t.title, t.notes, t.clientId && client(t.clientId).name, t.assigneeId && userName(t.assigneeId)].join(' ')).includes(fold(q));
 
   function view() {
     if (!T) { $('#view').innerHTML = '<div class="empty">Chargement…</div>'; load().then(() => tab === 'taches' && render()); return; }
-    const u = me(), all = alive().filter(visible);
-    const FILTERS = {
-      today: ["Aujourd'hui et en retard", t => isOpen(t) && (overdue(t) || dueToday(t))],
-      upcoming: ['À venir', t => isOpen(t) && t.due > today()],
-      free: ['À prendre', t => canTake(t)],
-      mine: ['Assignées par moi', t => isOpen(t) && t.createdBy === u.id && t.assigneeId !== u.id],
-      open: ['Toutes', t => isOpen(t)],
-      done: ['Terminées', t => !isOpen(t)]
-    };
-    const list = all.filter(FILTERS[filter][1]).filter(t => (!fClient || t.clientId === fClient) && (!fTech || (fTech === '-' ? !t.assigneeId : t.assigneeId === fTech)));
-    filter === 'done' ? list.sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0)) : list.sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
-    const shown = filter === 'done' ? list.slice(0, 100) : list;
-    const count = k => all.filter(FILTERS[k][1]).length;
+    const u = me(), all = alive().filter(visible), F = filters(u);
+    if (!F[filter]) setFilter('open');
+    const count = k => all.filter(F[k][1]).length;
+    const fOn = (fClient ? 1 : 0) + (fTech ? 1 : 0);
     $('#view').innerHTML = `
-      <div class="card">
-        <form id="tkQuick" class="row" style="margin:0"><input id="tkQ" class="grow" style="flex:1" placeholder="Nouvelle tâche : « Réinstaller PC Vedi demain 14h p1 @Geoffrey »" autocomplete="off">
-          ${mic('tkQ', true)}<button class="btn primary" type="submit">+ Ajouter</button></form>
+      <div class="card tkadd">
+        <form id="tkQuick" class="row" style="margin:0"><input id="tkQ" class="grow" style="flex:1" placeholder="Nouvelle tâche : « Réinstaller PC Vedi demain 14h p1 »" autocomplete="off">
+          ${mic('tkQ', true)}<button class="btn primary" type="submit" aria-label="Ajouter">＋</button></form>
         <p class="small muted" id="tkQPrev" style="margin:6px 0 0">${QUICK_HELP}</p>
       </div>
-      <div class="row" style="flex-wrap:wrap;margin-bottom:8px">${Object.entries(FILTERS).map(([k, [l]]) =>
-        `<button class="btn chip ${k === filter ? 'active' : ''}" data-tkf="${k}">${l}${k === 'done' ? '' : ` (${count(k)})`}</button>`).join('')}</div>
-      <div class="grid2" style="margin-bottom:10px">
+      <div class="tkchips">${Object.entries(F).map(([k, [l]]) =>
+        `<button class="btn chip ${k === filter ? 'active' : ''}" data-tkf="${k}">${l}${k === 'done' ? '' : ` <span class="n">${count(k)}</span>`}</button>`).join('')}</div>
+      <div class="tktools"><input id="tkS" type="search" placeholder="🔍 Rechercher : titre, client, technicien…" value="${esc(q)}" autocomplete="off">
+        <button class="btn chip ${fOn ? 'active' : ''}" type="button" id="tkFx">Filtres${fOn ? ` <span class="n">${fOn}</span>` : ''}</button></div>
+      <div class="grid2" id="tkFbox" style="margin-bottom:10px" ${fOn || ui.fbox ? '' : 'hidden'}>
         <select id="tkFC"><option value="">Tous les clients</option>${clientOptions(fClient)}</select>
         <select id="tkFT"><option value="">Tous les techniciens</option><option value="-" ${fTech === '-' ? 'selected' : ''}>À prendre</option>
           ${liveUsers().map(x => `<option value="${x.id}" ${x.id === fTech ? 'selected' : ''}>${esc(userLabel(x))}</option>`).join('')}</select>
       </div>
-      ${msg ? `<p class="small"><span class="pill warn">${esc(msg)}</span></p>` : ''}
-      <div class="card" style="padding:4px 14px">${shown.length ? `<ul class="list tklist">${shown.map(taskLi).join('')}</ul>`
-        : '<div class="empty">Aucune tâche ici.</div>'}</div>
-      ${list.length > shown.length ? `<p class="small muted">${shown.length} plus récentes sur ${list.length}.</p>` : ''}`;
+      ${msg || olMsg ? `<p class="small"><span class="pill warn">${esc(msg || olMsg)}</span></p>` : ''}
+      <div id="tkBody"></div>`;
+    // La liste seule est redessinée pendant la recherche (le champ garde le focus).
+    const drawBody = () => {
+      const list = all.filter(F[filter][1]).filter(t => (!fClient || t.clientId === fClient) && (!fTech || (fTech === '-' ? !t.assigneeId : t.assigneeId === fTech))).filter(matches);
+      const body = $('#tkBody');
+      if (filter === 'done') {
+        list.sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
+        const shown = list.slice(0, 100);
+        body.innerHTML = `<div class="card tkcard">${shown.length ? `<ul class="list tklist">${shown.map(taskLi).join('')}</ul>` : '<div class="empty">Aucune tâche terminée.</div>'}</div>
+          ${list.length > shown.length ? `<p class="small muted">${shown.length} plus récentes sur ${list.length}.</p>` : ''}`;
+      } else {
+        list.sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+        const by = {}; for (const t of list) (by[groupOf(t)] ||= []).push(t);
+        // « Depuis Outlook » : affiché vide pour un administrateur, en attendant l'import (assistant de boîte mail).
+        const showEmpty = k => k === 'outlook' && isAdmin() && !q && !fOn && filter !== 'free';
+        const secs = GROUPS.filter(([k]) => by[k]?.length || showEmpty(k)).map(([k, l]) => {
+          const ts = by[k] || [], closed = !!ui.closed?.[k], lateN = ts.filter(overdue).length;
+          const editable = ts.filter(canEdit);
+          return `<section class="tkgrp g-${k} ${closed ? 'closed' : ''}">
+            <div class="tkgh"><button type="button" class="tkgt" data-tkg="${k}" aria-expanded="${!closed}"><span class="arr">${closed ? '▸' : '▾'}</span> ${l} <span class="n">${ts.length}</span>
+              ${k === 'planned' && lateN ? ` <span class="pill bad">${lateN} en retard</span>` : ''}</button>
+              ${k === 'late' && editable.length > 1 ? postponeSel('data-tkpostall="late"', 'Tout reporter', 'Tout reporter…') : ''}</div>
+            ${closed ? '' : ts.length ? `<ul class="list tklist">${ts.map(taskLi).join('')}</ul>`
+              : '<p class="small muted tkempty">Les tâches créées par l\'assistant de boîte mail arrivent ici.</p>'}</section>`;
+        }).join('');
+        body.innerHTML = secs ? `<div class="card tkcard">${secs}</div>`
+          : `<div class="empty">${q || fOn ? 'Aucune tâche ne correspond.' : filter === 'me' ? 'Rien pour toi 👍' : 'Aucune tâche ici.'}</div>`;
+        $$('[data-tkg]', body).forEach(b => b.onclick = () => { ui.closed = { ...(ui.closed || {}), [b.dataset.tkg]: !ui.closed?.[b.dataset.tkg] }; saveUi(); drawBody(); });
+        const all2 = $('[data-tkpostall]', body);
+        if (all2) all2.onchange = () => all2.value && postpone((by.late || []).filter(canEdit), all2.value);
+      }
+      bindRows(body);
+    };
+    drawBody();
     // Champ vide : fiche vierge ; sinon fiche préremplie. Sous le champ, ce qui sera reconnu (mis à jour en tapant ou pendant la dictée).
     $('#tkQuick').onsubmit = ev => {
       ev.preventDefault();
@@ -303,11 +460,11 @@ const Taches = (() => {
       editTask(null, q ? parseQuick(q) : {});
     };
     $('#tkQ').oninput = () => { const q = $('#tkQ').value.trim(); $('#tkQPrev').innerHTML = q ? quickPreview(parseQuick(q)) : QUICK_HELP; };
-    $$('[data-tkf]').forEach(b => b.onclick = () => { filter = b.dataset.tkf; render(); });
+    $$('[data-tkf]').forEach(b => b.onclick = () => { setFilter(b.dataset.tkf); render(); });
+    $('#tkS').oninput = ev => { q = ev.target.value.trim(); drawBody(); };
+    $('#tkFx').onclick = () => { const b = $('#tkFbox'); b.hidden = !b.hidden; ui.fbox = !b.hidden; saveUi(); };
     $('#tkFC').onchange = ev => { fClient = ev.target.value; render(); };
     $('#tkFT').onchange = ev => { fTech = ev.target.value; render(); };
-    $$('[data-tk] .tap').forEach(el => el.onclick = () => editTask(task(el.closest('[data-tk]').dataset.tk)));
-    $$('[data-tkdone]').forEach(b => b.onclick = ev => { ev.stopPropagation(); const t = task(b.dataset.tkdone); isOpen(t) ? finish(t) : reopen(t); });
   }
 
   // --- fiche d'une tâche (création : preset = champs de l'ajout rapide) ---
@@ -323,6 +480,15 @@ const Taches = (() => {
         ${t.doneAt ? ` · terminée le ${frDate(isoDate(new Date(t.doneAt)))} par ${esc(userName(t.doneBy))}` : ''}</p>` : ''}
       ${t?.kind === 'upd' ? `<p class="small"><span class="pill">🔁 chaque mois, 2ᵉ mercredi</span> « Terminer » ouvre le forfait « Mise à jour serveur » du client ;
         une fois enregistré, la tâche est terminée.</p>` : ''}
+      ${t?.mail ? `<p class="small" style="margin-top:0"><span class="pill">📧 Outlook</span> ${esc([t.mail.from, t.mail.subject].filter(Boolean).join(' · '))}
+        ${mailLink(t.mail.link) ? ` · <a href="${esc(mailLink(t.mail.link))}" target="_blank" rel="noopener noreferrer">Ouvrir l'e-mail</a>` : ''}</p>` : ''}
+      ${t ? `<div class="tkacts">
+        ${isOpen(t) && edit ? '<button class="btn tkok" id="kDone" type="button">✓ Terminer</button>' : ''}
+        ${!isOpen(t) && edit ? '<button class="btn" id="kReopen" type="button">↺ Rouvrir</button>' : ''}
+        ${canTake(t) ? '<button class="btn" id="kTake" type="button">🙋 Me l\'attribuer</button>' : ''}
+        ${isOpen(t) && edit && t.kind !== 'upd' && !isPrivate(t) ? '<button class="btn" id="kTimer" type="button">▶ Chrono</button><button class="btn" id="kEntry" type="button">+ Intervention</button>' : ''}
+        ${isOpen(t) && edit ? `<button class="btn" id="kOut" type="button" title="Rendez-vous de 1 h à l'heure de la tâche, sinon journée entière">📅 ${t.outlook?.[me().id] ? 'Mettre à jour Outlook' : 'Agenda Outlook'}</button>` : ''}
+      </div>` : ''}
       <label>Titre</label><input id="kTitle" value="${esc(d.title)}" ${ro}>
       ${edit ? lblMic('Description', 'kNotes') : '<label>Description</label>'}<textarea id="kNotes" ${ro}>${esc(d.notes || '')}</textarea>
       <div class="grid2">
@@ -341,16 +507,13 @@ const Taches = (() => {
       <label>Points à cocher</label><ul class="list compact" id="kList"></ul>
       ${edit ? `<div class="row"><input id="kItem" class="grow" style="flex:1" placeholder="Ajouter un point…"><button class="btn" id="kAdd" type="button">+</button></div>` : ''}
       ${t ? `<label>Commentaires</label><ul class="list compact">${(t.comments || []).map(c => `<li><div class="grow" style="flex:1;min-width:0">${esc(c.text)}
-          <div class="small muted">${esc(userName(c.by))} · ${new Date(c.at).toLocaleString('fr-BE', { dateStyle: 'short', timeStyle: 'short' })}</div></div></li>`).join('') || '<li class="small muted">Aucun commentaire.</li>'}</ul>
+          <div class="small muted">${c.by === 'outlook' ? '📧 Assistant de boîte mail' : esc(userName(c.by))} ·${new Date(c.at).toLocaleString('fr-BE', { dateStyle: 'short', timeStyle: 'short' })}</div></div></li>`).join('') || '<li class="small muted">Aucun commentaire.</li>'}</ul>
         <div class="row"><input id="kCom" class="grow" style="flex:1" placeholder="Ajouter un commentaire…"><button class="btn" id="kComAdd" type="button">Ajouter</button></div>` : ''}
       ${entries.length ? `<label>Interventions liées</label><ul class="list compact">${entries.map(e => `<li class="tap" data-tke="${e.id}"><span class="grow">${frDate(e.date)} · ${esc(client(e.clientId).name)} · ${esc(user(techOf(e)).name)}</span>
           <span class="dur">${fmtDur(e.minutes)}</span></li>`).join('')}</ul>` : ''}
       <div class="actions" style="flex-wrap:wrap">
-        ${t && edit ? '<button class="btn danger" id="kDel" style="margin-right:auto">Supprimer</button>' : ''}
-        ${t && canTake(t) ? '<button class="btn" id="kTake">🙋 Me l\'attribuer</button>' : ''}
-        ${(!t || isOpen(t)) && edit ? `<button class="btn" id="kOut" title="Rendez-vous de 1 h à l'heure de la tâche, sinon journée entière">📅 ${t?.outlook?.[me().id] ? 'Mettre à jour Outlook' : 'Agenda Outlook'}</button>` : ''}
-        ${t && isOpen(t) && edit ? (t.kind === 'upd' || isPrivate(t) ? '' : '<button class="btn" id="kTimer">▶ Chrono</button><button class="btn" id="kEntry">+ Intervention</button>') + '<button class="btn" id="kDone">✓ Terminer</button>' : ''}
-        ${t && !isOpen(t) && edit ? '<button class="btn" id="kReopen">↺ Rouvrir</button>' : ''}
+        ${t && edit ? '<button class="btn danger" id="kDel" type="button" style="margin-right:auto">Supprimer</button>' : ''}
+        ${!t && edit ? `<button class="btn" id="kOut" type="button" title="Rendez-vous de 1 h à l'heure de la tâche, sinon journée entière" style="margin-right:auto">📅 Agenda Outlook</button>` : ''}
         <button class="btn" value="cancel">${edit ? 'Annuler' : 'Fermer'}</button>
         ${edit ? '<button class="btn primary" id="kSave">Enregistrer</button>' : ''}
       </div>`;
@@ -402,7 +565,7 @@ const Taches = (() => {
       if (!x) return;
       dlg.close();
       if (!t && tab === 'taches') {
-        filter = FILTER_OF(x); fClient = ''; fTech = ''; flashId = x.id;
+        setFilter(FILTER_OF(x)); fClient = ''; fTech = ''; q = ''; flashId = x.id;
         setTimeout(() => { flashId = null; }, 2500);
         toast(`Tâche ajoutée · ${FILTER_NAME[filter]}`);
       } else toast('Tâche enregistrée');
@@ -530,7 +693,7 @@ const Taches = (() => {
       <div class="txt"><strong>${[n.now && `${n.now} tâche(s) aujourd'hui`, n.late && `${n.late} en retard`].filter(Boolean).join(' · ') || 'Tâches'}</strong>
         <div class="small state">${[n.fresh && `${n.fresh} nouvelle(s) pour toi`, n.free && `${n.free} à prendre`].filter(Boolean).join(' · ') || 'rien de nouveau'}</div></div>
       <span class="go">›</span></div>`;
-    $('.notifbar', el).onclick = () => { filter = n.now || n.late ? 'today' : n.fresh ? 'open' : 'free'; tab = 'taches'; render(); };
+    $('.notifbar', el).onclick = () => { setFilter(n.now || n.late || n.fresh ? 'me' : 'free'); q = ''; tab = 'taches'; render(); };
   }
 
   // --- tableau de bord PC (app.js : <div id="tkDay">) : mes tâches du jour et en retard ---
@@ -541,12 +704,11 @@ const Taches = (() => {
     const free = ts.filter(canTake).length;
     el.innerHTML = (list.length ? `<ul class="list tklist">${list.map(taskLi).join('')}</ul>` : '<div class="empty">Rien d\'urgent 👍</div>')
       + (free ? `<p class="small" style="margin:6px 0 0"><a href="#" id="tkDayFree">${free} tâche(s) à prendre ›</a></p>` : '');
-    $$('[data-tk] .tap', el).forEach(x => x.onclick = () => editTask(task(x.closest('[data-tk]').dataset.tk)));
-    $$('[data-tkdone]', el).forEach(b => b.onclick = async ev => { ev.stopPropagation(); await finish(task(b.dataset.tkdone)); if (el.isConnected) dayList(el); });
-    if ($('#tkDayFree', el)) $('#tkDayFree', el).onclick = ev => { ev.preventDefault(); filter = 'free'; tab = 'taches'; render(); };
+    bindRows(el, () => el.isConnected && dayList(el));
+    if ($('#tkDayFree', el)) $('#tkDayFree', el).onclick = ev => { ev.preventDefault(); setFilter('free'); q = ''; tab = 'taches'; render(); };
   }
 
-  async function reset() { T = null; msg = ''; await idb('readwrite', s => s.delete('data')); }
+  async function reset() { T = null; msg = ''; olMsg = ''; olAt = 0; await idb('readwrite', s => s.delete('data')); }
   // Pour la synchro du serveur (app.js) : liste des tâches, puis enregistrement local après réception.
   async function raw() { return (await load()).tasks; }
   async function setRaw(tasks) { await load(); T.tasks = tasks; await save(); }

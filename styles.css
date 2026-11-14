@@ -56,9 +56,41 @@ body.locked .tabs, body.locked #syncPill { display: none; }
 @media (max-width: 359px) { .tabs .lg { display: none; } .tabs .sh { display: inline; } }
 
 /* Module Tâches : rond de la case « terminer » coloré selon la priorité. */
-.tklist li.tk { align-items: center; }
-.tkdone { flex: none; width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--muted); background: none; color: #fff;
-  font-size: 12px; line-height: 1; cursor: pointer; padding: 0; }
+.tklist li.tk { align-items: center; gap: 10px; }
+.tkdone { flex: none; width: 26px; height: 26px; border-radius: 50%; border: 2px solid var(--muted); background: none; color: #fff;
+  font-size: 13px; line-height: 1; cursor: pointer; padding: 0; position: relative; }
+.tkdone::after { content: ''; position: absolute; inset: -9px; }          /* zone de toucher 44 px */
+.tkdone:not(:disabled):hover { background: color-mix(in srgb, var(--ok) 15%, transparent); }
+.tkbody { flex: 1; min-width: 0; }
+.tkt { font-weight: 600; overflow-wrap: anywhere; }
+.pill.bad { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); font-weight: 600; }
+.pill.pr1 { background: #d1453b; color: #fff; } .pill.pr2 { background: #eb8909; color: #fff; }
+/* Page Tâches (maquette A) : puces de filtre, recherche, groupes par échéance repliables. */
+.tkchips { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; margin-bottom: 8px; scrollbar-width: none; }
+.tkchips::-webkit-scrollbar { display: none; }
+.tkchips .btn.chip { flex: none; }
+.btn.chip .n { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 2px; border-radius: 99px; background: var(--bg); font-size: 11px; font-weight: 600; }
+.tktools { display: flex; gap: 6px; align-items: center; margin-bottom: 10px; }
+.tktools input { flex: 1; min-width: 0; margin: 0; }
+#tkFbox[hidden] { display: none; }
+.tkcard { padding: 4px 14px 8px; }
+.tkgrp + .tkgrp { border-top: 1px solid var(--line); }
+.tkgh { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 10px; }
+.tkgt { background: none; border: 0; padding: 4px 0; color: var(--muted); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; text-align: left; }
+.tkgt .arr { display: inline-block; width: 12px; }
+.tkgt .n { font-weight: 400; }
+.g-late .tkgt { color: var(--danger); }
+.g-today .tkgt { color: var(--accent); }
+.tkgrp.closed { padding-bottom: 4px; }
+.tkempty { margin: 4px 0 8px 16px; }
+select.tkpost { flex: none; width: 40px; padding: 4px 2px; margin: 0; border: 1px solid transparent; background: none; color: var(--muted);
+  font-size: 15px; text-align: center; cursor: pointer; appearance: none; -webkit-appearance: none; border-radius: 8px; }
+select.tkpost:hover, select.tkpost:focus { border-color: var(--line); background: var(--bg); }
+.tkgh select.tkpost { width: auto; font-size: 12px; padding: 3px 8px; border-color: var(--line); }
+/* Fiche d'une tâche : actions en haut, enregistrer en bas. */
+.tkacts { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
+.tkacts .btn { padding: 6px 11px; font-size: 13px; }
+.tkacts .btn.tkok { background: var(--ok); border-color: var(--ok); color: #fff; font-weight: 600; }
 .tk.p1 .tkdone { border-color: #d1453b; } .tk.p2 .tkdone { border-color: #eb8909; } .tk.p3 .tkdone { border-color: #246fe0; }
 .tk.done .tkdone { background: var(--ok, #2e7d4f); border-color: var(--ok, #2e7d4f); }
 .tk.done strong { text-decoration: line-through; color: var(--muted); }
