@@ -1077,7 +1077,8 @@ function openForfait(entry, kind, pre = {}) {
   // (en modification, le client de l'intervention reste proposé).
   const month = today().slice(0, 7);
   const done = new Set(live().filter(e => e.forfait === kind && e.date.startsWith(month) && e.id !== entry?.id).map(e => e.clientId));
-  const clients = activeClients().filter(c => (c.server && !done.has(c.id)) || c.id === entry?.clientId);
+  // pre.clientId (onglet Serveurs, page du client) : ce client reste proposé même sans la case « Serveur(s) » (client avec un NAS seulement).
+  const clients = activeClients().filter(c => (c.server && !done.has(c.id)) || c.id === entry?.clientId || (c.id === pre.clientId && !done.has(c.id)));
   if (!clients.length) {
     const n = activeClients().filter(c => c.server).length;
     return alert(n ? `${label} : déjà encodée ce mois-ci pour les ${n} client(s) avec serveur.`
