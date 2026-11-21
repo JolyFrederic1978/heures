@@ -2231,8 +2231,12 @@ function srvCard() {
     el.innerHTML = `<p class="small"><span class="pill ok">✓ Données sur le serveur</span> ${esc(i.societe || '')} · ${esc(new URL(API_URL).host + new URL(API_URL).pathname)}</p>
       <p class="small muted">Sociétés, utilisateurs, clients, interventions, factures, tâches, chrono et réglages. OneDrive ne sert plus qu'aux fichiers (Excel, Prestations, Achats).
         Les anciens fichiers heures-data.json et taches-data.json restent dans OneDrive, sans être modifiés.</p>
-      <button class="btn" id="srvResync">Tout recharger depuis le serveur</button>`;
+      <button class="btn" id="srvResync">Tout recharger depuis le serveur</button>
+      ${ENV === 'prod' && i.platform ? `<div id="cdBox" style="margin-top:12px"><p class="small muted">Copie unique depuis le développement : clients manquants (et champs vides des clients existants),
+        sociétés partenaires avec leurs réglages et utilisateurs, serveurs supervisés (sans jeton : agents à réinstaller). Rien de rempli en production n'est écrasé.</p>
+        <button class="btn" id="cdPreview">Copier depuis le développement…</button> <div id="cdOut" class="small"></div></div>` : ''}`;
     $('#srvResync').onclick = () => { srvFull = true; sync(); toast('Synchro complète…'); };
+    if ($('#cdPreview')) $('#cdPreview').onclick = () => copieDev(false);
     return;
   }
   el.innerHTML = '<p class="small muted">Serveur…</p>';
@@ -2261,6 +2265,26 @@ function srvCard() {
       } catch (e) { out.innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
     };
   }).catch(e => { el.innerHTML = `<p class="small"><span class="pill warn">Serveur : ${esc(e.message)}</span></p>`; });
+}
+
+// Copie unique dev → prod (serveur/api/lib/copie-dev.php) : aperçu, puis copie après confirmation.
+async function copieDev(apply) {
+  const out = $('#cdOut');
+  out.textContent = apply ? 'Copie en cours…' : 'Lecture du développement…';
+  try {
+    const r = await Serveur.json('copie-dev', { method: 'POST', body: { apply } });
+    const s = r.summary, d = r.detail;
+    const ul = (t, a) => a.length ? `<details><summary>${esc(t)} (${a.length})</summary><ul>${a.map(x => `<li>${esc(x)}</li>`).join('')}</ul></details>` : '';
+    out.innerHTML = `<p><b>${apply ? '✓ Copie faite' : 'Aperçu (rien n\'est encore copié)'}</b> : ${s.clients.add} client(s) ajouté(s), ${s.clients.fill} complété(s) ;
+        ${s.societes.add + s.societes.fill} société(s), ${s.settings.add + s.settings.fill} réglage(s) de société, ${s.users.add + s.users.fill} utilisateur(s) ;
+        ${s.serveurs} serveur(s) / NAS, ${s.exports} export(s), ${s.rapports} rapport(s).</p>
+      ${ul('Clients ajoutés', d.clients.add)}${ul('Clients complétés', d.clients.fill)}${ul('Sociétés ajoutées', d.societes.add)}${ul('Sociétés complétées', d.societes.fill)}
+      ${ul('Réglages ajoutés', d.settings.add)}${ul('Réglages complétés', d.settings.fill)}${ul('Utilisateurs ajoutés', d.users.add)}${ul('Utilisateurs complétés', d.users.fill)}
+      ${ul('Serveurs ajoutés', d.serveurs.add)}${ul('Serveurs non copiés', d.serveurs.skip)}
+      ${apply ? '' : '<button class="btn primary" id="cdApply">Copier maintenant</button>'}`;
+    if (!apply) $('#cdApply').onclick = () => { if (confirm('Copier ces données du développement vers la production ?')) copieDev(true); };
+    else { srvFull = true; sync(); toast('Copie faite, synchro complète…'); }
+  } catch (e) { out.innerHTML = `<span class="pill warn">${esc(e.message)}</span>`; }
 }
 
 // Suppression "douce" : le client disparaît des listes, ses interventions gardent son nom dans l'historique.

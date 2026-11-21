@@ -161,7 +161,7 @@ const Supervision = (() => {
     const row = (l, v) => v === '' || v === null || v === undefined ? '' : `<tr><td>${esc(l)}</td><td>${v}</td></tr>`;
     const t = v => v ? esc(v) : '';
     const order = { Critique: 0, Attention: 1, Info: 2 };
-    const alerts = [...(m.alerts || [])].sort((a, b) => order[a.level] - order[b.level]);
+    const alerts = [...(m.alerts || [])].filter(a => !(s.data?.sppVersion && isSppAlert(a))).sort((a, b) => order[a.level] - order[b.level]);
     const vols = (m.volumes || []).map(v => {
       const used = v.sizeGB ? Math.max(0, Math.min(100, 100 - (v.freePct ?? 0))) : 0;
       const cls = v.freePct < 10 ? 'crit' : v.freePct < 20 ? 'warn' : 'ok';
@@ -189,6 +189,7 @@ const Supervision = (() => {
         ${row('Adresses IP', (sy.ips || []).map(esc).join(', '))}
         ${row('Dernier démarrage', sy.lastBoot ? esc(sy.lastBoot) + (sy.uptimeDays != null ? ' <span class="muted">(' + num(sy.uptimeDays, ' j') + ')</span>' : '') : '')}
         ${hw ? row('SPP HPE', t(hw.sppDetected)) + row('iLO', t(hw.iloVersion || hw.iloFirmware)) + row('RAID', t(hw.raid)) : ''}
+        ${sppRow(s, row)}
       </table>
       ${vols ? `<div class="supv-sec">Volumes</div>${vols}` : ''}
       ${upsBlock(m.ups)}
@@ -196,7 +197,9 @@ const Supervision = (() => {
       <table class="tot ro">
         ${row('Sauvegarde', (m.backup?.expected ? esc(m.backup.expected) + ' · ' : '') + (m.backup?.lastSuccess ? 'dernière faite le ' + esc(m.backup.lastSuccess) + (m.backup.withWarnings ? ' <span class="supv-old">(avec avertissements)</span>' : '') : (m.backup?.expected ? 'aucune réussie détectée' : '<span class="muted">pas de sauvegarde à contrôler sur ce serveur</span>')))}
         ${row('Mises à jour', (m.updates ? esc(m.updates.pending) + ' en attente' + (m.updates.rebootPending ? ' · <strong>redémarrage en attente</strong>' : '') + (m.updates.lastSecurityDate ? ' <span class="muted">· dernière cumulative ' + esc(m.updates.lastSecurityDate) + '</span>' : '') : ''))}
-        ${row('Antivirus', [m.av?.eset, m.av?.defender].filter(Boolean).map(esc).join(' · ') || '<span class="muted">non détecté</span>')}
+        ${row('Antivirus', ([m.av?.eset, m.av?.defender].filter(Boolean).map(esc).join(' · ') || '<span class="muted">non détecté</span>')
+          + (m.av?.conflict ? ' <span class="supv-old">· Defender encore actif à côté d\'ESET</span>' : ''))}
+        ${row('Clichés instantanés', vssTxt(m.vss, true))}
         ${row('Événements (31 j)', m.events ? `${num(m.events.sysCritical)} critiques · ${num(m.events.sysErrors)} erreurs système · ${num(m.events.appErrors)} erreurs applications · ${num(m.events.unexpectedShutdowns)} arrêt(s) inattendu(s)` : '')}
       </table>`}
       ${s.data?.description || (s.data?.roles || []).length ? `<p class="small muted" style="margin-top:10px">Fiche : ${esc([s.data.type, (s.data.roles || []).join(', '), s.data.description, s.data.backup].filter(Boolean).join(' · '))}</p>` : ''}
@@ -204,6 +207,7 @@ const Supervision = (() => {
         ${isAdmin() ? `<button type="button" class="btn danger" id="svDel" style="margin-right:auto">Retirer</button>
           <button type="button" class="btn" id="svEdit">Modifier</button>
           ${s.hasToken ? '<button type="button" class="btn" id="svRevoke">Révoquer le jeton</button>' : ''}
+          ${s.hasToken && s.lastSeen ? `<button type="button" class="btn${s.agentVersion && s.agentVersion !== S?.agentVersion ? ' primary' : ''}" id="svUpdate">Mettre à jour l'agent</button>` : ''}
           <button type="button" class="btn" id="svInstall">Installer l'agent</button>` : ''}
         ${r ? '<button type="button" class="btn" id="svExport">Export complet (JSON)</button>' : ''}
         <button class="btn" value="cancel">Fermer</button>
@@ -216,6 +220,7 @@ const Supervision = (() => {
     };
     if ($('#svEdit')) $('#svEdit').onclick = () => editServer(s);
     if ($('#svInstall')) $('#svInstall').onclick = () => installAgent(s);
+    if ($('#svUpdate')) $('#svUpdate').onclick = () => updateAgent(s);
     if ($('#svRevoke')) $('#svRevoke').onclick = () => confirmBox(`Révoquer le jeton de ${s.name} ?`,
       'L\'agent installé sur ce serveur ne pourra plus rien envoyer tant qu\'il n\'est pas réinstallé.', 'Révoquer', async () => {
         await call({ op: 'serveur.jeton', id, revoke: true }); toast('Jeton révoqué'); await load(true); openServer(id);
@@ -224,6 +229,27 @@ const Supervision = (() => {
       'Son jeton est supprimé. L\'agent reste sur le serveur tant qu\'il n\'est pas désinstallé (Desinstaller-LevelDesk.ps1), mais ses envois seront refusés.', 'Retirer', async () => {
         await call({ op: 'serveur.delete', id }); $('#dlg').close(); toast('Serveur retiré'); load(true);
       }, () => openServer(id));
+  }
+
+  // Clichés instantanés disque par disque (agent 1.4.0) : texte de la fiche (html = true) ou du rapport (texte brut).
+  function vssTxt(list, html) {
+    const L2 = (list || []).filter(v => v && v.drive && !(v.sizeGB != null && v.sizeGB < 5));
+    if (!L2.length) return '';
+    const w = t => html ? `<span class="supv-old">${esc(t)}</span>` : t;
+    return L2.map(v => {
+      const d = (html ? esc(v.drive) : v.drive);
+      if (!v.enabled) return `${d} ${w('désactivés')}`;
+      const last = v.newest ? `dernier ${frDate(String(v.newest).slice(0, 10)).slice(0, 5)}` : 'aucun cliché';
+      const old = !v.count || v.ageHours > 72;
+      return `${d} activés, ${v.count || 0} cliché(s), ` + (old ? w(last) : (html ? esc(last) : last));
+    }).join(html ? ' · ' : ', ');
+  }
+
+  // Support Pack HPE saisi dans la fiche du serveur (l'alerte « SPP non détectée » de l'agent est alors masquée).
+  function isSppAlert(a) { return a?.code === 'materiel.spp' || /SPP non détectée/i.test(String(a?.message || '')); }
+  function sppRow(s, row) {
+    const v = s.data?.sppVersion;
+    return v ? row('SPP HPE installé (saisi)', esc(v) + (s.data.sppDate ? ` <span class="muted">· le ${esc(frDate(s.data.sppDate))}</span>` : '')) : '';
   }
 
   // Onduleur (agent 1.3.1, PowerChute Serial Shutdown) : état de la batterie et besoin de la remplacer.
@@ -280,6 +306,10 @@ const Supervision = (() => {
       <label>Batterie de l'onduleur remplacée en <span class="small">(mois ; vide = date de fabrication de l'onduleur)</span></label>
       <input type="month" id="svUpsBat" value="${esc(d.upsBatteryDate || '')}">
       <p class="small muted" style="margin:4px 0 0">Prise en compte par l'agent à sa prochaine installation.</p>
+      <label>Dernier Support Pack HPE (SPP) installé <span class="small">(serveur physique HPE ; ex. 2026.07.00.00)</span></label>
+      <div class="row"><input id="svSpp" value="${esc(d.sppVersion || '')}" placeholder="2026.07.00.00" maxlength="13" inputmode="decimal" style="flex:1">
+        <input type="date" id="svSppDate" value="${esc(d.sppDate || '')}" title="Date d'installation" style="flex:1"></div>
+      <p class="small muted" style="margin:4px 0 0">Utilisé dans la fiche et le rapport de maintenance s'il est plus récent que la version détectée par l'agent.</p>
       <p class="small supv-old hidden" id="svErr"></p>
       <div class="actions"><button type="button" class="btn" id="svBack">${s ? 'Retour' : 'Annuler'}</button><button type="button" class="btn primary" id="svSave">Enregistrer</button></div>`);
     $('#svBack', f).onclick = () => s ? openServer(s.id) : $('#dlg').close();
@@ -287,13 +317,15 @@ const Supervision = (() => {
       const name = $('#svName', f).value.trim();
       const fail = t => { const p = $('#svErr', f); p.textContent = t; p.classList.remove('hidden'); };
       if (!/^[A-Za-z0-9_.-]{1,40}$/.test(name)) return fail('Nom invalide : lettres, chiffres, point, tiret, 40 caractères au plus, sans espace.');
+      const spp = $('#svSpp', f).value.trim();
+      if (spp && !/^20\d{2}\.\d{2}(\.\d{2}){0,2}$/.test(spp)) return fail('Support Pack : version au format 2026.07.00.00 (ou 2026.07).');
       ev.target.disabled = true;
       const id = s?.id || uid('sv').replace(/[^A-Za-z0-9_-]/g, '');
       try {
         await call({ op: 'serveur.save', id, clientId: $('#svClient', f).value, name, data: {
           type: $('#svType', f).value, roles: $$('[data-role]', f).filter(x => x.checked).map(x => x.dataset.role), description: $('#svDesc', f).value.trim(),
           lob: $('#svLob', f).value.split(',').map(x => x.trim()).filter(Boolean), backup: $('#svBackup', f).value, dateInstallation: $('#svDate', f).value,
-          upsBatteryDate: $('#svUpsBat', f).value } });
+          upsBatteryDate: $('#svUpsBat', f).value, sppVersion: spp, sppDate: spp ? $('#svSppDate', f).value : '' } });
         toast('Enregistré'); await load(true); openServer(id);
       } catch (e) { ev.target.disabled = false; fail(e.message); }
     };
@@ -403,7 +435,31 @@ const Supervision = (() => {
   // ---------- script d'installation de l'agent ----------
   // Même nom que celui donné par le serveur (lib/supervision.php, op serveur.installeur).
   const safeName = x => String(x).replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '') || 'x';
-  const installerName = s => `Installer-LevelDesk-${safeName(cname(s.clientId))}-${safeName(s.name)}.ps1`;
+  const installerName = (s, maj) => `${maj ? 'MettreAJour' : 'Installer'}-LevelDesk-${safeName(cname(s.clientId))}-${safeName(s.name)}.ps1`;
+
+  // Mise à jour (21/11) : fichier SANS jeton ; l'agent garde son adresse et son jeton, rien n'est changé sur le serveur LevelDesk.
+  function updateAgent(s) {
+    const f = dialog(`<h2>Mettre à jour l'agent de ${esc(s.name)}</h2>
+      <p>Installe la version <strong>${esc(S?.agentVersion || '')}</strong>${s.agentVersion ? ` (installée : ${esc(s.agentVersion)})` : ''}. Le jeton actuel est gardé : l'agent continue d'envoyer normalement.</p>
+      <ol class="small">
+        <li>Copier le fichier téléchargé sur le serveur (il ne contient <strong>pas</strong> de jeton).</li>
+        <li>Ouvrir PowerShell <strong>en tant qu'administrateur</strong>, aller dans le dossier du fichier et lancer :<br>
+          <code>powershell.exe -ExecutionPolicy Bypass -File .\\${esc(installerName(s, true))}</code></li>
+        <li>Attendre « Premier envoi : OK ».</li>
+      </ol>
+      <p class="small muted">Si l'agent installé envoie à une autre adresse (ex. l'ancien serveur de développement), le fichier s'arrête sans rien changer : utiliser alors « Installer l'agent ».</p>
+      <p class="small supv-old hidden" id="svErr"></p>
+      <div class="actions"><button type="button" class="btn" id="svBack">Retour</button><button type="button" class="btn primary" id="svGo">Télécharger le fichier de mise à jour</button></div>`);
+    $('#svBack', f).onclick = () => openServer(s.id);
+    $('#svGo', f).onclick = async ev => {
+      ev.target.disabled = true;
+      try {
+        const r = await call({ op: 'serveur.maj', id: s.id });
+        download(new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), r.content], { type: 'application/octet-stream' }), r.filename);
+        toast('Fichier téléchargé'); openServer(s.id);
+      } catch (e) { ev.target.disabled = false; const p = $('#svErr', f); p.textContent = e.message; p.classList.remove('hidden'); }
+    };
+  }
   function installAgent(s) {
     const f = dialog(`<h2>Installer l'agent sur ${esc(s.name)}</h2>
       <p>${s.hasToken ? '<strong>Un nouveau jeton sera créé</strong> : l\'agent déjà installé sur ce serveur cessera d\'envoyer tant qu\'il n\'est pas réinstallé avec ce nouveau fichier.'
@@ -582,7 +638,8 @@ const Supervision = (() => {
     const endDay = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59);
     srvs.forEach(s => { if (!obj(cur[s.name])) missing.push(`Pas d'export récent du serveur ${s.name} (agent installé ? dernier envoi ?)`); });
     for (const [n, e] of have) {
-      L(e.alerts).forEach(a => obj(a) && alerts.push({ level: String(a.level || 'Info'), category: String(a.category || ''), message: String(a.message || ''), action: String(a.action || ''), server: n }));
+      const sppSet = !!srvs.find(s => s.name === n)?.data?.sppVersion;
+      L(e.alerts).forEach(a => obj(a) && !(sppSet && isSppAlert(a)) && alerts.push({ level: String(a.level || 'Info'), category: String(a.category || ''), message: String(a.message || ''), action: String(a.action || ''), server: n }));
       L(e.checkErrors).forEach(ce => alerts.push({ level: 'Info', category: 'Script', server: n, message: `Contrôle « ${obj(ce)?.check ?? ce} » en erreur pendant la collecte`, action: 'Vérifier manuellement' }));
     }
     const alOf = (cats, server) => alerts.filter(a => cats.includes(a.category) && (!server || a.server === server));
@@ -632,7 +689,12 @@ const Supervision = (() => {
     usb.length || tgt.length ? todo('backup', 'backup_espace', 'Espace de stockage de sauvegarde disponible', usb.length ? 'Disque(s) USB : ' + usb.map(u => `${u.name} ${gb(u.sizeGB)}`).join(', ') : 'Cible : ' + tgt.join(' ; '), 'Espace libre / total du support de sauvegarde')
       : ask('backup', 'backup_espace', 'Espace de stockage de sauvegarde disponible', 'espace libre / total de la cible', 'Espace libre / total du support de sauvegarde');
     const sc = have.map(([n, e]) => [n, L(e.backup?.shadowCopies).filter(x => obj(x) && /:\\$/.test(String(x.volume || '')))]).filter(([, v]) => v.length);
-    if (sc.length) add('backup', 'backup_vss', 'Clichés instantanés (versions précédentes des fichiers)', 'OK',
+    // agent 1.4.0 : état activé / désactivé de chaque disque (disque de données désactivé ou sans cliché récent = Attention ; disque système ou hôte Hyper-V : simple mention)
+    const vv = have.map(([n, e]) => [n, e, L(e.backup?.vssVolumes).filter(v => obj(v) && v.drive && !(v.sizeGB != null && v.sizeGB < 5))]).filter(([, , v]) => v.length);
+    if (vv.length) {
+      const st = vv.some(([, e, v]) => v.some(x => (x.enabled ? (!x.count || x.ageHours > 72) : (x.drive !== 'C:' && !e.roles?.hyperV)))) ? 'Attention' : 'OK';
+      add('backup', 'backup_vss', 'Clichés instantanés (versions précédentes des fichiers)', st, vv.map(([n, , v]) => `${n} : ${vssTxt(v, false)}`).join(' ; '));
+    } else if (sc.length) add('backup', 'backup_vss', 'Clichés instantanés (versions précédentes des fichiers)', 'OK',
       sc.map(([n, v]) => `${n} : ` + v.map(x => `${String(x.volume).replace(/\\$/, '')} ${x.count} versions (dernière ${fd(x.newest, false)})`).join(', ')).join(' ; '));
 
     // mises à jour
@@ -663,14 +725,20 @@ const Supervision = (() => {
     const hw = obj(pe?.hardware) || {}, model = String(pe?.system?.model || '');
     const gen = [['gen12', /Gen\s?12/i], ['gen11', /Gen\s?11/i], ['gen10plus', /Gen\s?10\s?Plus/i], ['gen10', /Gen\s?10/i], ['gen9', /Gen\s?9/i]].find(([, re]) => re.test(model))?.[0];
     const latest = gen ? SPP[gen] : null;
-    let inst = hw.sppDetected ? (/20\d{2}\.\d{2}\.\d{2}\.\d{2}|20\d{2}\.\d{2}/.exec(hw.sppDetected) || [String(hw.sppDetected)])[0] : '';
+    const detected = hw.sppDetected ? (/20\d{2}\.\d{2}\.\d{2}\.\d{2}|20\d{2}\.\d{2}/.exec(hw.sppDetected) || [String(hw.sppDetected)])[0] : '';
+    // Support Pack saisi dans la fiche du serveur (installé à la main) : pris s'il est plus récent que celui que l'agent détecte.
+    const manual = String(phys[0]?.data?.sppVersion || ''), manualDate = String(phys[0]?.data?.sppDate || '');
+    const useManual = manual && (!detected || manual.slice(0, 7) > detected.slice(0, 7));
+    const inst = useManual ? manual : detected;
+    const instTxt = inst + (useManual && manualDate ? ` (installé le ${fd(manualDate)})` : '');
     const LS = 'Mises à jour des pilotes (drivers) — serveur physique';
-    if (phys.length && !pe) todo('maj', 'maj_spp', LS, '');
-    else if (phys.length && /HPE?|Hewlett/i.test(String(pe.system?.manufacturer || '') + model)) {
+    const isHpe = pe && /HPE?|Hewlett/i.test(String(pe.system?.manufacturer || '') + model);
+    if (phys.length && !pe && !manual) todo('maj', 'maj_spp', LS, '');
+    else if (phys.length && (isHpe || (!pe && manual))) {
       if (inst && latest && inst.slice(0, 7) < latest.slice(0, 7)) {
-        add('maj', 'maj_spp', LS, 'Attention', `Support Pack installé ${inst} – nouvelle version ${latest} disponible, installation proposée`);
+        add('maj', 'maj_spp', LS, 'Attention', `Support Pack installé ${instTxt} – nouvelle version ${latest} disponible, installation proposée`);
         actions.push(`Installer le Service Pack for ProLiant ${latest} sur ${physName} (installé : ${inst}) – prévoir un redémarrage`);
-      } else if (inst) add('maj', 'maj_spp', LS, 'OK', `Support Pack ${inst}` + (latest ? ' (dernière version)' : ''));
+      } else if (inst) add('maj', 'maj_spp', LS, 'OK', `Support Pack ${instTxt}` + (latest ? ' (dernière version)' : ''));
       else todo('maj', 'maj_spp', LS, `Version du Support Pack non détectée – dernière disponible : ${latest || '?'}`, `Version du Support Pack HPE installée sur ${physName} (iLO > Firmware & OS Software)`);
     }
     if (phys.length && pe) add('maj', 'maj_firmware', 'Mise à jour du firmware / BIOS — serveur physique', 'OK',
@@ -735,7 +803,8 @@ const Supervision = (() => {
     const avS = [], avC = [];
     for (const [n, e] of have) {
       const es = obj(e.security?.eset), de = obj(e.security?.defender);
-      if (es && es.service === 'Running') { avS.push('OK'); avC.push(`${n} : ESET actif`); }
+      if (es && es.service === 'Running' && de && de.realTime && de.mode === 'Normal') { avS.push('Attention'); avC.push(`${n} : ESET actif, mais Microsoft Defender encore actif`); }
+      else if (es && es.service === 'Running') { avS.push('OK'); avC.push(`${n} : ESET actif` + ('defenderService' in (e.security || {}) ? ' (Defender désactivé)' : '')); }
       else if (de && de.realTime && de.mode === 'Normal') { avS.push((+de.signatureAgeDays || 0) <= 3 ? 'OK' : 'Attention'); avC.push(`${n} : Defender actif`); }
       else { avS.push('Critique'); avC.push(`${n} : aucun antivirus actif détecté`); }
     }
